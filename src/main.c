@@ -1,4 +1,7 @@
 // Read C source, check its types, and write 65816 assembly
+#if defined(__linux__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -6,8 +9,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
 #include <sys/stat.h>
+#endif
+#ifdef __linux__
+#include <unistd.h>
 #endif
 #include "headers/preprocess.h"
 
@@ -245,7 +251,7 @@ static Type enum_specifier(Parser *p);
 static void structure_definition(Parser *p,Structure *record);
 static void free_expression(Expr *e);
 static void free_statements(Statement *s);
-static void error_at(Location at, const char *format, ...)
+static _Noreturn void error_at(Location at, const char *format, ...)
 {
     va_list args;
     fprintf(stderr, "%s:%d:%d: error: ", at.path, at.line, at.column);
@@ -778,6 +784,22 @@ static const char *default_include_directory(char *directory, size_t capacity)
             memcpy(directory, program, length);
             memcpy(directory + length, "/include", sizeof "/include");
             if (_stat(directory, &attributes) == 0 && (attributes.st_mode & _S_IFDIR))
+                return directory;
+        }
+    }
+#elif defined(__linux__)
+    char program[4096];
+    ssize_t count = readlink("/proc/self/exe", program, sizeof program - 1);
+    if (count > 0) {
+        const char *slash;
+        program[count] = 0;
+        slash = strrchr(program, '/');
+        if (slash && (size_t)(slash - program) + sizeof "/include" <= capacity) {
+            size_t length = (size_t)(slash - program);
+            struct stat attributes;
+            memcpy(directory, program, length);
+            memcpy(directory + length, "/include", sizeof "/include");
+            if (stat(directory, &attributes) == 0 && S_ISDIR(attributes.st_mode))
                 return directory;
         }
     }

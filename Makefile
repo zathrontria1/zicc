@@ -1,13 +1,28 @@
-# MSVC builds the compiler on Windows
-# Use a native Windows build of GNU Make
-PYTHON ?= python
+# MSVC builds the compiler on Windows. Use a native Windows build of GNU Make there
+# On Linux the host C compiler (CC, default cc) builds it instead
 BINARY64 ?= 0
 STACK_SIZE ?= 1024
 BINARY64_FLAGS := $(if $(filter 1,$(BINARY64)),--binary64)
 BINARY64_ASM := $(if $(filter 1,$(BINARY64)),-D ZICC_BINARY64=1)
+.DEFAULT_GOAL := all
+
+ifeq ($(OS),Windows_NT)
+PYTHON ?= python
+CC65_BIN ?= C:/bin/cc65/bin
+EXE := .exe
 SHELL := cmd.exe
 .SHELLFLAGS := /d /c
-.DEFAULT_GOAL := all
+ZICC := build\zicc.exe
+ROMTOOL := build\romtool.exe
+else
+PYTHON ?= python3
+# Default to the cc65 tools found on PATH
+CC65_BIN ?= $(or $(patsubst %/,%,$(dir $(shell which ca65 2>/dev/null))),/usr/bin)
+EXE :=
+ZICC := build/zicc
+ROMTOOL := build/romtool
+CFLAGS ?= -std=c17 -O2
+endif
 
 export ZICC_MAKE := $(MAKE_COMMAND)
 export PYTHON
@@ -18,12 +33,11 @@ ifeq ($(filter -j% --jobs%,$(MAKEFLAGS)),)
 MAKEFLAGS += -j$(shell $(PYTHON) -c "import os; print(max(4, (os.cpu_count() or 1) - 2))")
 endif
 
-CC65_BIN ?= C:/bin/cc65/bin
 export CC65_BIN
 NATIVE_ROOT := $(shell $(PYTHON) -c "from pathlib import Path; print(Path.cwd().as_posix())")
-CA65 := $(CC65_BIN)/ca65.exe
-LD65 := $(CC65_BIN)/ld65.exe
-AR65 := $(CC65_BIN)/ar65.exe
+CA65 := $(CC65_BIN)/ca65$(EXE)
+LD65 := $(CC65_BIN)/ld65$(EXE)
+AR65 := $(CC65_BIN)/ar65$(EXE)
 TITLE_FILE ?= tests/title.txt
 
 STANDALONE_SAMPLES := insertion_sort string_processing integer_operations function_calls structures_and_tables loop_access
@@ -32,15 +46,15 @@ SPLIT_ROMS := build/integer_operations_runtime.sfc build/structures_and_tables_r
 BIN_HEADERS := $(patsubst include/%,bin/include/%,$(wildcard include/*.h))
 
 .PHONY: all samples smoke check minimal prompt FORCE
-all: bin/zicc.exe bin/romtool.exe bin/libc.a $(BIN_HEADERS)
+all: bin/zicc$(EXE) bin/romtool$(EXE) bin/libc.a $(BIN_HEADERS)
 
 samples: minimal prompt $(STANDALONE_ROMS) $(SPLIT_ROMS) build/empty-template.sfc
 
 bin bin/include:
 	$(PYTHON) -c "from pathlib import Path; Path('$@').mkdir(parents=True, exist_ok=True)"
 
-bin/zicc.exe bin/romtool.exe bin/libc.a: bin/%: build/% | bin
-	$(PYTHON) -c "from shutil import copyfile; copyfile('$<', '$@')"
+bin/zicc$(EXE) bin/romtool$(EXE) bin/libc.a: bin/%: build/% | bin
+	$(PYTHON) -c "from shutil import copy; copy('$<', '$@')"
 
 $(BIN_HEADERS): bin/include/%: include/% | bin/include
 	$(PYTHON) -c "from shutil import copyfile; copyfile('$<', '$@')"
@@ -48,14 +62,24 @@ $(BIN_HEADERS): bin/include/%: include/% | bin/include
 build:
 	$(PYTHON) -c "from pathlib import Path; Path('$@').mkdir(exist_ok=True)"
 
-build/romtool.exe: tools/romtool.c tools/build-romtool.cmd | build
+ZICC_SOURCES := $(wildcard src/*.c src/*.inc src/codegen/*.inc src/headers/*.h)
+
+ifeq ($(OS),Windows_NT)
+build/romtool$(EXE): tools/romtool.c tools/build-romtool.cmd | build
 	tools\build-romtool.cmd
 
-build/zicc.exe: $(wildcard src/*.c src/*.inc src/codegen/*.inc src/headers/*.h) tools/build-compiler.cmd tools/msvc.cmd | build
+build/zicc$(EXE): $(ZICC_SOURCES) tools/build-compiler.cmd tools/msvc.cmd | build
 	tools\build-compiler.cmd
+else
+build/romtool: tools/romtool.c | build
+	$(CC) $(CFLAGS) -o "$@" tools/romtool.c
 
-build/minimal.s: samples/minimal.c build/zicc.exe
-	build\zicc.exe "$<" -o "$@" $(BINARY64_FLAGS)
+build/zicc: $(ZICC_SOURCES) | build
+	$(CC) $(CFLAGS) -o "$@" src/main.c src/preprocess.c src/relax.c
+endif
+
+build/minimal.s: samples/minimal.c build/zicc$(EXE)
+	$(ZICC) "$<" -o "$@" $(BINARY64_FLAGS)
 
 build/minimal.o: build/minimal.s
 	"$(CA65)" --cpu 65816 -g -o "$@" "$(NATIVE_ROOT)/$<"
@@ -83,16 +107,16 @@ build/nmi.o: build/interrupt-nmi.o build/interrupt-clock.o build/interrupt-rate.
 build/minimal.raw: build/startup.o build/minimal.o build/nmi.o build/vectors.o build/rom_header.o linker/lorom32.cfg tools/build-rom.py FORCE
 	$(PYTHON) tools/build-rom.py --stack-size "$(STACK_SIZE)" $(BINARY64_FLAGS) samples/minimal.c -o "$@"
 
-build/minimal.sfc: build/minimal.raw build/romtool.exe $(TITLE_FILE) FORCE
-	build\romtool.exe "$<" "$@" "$(TITLE_FILE)"
+build/minimal.sfc: build/minimal.raw build/romtool$(EXE) $(TITLE_FILE) FORCE
+	$(ROMTOOL) "$<" "$@" "$(TITLE_FILE)"
 
-build/minimal.sym: build/minimal.raw tools/labels-to-sym.ps1 tools/debug_symbols.py
-	powershell -NoProfile -ExecutionPolicy Bypass -File tools/labels-to-sym.ps1 -InputPath build/minimal.labels -OutputPath "$@"
+build/minimal.sym: build/minimal.raw tools/debug_symbols.py
+	$(PYTHON) tools/debug_symbols.py build/minimal.labels "$@"
 
 minimal: build/minimal.sfc build/minimal.sym
 
-build/prompt.s: samples/prompt.c include/stdio.h build/zicc.exe
-	build\zicc.exe "$<" -o "$@" $(BINARY64_FLAGS) -I include
+build/prompt.s: samples/prompt.c include/stdio.h build/zicc$(EXE)
+	$(ZICC) "$<" -o "$@" $(BINARY64_FLAGS) -I include
 
 build/prompt.o: build/prompt.s
 	"$(CA65)" --cpu 65816 -g -o "$@" "$(NATIVE_ROOT)/$<"
@@ -109,31 +133,31 @@ build/console.o: runtime/console.s assets/console/ascii8x8.1bpp assets/console/p
 build/prompt.raw: build/prompt_startup.o build/prompt.o build/console.o build/nmi.o build/vectors.o build/rom_header.o linker/lorom32.cfg tools/build-rom.py FORCE
 	$(PYTHON) tools/build-rom.py --stack-size "$(STACK_SIZE)" $(BINARY64_FLAGS) samples/prompt.c --console -o "$@"
 
-build/prompt.sfc: build/prompt.raw build/romtool.exe $(TITLE_FILE) FORCE
-	build\romtool.exe "$<" "$@" "$(TITLE_FILE)"
+build/prompt.sfc: build/prompt.raw build/romtool$(EXE) $(TITLE_FILE) FORCE
+	$(ROMTOOL) "$<" "$@" "$(TITLE_FILE)"
 
-build/prompt.sym: build/prompt.raw tools/labels-to-sym.ps1 tools/debug_symbols.py
-	powershell -NoProfile -ExecutionPolicy Bypass -File tools/labels-to-sym.ps1 -InputPath build/prompt.labels -OutputPath "$@"
+build/prompt.sym: build/prompt.raw tools/debug_symbols.py
+	$(PYTHON) tools/debug_symbols.py build/prompt.labels "$@"
 
 prompt: build/prompt.sfc build/prompt.sym
 
-$(STANDALONE_ROMS:.sfc=.raw): build/%.raw: samples/%.c build/zicc.exe tools/build-rom.py FORCE
+$(STANDALONE_ROMS:.sfc=.raw): build/%.raw: samples/%.c build/zicc$(EXE) tools/build-rom.py FORCE
 	$(PYTHON) tools/build-rom.py --stack-size "$(STACK_SIZE)" $(BINARY64_FLAGS) "$<" -o "$@"
 
-build/integer_operations_runtime.raw: samples/integer_operations_runtime.c samples/integer_kernels.c build/zicc.exe tools/build-rom.py FORCE
+build/integer_operations_runtime.raw: samples/integer_operations_runtime.c samples/integer_kernels.c build/zicc$(EXE) tools/build-rom.py FORCE
 	$(PYTHON) tools/build-rom.py --stack-size "$(STACK_SIZE)" $(BINARY64_FLAGS) $(filter %.c,$^) -o "$@"
 
-build/structures_and_tables_runtime.raw: samples/structures_and_tables_runtime.c samples/inventory_kernels.c samples/inventory_runtime.h build/zicc.exe tools/build-rom.py FORCE
+build/structures_and_tables_runtime.raw: samples/structures_and_tables_runtime.c samples/inventory_kernels.c samples/inventory_runtime.h build/zicc$(EXE) tools/build-rom.py FORCE
 	$(PYTHON) tools/build-rom.py --stack-size "$(STACK_SIZE)" $(BINARY64_FLAGS) $(filter %.c,$^) -o "$@"
 
-build/empty-template.raw: samples/empty-template/main.c samples/empty-template/snes_regs.h build/zicc.exe tools/build-rom.py FORCE
+build/empty-template.raw: samples/empty-template/main.c samples/empty-template/snes_regs.h build/zicc$(EXE) tools/build-rom.py FORCE
 	$(PYTHON) tools/build-rom.py --stack-size "$(STACK_SIZE)" $(BINARY64_FLAGS) "$<" -o "$@"
 
-build/empty-template.sfc: build/empty-template.raw build/romtool.exe samples/empty-template/rom-title.txt
-	build\romtool.exe "$<" "$@" samples/empty-template/rom-title.txt
+build/empty-template.sfc: build/empty-template.raw build/romtool$(EXE) samples/empty-template/rom-title.txt
+	$(ROMTOOL) "$<" "$@" samples/empty-template/rom-title.txt
 
-$(STANDALONE_ROMS) $(SPLIT_ROMS): build/%.sfc: build/%.raw build/romtool.exe $(TITLE_FILE)
-	build\romtool.exe "$<" "$@" "$(TITLE_FILE)"
+$(STANDALONE_ROMS) $(SPLIT_ROMS): build/%.sfc: build/%.raw build/romtool$(EXE) $(TITLE_FILE)
+	$(ROMTOOL) "$<" "$@" "$(TITLE_FILE)"
 
 build/link_smoke.o: tests/link_smoke.s | build
 	"$(CA65)" --cpu 65816 -g -o "$@" "$(NATIVE_ROOT)/$<"
@@ -148,8 +172,8 @@ build/link_smoke.raw: build/link_smoke.o build/rom_header.o build/vectors.o link
 	$(PYTHON) tools/link-runtime-ram.py -C linker/lorom32.cfg -D "__STACK_SIZE__=$(STACK_SIZE)" -m build/link_smoke.map --dbgfile build/link_smoke.dbg -Ln build/link_smoke.labels -o "$@" build/link_smoke.o build/rom_header.o build/vectors.o
 
 # Write the title again each time so a new TITLE_FILE takes effect
-build/link_smoke.sfc: build/link_smoke.raw build/romtool.exe $(TITLE_FILE) FORCE
-	build\romtool.exe build/link_smoke.raw "$@" "$(TITLE_FILE)"
+build/link_smoke.sfc: build/link_smoke.raw build/romtool$(EXE) $(TITLE_FILE) FORCE
+	$(ROMTOOL) build/link_smoke.raw "$@" "$(TITLE_FILE)"
 
 smoke: build/link_smoke.sfc
 
@@ -162,8 +186,13 @@ CHECK_OUTPUT ?=
 CHECK_NO_CACHE ?=
 CHECK_CHANGED ?=
 .PHONY: check-prerequisites check-suites check-changed
+ifeq ($(OS),Windows_NT)
 check:
 	+tools\check.cmd
+else
+check:
+	@echo "make check needs Windows (MSVC, PowerShell and Mesen)" >&2; exit 1
+endif
 check-changed:
 	+$(MAKE) --no-print-directory check CHECK_CHANGED=1
 
@@ -228,7 +257,7 @@ build/ieee_engine.o: $(IEEE32_ENGINE_OBJS)
 	$(PYTHON) -c "from pathlib import Path; Path('$@').unlink(missing_ok=True)"
 	"$(AR65)" a "$@" $^
 
-build/tables.o: runtime/ieee32/tables.s
+build/tables.o: runtime/ieee32/tables.s | build
 	"$(CA65)" --cpu 65816 -g -o "$@" "$(NATIVE_ROOT)/$<"
 
 build/float_console.o: runtime/console.s assets/console/ascii8x8.1bpp assets/console/palette.bgr555 build/float-abi
@@ -271,8 +300,8 @@ build/libc-new:
 build/libc-new/%.o: runtime/%.s | build/libc-new
 	"$(CA65)" --cpu 65816 -g -I "$(NATIVE_ROOT)/runtime" -o "$@" "$(NATIVE_ROOT)/$<"
 
-build/libc-new/far-memory.o: build/libc-new/%.o: runtime/%.c build/zicc.exe include/string.h | build/libc-new
-	build\zicc.exe "$<" -o "$(@:.o=.s)" -I include
+build/libc-new/far-memory.o: build/libc-new/%.o: runtime/%.c build/zicc$(EXE) include/string.h | build/libc-new
+	$(ZICC) "$<" -o "$(@:.o=.s)" -I include
 	"$(CA65)" --cpu 65816 -g -o "$@" "$(NATIVE_ROOT)/$(@:.o=.s)"
 
 build/libc-new/strings-%.o: runtime/strings/%.s runtime/strings/common.inc | build/libc-new

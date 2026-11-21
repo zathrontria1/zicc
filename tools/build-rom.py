@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,9 @@ import interrupt_addressing
 import accumulator_width
 
 ROOT = Path(__file__).resolve().parents[1]
-CC65 = Path(os.environ.get('CC65_BIN', 'C:/bin/cc65/bin'))
+EXE = '.exe' if os.name == 'nt' else ''
+CC65 = Path(os.environ.get('CC65_BIN') or ('C:/bin/cc65/bin' if os.name == 'nt' else
+                                           Path(shutil.which('ca65') or '/usr/bin/ca65').parent))
 RAM = {'BSS', 'ZEROPAGE', 'DP_SCRATCH', 'LORAM_BSS'} | set(RUNTIME_RAM)
 INITIALIZED = {'DATA', 'LORAM_DATA'}
 FIXED = {'VECTOR_STUBS', 'HEADER', 'VECTORS'}
@@ -68,7 +71,7 @@ class BuildTranscript:
 
 def run(command, log=None):
     p = subprocess.run(list(map(str, command)), cwd=ROOT, capture_output=True, text=True,
-                       creationflags=subprocess.CREATE_NO_WINDOW)
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     diagnostic = subprocess.list2cmdline(list(map(str, command))) + '\n' + p.stdout + p.stderr
     if log is not None:
         log.write(diagnostic)
@@ -95,8 +98,8 @@ def compiler_executable():
     override = os.environ.get('ZICC_COMPILER')
     if override:
         return Path(override).resolve()
-    local = ROOT / 'build/zicc.exe'
-    return local if local.is_file() else ROOT / 'bin/zicc.exe'
+    local = ROOT / f'build/zicc{EXE}'
+    return local if local.is_file() else ROOT / f'bin/zicc{EXE}'
 
 
 def compile_unit(source, asm, flags, cache_dir, stage, show, log, *, track_dependencies=False):
@@ -404,7 +407,7 @@ def config(units, placements, banks, nmi_parts, runtime_ram=None, near_objects=(
 
 
 def inspect(obj, log):
-    dump = run([CC65 / 'od65.exe', '--dump-segments', '--dump-imports', '--dump-exports', obj], log)
+    dump = run([CC65 / f'od65{EXE}', '--dump-segments', '--dump-imports', '--dump-exports', obj], log)
     segment_text, rest = dump.split('  Imports:', 1)
     imports, exports = rest.split('  Exports:', 1)
     segs = [(n, int(z), int(a)) for n, z, a in re.findall(r'Name:\s*"([^"]+)"\s+Flags:\s+\d+\s+Size:\s+(\d+)\s+Alignment:\s+(\d+)', segment_text)]
@@ -412,7 +415,7 @@ def inspect(obj, log):
 
 
 def assemble_object(source, asm, obj, text, flags, cacheable, log):
-    assembler = CC65 / 'ca65.exe'
+    assembler = CC65 / f'ca65{EXE}'
     options = ['--cpu', '65816', '-g', '-I', ROOT, '-I', source.parent, *flags]
     entry = None
     cache_directory = os.environ.get('ZICC_RUNTIME_OBJECT_CACHE_DIR')
@@ -421,7 +424,7 @@ def assemble_object(source, asm, obj, text, flags, cacheable, log):
             and os.environ.get('ZICC_RUNTIME_OBJECT_CACHE', '1') != '0'
             and not re.search(r'\.(?:include|incbin)\b', text, re.I)):
         key = [1, text, str(assembler.resolve()), file_sha256(assembler),
-               file_sha256(CC65 / 'od65.exe'), list(map(str, options))]
+               file_sha256(CC65 / f'od65{EXE}'), list(map(str, options))]
         digest = hashlib.sha256(json.dumps(key).encode()).hexdigest()
         directory = Path(cache_directory or ROOT / 'build/runtime-object-cache')
         entry = directory / digest[:2] / (digest + '.json')
@@ -768,7 +771,7 @@ def assemble_ram_initializer(directory, runs, runtime_segments, log, variant="",
         lines.extend((f'.segment "{wram.TAIL}"', '    .res 1'))
     save(asm, '\n'.join(lines) + '\n')
     obj = asm.with_suffix('.o')
-    run([CC65/'ca65.exe', '--cpu', '65816', '-g', '-I', ROOT, '-o', obj, asm], log)
+    run([CC65/f'ca65{EXE}', '--cpu', '65816', '-g', '-I', ROOT, '-o', obj, asm], log)
     return obj
 
 
@@ -879,7 +882,7 @@ def resolve_objects(objects, mandatory, metadata, directory, stage, runtime_symb
                                f'    {call}\n{result_cleanup}')
                     text, descriptions = transform(adapter, ident, owner, stage, runtime_symbols)
                     save(asm, text)
-                    run([CC65/'ca65.exe', '--cpu', '65816', '-g', '-o', obj, asm], log)
+                    run([CC65/f'ca65{EXE}', '--cpu', '65816', '-g', '-o', obj, asm], log)
                     segs, imports, exports = inspect(obj, log)
                     provider = dict(path=obj, source=asm, owner=owner, segments=segs,
                                     imports=imports, exports=exports, resources=set(),
@@ -1178,7 +1181,7 @@ def build_image(args, output, log):
                             break
                         save(asm, updated)
                         try:
-                            run([CC65/'ca65.exe', '--cpu', '65816', '-g', '-I', ROOT, '-I', o['source'].parent,
+                            run([CC65/f'ca65{EXE}', '--cpu', '65816', '-g', '-I', ROOT, '-I', o['source'].parent,
                                  *o['flags'], '-o', candidate, asm], log)
                         except RuntimeError as error:
                             if 'Range error' not in str(error):
@@ -1265,7 +1268,7 @@ def build_image(args, output, log):
             temp = attempt/'image.raw'
             debug = output.with_suffix('.dbg')
             log.keep_assembly.update(o['path'].with_suffix('.s') for o in selected)
-            run([CC65/'ld65.exe', '-C', cfg, '-m', output.with_suffix('.map'), '--dbgfile', debug,
+            run([CC65/f'ld65{EXE}', '-C', cfg, '-m', output.with_suffix('.map'), '--dbgfile', debug,
                  '-Ln', output.with_suffix('.labels'), '-o', temp, *[o['path'] for o in selected]], log)
             relocate_debug_sources(debug, selected)
             map_text = output.with_suffix('.map').read_text()
@@ -1315,7 +1318,7 @@ def build_image(args, output, log):
                                              for o in selected},
                             sources={str(o['source'].relative_to(ROOT) if o['source'].is_relative_to(ROOT) else o['source']):hashlib.sha256(o['source'].read_bytes()).hexdigest() for o in selected},
                             resources={name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in sorted(resources)},
-                            tools={name:hashlib.sha256((CC65/name).read_bytes()).hexdigest() for name in ['ca65.exe','ld65.exe','od65.exe']},
+                            tools={name:hashlib.sha256((CC65/name).read_bytes()).hexdigest() for name in [f'ca65{EXE}',f'ld65{EXE}',f'od65{EXE}']},
                             compiler_sha256=file_sha256(compiler_executable()),
                             source_lto=args.lto, lto_sources={str(p.resolve()):hashlib.sha256(p.read_bytes()).hexdigest() for p in args.sources} if args.lto else {})
             if expanded:

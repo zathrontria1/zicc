@@ -17,7 +17,7 @@ def collect(labels):
         source = Path(filename)
         if not source.is_absolute():
             source = Path.cwd() / source
-        text = source.read_text()
+        text = source.read_text(errors='replace')
         if '; ABI: near7e-far24pad32' in text:
             source_names.update(re.findall(r'^; debug symbol (\S+) (\S+)$', text, re.M))
         else:

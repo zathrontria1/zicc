@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from runtime_ram import RUNTIME_RAM, backfill, LOW
@@ -17,7 +18,9 @@ import application_wram as wram
 import cartridge_sram
 
 ROOT=Path(__file__).resolve().parents[1]
-CC65=Path(os.environ.get('CC65_BIN','C:/bin/cc65/bin'))
+EXE = '.exe' if os.name == 'nt' else ''
+CC65 = Path(os.environ.get('CC65_BIN') or ('C:/bin/cc65/bin' if os.name == 'nt' else
+                                           Path(shutil.which('ca65') or '/usr/bin/ca65').parent))
 ROM_AREA=re.compile(r'^\s*(ROM(?:_DATA|[0-9A-F]{2})?):[^;]*\bfile\s*=\s*%O[^;]*;', re.M)
 INIT='ZWRAM_INIT'
 
@@ -116,7 +119,7 @@ def input_files(args):
 
 
 def inspect(path, evidence):
-    dump = run([CC65/'od65.exe', '--dump-segments', path], evidence).stdout
+    dump = run([CC65/f'od65{EXE}', '--dump-segments', path], evidence).stdout
     return [(name, int(size), int(alignment)) for name, size, alignment in
             re.findall(r'Name:\s*"([^"]+)"\s+Flags:\s+\d+\s+Size:\s+(\d+)\s+Alignment:\s+(\d+)', dump)]
 
@@ -135,7 +138,7 @@ def annotated_segments(probe, evidence):
         if b'ZWRAM_' not in data and b'ZSRAM_' not in data:
             continue
         if data[:4] == b'naUz':
-            members = run([CC65/'ar65.exe', 'l', path], log).stdout.splitlines()
+            members = run([CC65/f'ar65{EXE}', 'l', path], log).stdout.splitlines()
             members = [m for m in members if Path(m).name == m and m not in {'.', '..'}]
             if not members:
                 continue
@@ -143,7 +146,7 @@ def annotated_segments(probe, evidence):
             directory.mkdir()
             # Extract individually to stay within the Windows command length limit
             for member in members:
-                run([CC65/'ar65.exe', 'x', path, member], log, cwd=directory)
+                run([CC65/f'ar65{EXE}', 'x', path, member], log, cwd=directory)
                 candidate = directory/member
                 data = candidate.read_bytes()
                 if b'ZWRAM_' in data or b'ZSRAM_' in data:
@@ -191,7 +194,7 @@ def expanded_config(original, runtime, expanded, evidence, probe_labels, rom_hin
     asm = evidence/'wram-init.s'
     asm.write_text('\n'.join(lines)+'\n')
     obj = asm.with_suffix('.o')
-    run([CC65/'ca65.exe', '--cpu', '65816', '-I', ROOT, '-g', '-o', obj, asm], evidence/'link.log')
+    run([CC65/f'ca65{EXE}', '--cpu', '65816', '-I', ROOT, '-g', '-o', obj, asm], evidence/'link.log')
     init_size = next(size for name,size,_ in inspect(obj,evidence/'link.log') if name == INIT)
     windows = {}
     for match in ROM_AREA.finditer(original):
@@ -260,7 +263,7 @@ def main():
     while index<len(args):
         if args[index] in output_options:index+=2
         else:probe.append(args[index]);index+=1
-    ld65=CC65/'ld65.exe'
+    ld65=CC65/f'ld65{EXE}'
     names=annotated_segments(probe,evidence)
     probe_cfg.write_text(probe_config(original,names,sram) if names else config(original,sram=sram))
     probe_map=evidence/'probe.map'
