@@ -44,17 +44,13 @@ project guides use `make` for the same native Windows build of GNU Make.
 ### Linux
 
 On Linux, install GNU Make, a C17 compiler (`cc`, or set `CC`), cc65 and
-Python 3. The same targets build `bin/zicc` and `bin/romtool` without the `.exe`
-suffix. Make uses the cc65 tools on `PATH`. Pass `CC65_BIN=/path/to/cc65/bin`
+Python 3. Make uses the cc65 tools on `PATH`. Pass `CC65_BIN=/path/to/cc65/bin`
 if they are elsewhere.
 
 ```sh
 make
 make samples
 ```
-
-`make check` needs Windows because the verification suite uses MSVC,
-PowerShell and Mesen.
 
 ## Building your own ROM
 

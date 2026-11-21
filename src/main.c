@@ -1,6 +1,7 @@
 // Read C source, check its types, and write 65816 assembly
-#if defined(__linux__) && !defined(_POSIX_C_SOURCE)
-#define _POSIX_C_SOURCE 200809L
+// POSIX 2008 with X/Open, so glibc declares realpath under -std=c17
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
 #endif
 #include <ctype.h>
 #include <errno.h>
@@ -9,10 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32) || defined(__linux__)
 #include <sys/stat.h>
-#endif
-#ifdef __linux__
+#ifndef _WIN32
 #include <unistd.h>
 #endif
 #include "headers/preprocess.h"
@@ -251,7 +250,7 @@ static Type enum_specifier(Parser *p);
 static void structure_definition(Parser *p,Structure *record);
 static void free_expression(Expr *e);
 static void free_statements(Statement *s);
-static _Noreturn void error_at(Location at, const char *format, ...)
+static void error_at(Location at, const char *format, ...)
 {
     va_list args;
     fprintf(stderr, "%s:%d:%d: error: ", at.path, at.line, at.column);
@@ -770,44 +769,60 @@ static void free_statements(Statement *s)
 }
 #include "source_lto.inc"
 
-static const char *default_include_directory(char *directory, size_t capacity)
+/* Packaged headers sit in include/ beside the compiler, else in include/ in
+ * the current directory. POSIX has no call that names the running program,
+ * so Windows asks its C runtime and other systems resolve argv[0] directly
+ * or through PATH. */
+static const char *default_include_directory(const char *argv0, char *directory, size_t capacity)
 {
-#ifdef _WIN32
+    const char *result = "include", *slash;
     char *program = NULL;
-    if (_get_pgmptr(&program) == 0 && program) {
-        const char *slash = strrchr(program, '/');
+#ifdef _WIN32
+    char *found = NULL;
+    struct _stat attributes;
+    (void)argv0;
+    if (_get_pgmptr(&found) == 0 && found) program = _strdup(found);
+#else
+    struct stat attributes;
+    if (argv0 && strchr(argv0, '/')) program = realpath(argv0, NULL);
+    else if (argv0 && *argv0) {
+        const char *search = getenv("PATH");
+        char candidate[4096];
+        while (search && !program) {
+            const char *end = strchr(search, ':');
+            size_t length = end ? (size_t)(end - search) : strlen(search);
+            /* An empty PATH entry names the current directory */
+            int n = snprintf(candidate, sizeof candidate, "%.*s/%s",
+                             length ? (int)length : 1, length ? search : ".", argv0);
+            /* Like the shell, take only a regular file: a directory passes X_OK too */
+            if (n > 0 && (size_t)n < sizeof candidate &&
+                stat(candidate, &attributes) == 0 && S_ISREG(attributes.st_mode) &&
+                access(candidate, X_OK) == 0)
+                program = realpath(candidate, NULL);
+            search = end ? end + 1 : NULL;
+        }
+    }
+#endif
+    if (!program) return result;
+    slash = strrchr(program, '/');
+#ifdef _WIN32
+    {
         const char *backslash = strrchr(program, '\\');
         if (!slash || (backslash && backslash > slash)) slash = backslash;
-        if (slash && (size_t)(slash - program) + sizeof "/include" <= capacity) {
-            size_t length = (size_t)(slash - program);
-            struct _stat attributes;
-            memcpy(directory, program, length);
-            memcpy(directory + length, "/include", sizeof "/include");
-            if (_stat(directory, &attributes) == 0 && (attributes.st_mode & _S_IFDIR))
-                return directory;
-        }
     }
-#elif defined(__linux__)
-    char program[4096];
-    ssize_t count = readlink("/proc/self/exe", program, sizeof program - 1);
-    if (count > 0) {
-        const char *slash;
-        program[count] = 0;
-        slash = strrchr(program, '/');
-        if (slash && (size_t)(slash - program) + sizeof "/include" <= capacity) {
-            size_t length = (size_t)(slash - program);
-            struct stat attributes;
-            memcpy(directory, program, length);
-            memcpy(directory + length, "/include", sizeof "/include");
-            if (stat(directory, &attributes) == 0 && S_ISDIR(attributes.st_mode))
-                return directory;
-        }
-    }
-#else
-    (void)directory;
-    (void)capacity;
 #endif
-    return "include";
+    if (slash && (size_t)(slash - program) + sizeof "/include" <= capacity) {
+        size_t length = (size_t)(slash - program);
+        memcpy(directory, program, length);
+        memcpy(directory + length, "/include", sizeof "/include");
+#ifdef _WIN32
+        if (_stat(directory, &attributes) == 0 && (attributes.st_mode & _S_IFDIR)) result = directory;
+#else
+        if (stat(directory, &attributes) == 0 && S_ISDIR(attributes.st_mode)) result = directory;
+#endif
+    }
+    free(program);
+    return result;
 }
 
 int main(int argc, char **argv)
@@ -875,7 +890,7 @@ int main(int argc, char **argv)
         else{fprintf(stderr,"unknown or incomplete option: %s\n",argv[i]);return EXIT_FAILURE;}
     }
     if (!include_directory)
-        include_directory = default_include_directory(packaged_include, sizeof packaged_include);
+        include_directory = default_include_directory(argv[0], packaged_include, sizeof packaged_include);
     if (dependency_path) {
         dependencies = fopen(dependency_path, "wb");
         if (!dependencies) { perror(dependency_path); return EXIT_FAILURE; }

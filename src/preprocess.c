@@ -31,12 +31,12 @@ typedef struct {
     int conditional, embed_depth;
 } Preprocessor;
 
-static _Noreturn void pp_error(const char *path, int line, const char *message)
+static void pp_error(const char *path, int line, const char *message)
 {
     fprintf(stderr, "%s:%d:1: error: %s\n", path, line, message);
     exit(EXIT_FAILURE);
 }
-static _Noreturn void fail(Preprocessor *pp, const char *message)
+static void fail(Preprocessor *pp, const char *message)
 {
     if (pp->logical_file) {
         fprintf(stderr, "%.*s:%d:1: error: %s\n", (int)strlen(pp->logical_file)-2,
