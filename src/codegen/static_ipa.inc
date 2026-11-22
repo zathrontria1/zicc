@@ -308,45 +308,51 @@ static void static_ipa_prepare(Parser *p)
     }
 
     /* 1. Constant and fixed global-object parameter propagation */
-    for (i = 0; i < eligible_count; ++i) {
-        Function *f = eligible[i];
-        IpaCallSite sites[128];
-        unsigned total = 0;
-        for (Function *caller = p->functions; caller; caller = caller->next)
-            if (ipa_function_alive(caller))
-                ipa_collect_calls_stmt(caller, caller->body, f->symbol, sites, &total, 128);
-        cg.function = f;
-        for (k = 0; k < (unsigned)f->symbol->param_count; ++k) {
-            Symbol *formal = leaf_parameter(f, k);
-            Expr *resolved[128];
-            Expr *arg0;
-            int same = 1, is_const, is_fixed;
-            if (!formal || object_volatile(formal->type) ||
-                scalar_writes(f->body, formal) || ipa_var_addr_stmt(f->body, formal))
-                continue;
-            for (j = 0; j < total; ++j)
-                resolved[j] = ipa_resolve_arg(sites[j].caller, f->symbol, sites[j].call->args[k]);
-            arg0 = resolved[0];
-            is_const = arg0->kind == EX_INT && numeric(arg0->type) &&
-                       reg_width(formal->type) <= 2 && !formal->type.pointers;
-            is_fixed = !is_const && ipa_fixed_object_arg(arg0, formal->type);
-            if (!is_const && !is_fixed) continue;
-            for (j = 1; j < total; ++j) {
-                Expr *aj = resolved[j];
-                if (is_const) {
-                    if (aj->kind != EX_INT || aj->value != arg0->value || aj->value_high != arg0->value_high) {
+    for (unsigned round = 0; round < 8; ++round) {
+        int changed = 0;
+        for (i = 0; i < eligible_count; ++i) {
+            Function *f = eligible[i];
+            IpaCallSite sites[128];
+            unsigned total = 0;
+            for (Function *caller = p->functions; caller; caller = caller->next)
+                if (ipa_function_alive(caller))
+                    ipa_collect_calls_stmt(caller, caller->body, f->symbol, sites, &total, 128);
+            cg.function = f;
+            for (k = 0; k < (unsigned)f->symbol->param_count; ++k) {
+                Symbol *formal = leaf_parameter(f, k);
+                Expr *resolved[128];
+                Expr *arg0;
+                int same = 1, is_const, is_fixed;
+                if (!formal || object_volatile(formal->type) ||
+                    !statement_references(f->body, formal) ||
+                    scalar_writes(f->body, formal) || ipa_var_addr_stmt(f->body, formal))
+                    continue;
+                for (j = 0; j < total; ++j)
+                    resolved[j] = ipa_resolve_arg(sites[j].caller, f->symbol, sites[j].call->args[k]);
+                arg0 = resolved[0];
+                is_const = arg0->kind == EX_INT && numeric(arg0->type) &&
+                           reg_width(formal->type) <= 2 && !formal->type.pointers;
+                is_fixed = !is_const && ipa_fixed_object_arg(arg0, formal->type);
+                if (!is_const && !is_fixed) continue;
+                for (j = 1; j < total; ++j) {
+                    Expr *aj = resolved[j];
+                    if (is_const) {
+                        if (aj->kind != EX_INT || aj->value != arg0->value || aj->value_high != arg0->value_high) {
+                            same = 0; break;
+                        }
+                    } else if (!body_equal(aj, arg0)) {
                         same = 0; break;
                     }
-                } else if (!body_equal(aj, arg0)) {
-                    same = 0; break;
                 }
+                if (!same) continue;
+                Expr *rep = is_const ? convert(body_clone(arg0), unqualified_value(formal->type))
+                                     : body_clone(arg0);
+                body_cursor_substitute(f->body, NULL, formal, rep);
+                free_expression(rep);
+                changed = 1;
             }
-            if (!same) continue;
-            Expr *rep = is_const ? convert(body_clone(arg0), unqualified_value(formal->type))
-                                 : body_clone(arg0);
-            body_cursor_substitute(f->body, NULL, formal, rep);
-            free_expression(rep);
         }
+        if (!changed) break;
     }
 
     /* 2. Narrow __far pointer parameters proven bank-$7E at every live call */
