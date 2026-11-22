@@ -859,6 +859,7 @@ def main():
         if stage==1:
             ring=assemblies.split('_ring_walk:',1)[1].split('__size_ring_walk',1)[0]
             assert 'scaled ring indices within loop' in ring and 'and #$000E' in ring
+            assert 'borrow Y across near byte guard loop' in ring
             assert 'retained byte step and biased guard cursor' in ring and 'cmp #$FFF7' in ring
             assert 'cpy #$FFF7' not in ring
             search=assemblies.split('_search_index:',1)[1].split('__size_search_index',1)[0]

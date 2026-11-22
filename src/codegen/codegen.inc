@@ -6775,7 +6775,7 @@ typedef struct {
 static int plan_byte_guard_group(Statement *s,ByteGuardGroup *g)
 {
     Statement *entry;
-    if(!cg.dp_homes||!cg.loop_count||cg.stack_leaf||cg.retained_index||
+    if(!cg.dp_homes||cg.stack_leaf||cg.retained_index||
        cg.scan_cursor||cg.bound||cg.cursor_count||cg.affine_active||cg.switch_depth||
        cg.parser->no_register_cursors||cg.parser->no_strength_reduction||
        cg.parser->no_indexed_operands)return 0;
@@ -6885,7 +6885,7 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
 static Statement *byte_guard_group(Statement *s)
 {
     ByteGuardGroup g;
-    if(!plan_byte_guard_group(s,&g))return NULL;
+    if(!cg.loop_count||!plan_byte_guard_group(s,&g))return NULL;
     code("; shared wrapping Y cursor for byte guards\n");
     if(!cg.loop_y_borrowed)code("    phy\n");
     if(fixed_guard_displacements(&g)){
@@ -9187,31 +9187,59 @@ static int ring_check_body(RingLoop *p,Statement *s)
     return 1;
 }
 
-static int ring_y_operand(Expr *e)
+static int guard_loop_y_operand(Expr *e)
 {
     unsigned i;
     if(!e)return 1;
+    if(e->kind==EX_CALL)return 0;
     if(e->kind==EX_OBJECT&&e->symbol->owner&&
        (e->type.array||reg_width(e->type)>2||!guard_dp_home(e->symbol)))return 0;
-    if(!ring_y_operand(e->left)||!ring_y_operand(e->right)||!ring_y_operand(e->third))return 0;
-    for(i=0;i<e->arg_count;++i)if(!ring_y_operand(e->args[i]))return 0;
+    if(!guard_loop_y_operand(e->left)||!guard_loop_y_operand(e->right)||
+       !guard_loop_y_operand(e->third))return 0;
+    for(i=0;i<e->arg_count;++i)if(!guard_loop_y_operand(e->args[i]))return 0;
     return 1;
 }
 
-static int ring_y_region(Statement *s,unsigned *guards)
+static int guard_loop_y_region(Statement *s,int *has_group)
 {
     for(;s;s=s->next){
-        ByteGuard g;
-        if(s->kind==ST_RETURN||!ring_y_operand(s->expression)||
-           !ring_y_region(s->body,guards)||!ring_y_region(s->alternate,guards))return 0;
-        if(byte_guard_plan(s,&g))++*guards;
+        ByteGuardGroup group;
+        switch(s->kind){
+        case ST_EMPTY:case ST_BLOCK:case ST_IF:case ST_EXPR:case ST_BREAK:case ST_CONTINUE:
+            break;
+        default:return 0;
+        }
+        if(!guard_loop_y_operand(s->expression)||
+           !guard_loop_y_region(s->body,has_group)||
+           !guard_loop_y_region(s->alternate,has_group))return 0;
+        if(!*has_group&&s->kind==ST_IF&&plan_byte_guard_group(s,&group))*has_group=1;
     }
+    return 1;
+}
+
+/* An innermost guard region can save the caller's Y once. The ordinary
+ * loop end handles both the test and break exits before restoring it. */
+static int emit_guard_y_loop(Statement *s,int *result)
+{
+    int has_group=0;
+    if(!cg.dp_homes||cg.loop_y_borrowed||cg.cursor_count||cg.switch_depth||
+       cg.function->jump_label_count||cg.parser->no_register_cursors||
+       cg.parser->no_strength_reduction||cg.parser->no_indexed_operands||
+       volatile_statement(s)||statement_inline_markers(s)||
+       !guard_loop_y_operand(s->expression)||!guard_loop_y_operand(s->step)||
+       !guard_loop_y_region(s->initial,&has_group)||
+       !guard_loop_y_region(s->body,&has_group)||!has_group)return 0;
+    code("; borrow Y across near byte guard loop\n    phy\n");
+    cg.loop_y_borrowed=1;
+    *result=emit_loop_body(s,1);
+    cg.loop_y_borrowed=0;
+    code("    ply\n");
     return 1;
 }
 
 static int emit_scaled_ring_loop(Statement *s,int *result)
 {
-    RingLoop p={0};unsigned i,guards=0;int borrow_y;
+    RingLoop p={0};unsigned i;
     if(s->kind!=ST_DO||!cg.dp_homes||cg.parser->no_strength_reduction||
        cg.parser->no_indexed_operands||cg.bound||cg.affine_active||cg.retained_index||
        cg.loop_count||volatile_statement(s)||!ring_collect(&p,s->body)||!p.count||
@@ -9228,11 +9256,7 @@ static int emit_scaled_ring_loop(Statement *s,int *result)
         code("    asl a\n    adc #$0000\n");
         store_symbol(p.rings[i].index);
     }
-    borrow_y=!cg.parser->no_register_cursors&&!cg.cursor_count&&ring_y_operand(s->expression)&&
-        ring_y_region(s->body,&guards)&&guards>=2;
-    if(borrow_y){code("    phy\n");cg.loop_y_borrowed=1;}
-    *result=emit_loop_body(s,1);
-    if(borrow_y){cg.loop_y_borrowed=0;code("    ply\n");}
+    if(!emit_guard_y_loop(s,result))*result=emit_loop_body(s,1);
     for(i=0;i<p.count;++i){
         load_symbol(p.rings[i].index);
         code("    lsr a\n    bcc :+\n    ora #$8000\n:\n");
@@ -9280,7 +9304,7 @@ static int emit_loop(Statement *s)
     int result;
     region_enter(s);
     if(emit_scaled_ring_loop(s,&result))code("; loop lowering: scaled ring indices\n");
-    else result=emit_loop_body(s,1);
+    else if(!emit_guard_y_loop(s,&result))result=emit_loop_body(s,1);
     region_exit(s);
     return result;
 }
