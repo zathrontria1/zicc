@@ -2515,6 +2515,84 @@ static int body_branched_cursor(Statement *s,Statement *stop,Symbol *cursor,
     return displacement;
 }
 
+static int body_cursor_bound_stores(Statement *s,Statement *stop,Symbol *bound,
+                                   Expr **stores,unsigned *count)
+{
+    for(;s&&s!=stop;s=s->next){
+        Expr *set=plain_assignment(s);
+        if(set&&set->left->symbol==bound){
+            Type t=value_type(set->right->type);
+            if(*count==8||!t.pointers||far_pointer(t))return 0;
+            stores[(*count)++]=set;
+        }
+        if(!body_cursor_bound_stores(s->initial,NULL,bound,stores,count)||
+           !body_cursor_bound_stores(s->body,NULL,bound,stores,count)||
+           !body_cursor_bound_stores(s->alternate,NULL,bound,stores,count))return 0;
+    }
+    return 1;
+}
+
+static Expr *body_cursor_bound_offset(Expr *value,Expr *base,Type word)
+{
+    Location at=value->location;
+    unsigned start,displacement=0,scale=0;
+    Symbol *object=near_object_address(base,&start);
+    Expr *index=NULL,*offset;
+    if(object&&indexed_near_base(value,&index,&scale,&displacement)==object&&
+       displacement==start){
+        if(!index)offset=body_literal(word,0,at);
+        else{
+            offset=new_expr(EX_CAST,at,word);offset->left=body_clone(index);
+            if(scale!=1){
+                Expr *scaled=new_expr(EX_BINARY,at,word);
+                scaled->op='*';scaled->left=offset;scaled->right=body_literal(word,scale,at);
+                offset=scaled;
+            }
+        }
+        free_expression(value);
+    }else{
+        offset=new_expr(EX_BINARY,at,word);offset->op='-';
+        offset->left=new_expr(EX_CAST,at,word);offset->left->left=value;
+        offset->right=new_expr(EX_CAST,at,word);offset->right->left=body_clone(base);
+    }
+    return offset;
+}
+
+/* Near-pointer equality is unchanged by subtracting the same base modulo
+ * 65536. Convert the private end cursor when it is assigned, including on
+ * any path that revises the end without advancing the current offset */
+static int body_cursor_offset_test(Function *f,Statement *head,Statement *loop,
+                                  Symbol *cursor,Expr *base,Symbol *index)
+{
+    Expr *test=loop->expression,**pos=&test->left,**limit=&test->right,*stores[8];
+    Symbol *bound,*offset;
+    unsigned count=0;
+    char name[80];
+    if(test->kind!=EX_BINARY||(test->op!=TOK_NE&&test->op!=TOK_EQ))return 0;
+    if(!lftr_object(*pos,cursor)){pos=&test->right;limit=&test->left;}
+    if(!lftr_object(*pos,cursor)||(*limit)->kind!=EX_OBJECT)return 0;
+    bound=(*limit)->symbol;
+    if(!bound->scope||bound==cursor||!body_private(bound)||!bound->type.pointers||
+       far_pointer(bound->type)||cg.parser->symbol_count>=1024||f->slots+2>768||
+       !body_cursor_bound_stores(head,loop,bound,stores,&count)||!count||
+       !body_cursor_bound_stores(loop->body,NULL,bound,stores,&count)||
+       statement_references(f->body,bound)!=count+1)return 0;
+    snprintf(name,sizeof name,"%s_end",index->name);
+    offset=new_symbol(cg.parser,name,index->type,loop->location);
+    offset->owner=f->id;offset->scope=1;offset->active=1;offset->internal=1;
+    offset->offset=f->slots+1;f->slots+=2;
+    for(unsigned i=0;i<count;++i){
+        Expr *set=stores[i];
+        free_expression(set->left);
+        set->left=body_object(offset,set->location);
+        set->right=body_cursor_bound_offset(set->right,base,index->type);
+        set->type=index->type;
+    }
+    free_expression(*pos);*pos=body_object(index,test->location);
+    free_expression(*limit);*limit=body_object(offset,test->location);
+    return 1;
+}
+
 /* Lockstep near cursors starting at fixed arrays share a byte induction
  * variable. Only the common trailing update changes the offset, so an early
  * continue keeps every cursor at its original element. Other cursors may
@@ -2577,7 +2655,8 @@ static void body_share_cursors(Function *f,Statement **head)
                 continue;
             }
             Expr *address=body_shared_cursor_address(cursors[i],bases[i],index,0,loop->location);
-            body_cursor_replace(&loop->expression,cursors[i],address);
+            if(!body_cursor_offset_test(f,*head,loop,cursors[i],bases[i],index))
+                body_cursor_replace(&loop->expression,cursors[i],address);
             body_cursor_substitute(loop->body->body,first,cursors[i],address);
             free_expression(address);
         }

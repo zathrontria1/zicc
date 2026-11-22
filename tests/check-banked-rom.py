@@ -343,11 +343,12 @@ __noinline void ring_walk(unsigned start,unsigned end) {
  ring_out_head=head;ring_out_tail=tail;ring_sum=sum;
 }
 
-static unsigned cursor_a[8],cursor_b[8],cursor_out[8];
+static unsigned cursor_a[8],cursor_b[8],cursor_out[8],cursor_stop;
 __noinline void branched_cursors(unsigned count) {
  unsigned *a=cursor_a,*b=cursor_b,*out=&cursor_out[2],*end=cursor_a+count*2;
  while(a!=end) {
   if(!*a){ *a=3; continue; }
+  if(*a==7){end=cursor_a+cursor_stop*2;*a=3;continue;}
   if(*a&1U){
    *out++=*a+*b;
    *out++=a[1]+b[1];
@@ -593,6 +594,9 @@ int main(void){
  if(cursor_a[0]!=3||cursor_out[0]!=0x8675||cursor_out[1]!=0x8675||
     cursor_out[2]!=23||cursor_out[3]!=31||cursor_out[4]!=65535U||
     cursor_out[5]!=0x8675||cursor_out[6]!=33||cursor_out[7]!=37)return 129;
+ cursor_a[0]=7;cursor_out[2]=0x8675;cursor_stop=0;
+ branched_cursors(3);
+ if(cursor_a[0]!=3||cursor_out[2]!=0x8675)return 138;
 
  *(volatile unsigned * __far)0x7f0000ul=0x1134;
  *(volatile unsigned * __far)0x7f0002ul=0x2256;

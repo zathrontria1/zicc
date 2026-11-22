@@ -89,6 +89,90 @@ static int lp_reuse_frame_copies(LpUnit *u,Function *f,size_t at)
     return 0;
 }
 
+/* A loop with a shared offset can compare the just-stored value in X and
+ * enter the next iteration after its index load. Continue edges that did
+ * not advance the offset seed X from the home at their jump */
+static int lp_workspace_index_backedge(LpUnit *u,Function *f,size_t at)
+{
+    int known;
+    unsigned char *targets;
+    (void)at;
+    if(u->indirect||cg.parser->no_strength_reduction||cg.parser->no_register_cursors||cg.parser->no_index_elimination||
+       cg.parser->no_value_reuse||body_asm_statements(f->body)||!lp_fixed_workspace(u))return 0;
+    targets=lp_local_targets(u,&known);
+    /* The unsigned word quotient receives both operands in DP and
+     * preserves X. Any live-out value still propagates through the call */
+    for(unsigned i=0;i<u->count;++i)
+        if(u->lines[i].call&&lp_line_is(&u->lines[i],"jsr .loword(__uquot16)"))
+            u->lines[i].use=LP_Y;
+    lp_liveness(u);
+    for(unsigned i=0;known&&i<u->count;++i){
+        LpLine *edge=&u->lines[i];
+        int head=edge->target,branch,compare,load,store,index,cold[8],count=0,can_cpx;
+        size_t length,bound_length;
+        const char *home,*bound;
+        if(head<0||(unsigned)head>=i||(!lp_is(edge,"jmp")&&!lp_is(edge,"bra"))||edge->x8)continue;
+        branch=lp_next_fallthrough(u,i,-1,targets,known);
+        if(branch<0||(!lp_is(&u->lines[branch],"beq")&&!lp_is(&u->lines[branch],"bne"))||
+           u->lines[branch].target<=(int)i)continue;
+        compare=lp_next_fallthrough(u,(unsigned)branch,-1,targets,known);
+        if(compare<0||!lp_is(&u->lines[compare],"cmp")||u->lines[compare].m8||
+           u->lines[compare].x8||(u->lines[compare].use&LP_X)||
+           (u->lines[compare].out&(LP_A|LP_X)))continue;
+        bound=lp_operand(&u->lines[compare],&bound_length);
+        can_cpx=lp_workspace_word(bound,bound_length)>=0||lp_immediate(&u->lines[compare])>=0;
+        load=lp_next_fallthrough(u,(unsigned)compare,-1,targets,known);
+        if(load<0||!lp_is(&u->lines[load],"lda")||u->lines[load].m8||u->lines[load].x8)continue;
+        home=lp_operand(&u->lines[load],&length);
+        if(lp_workspace_word(home,length)<0)continue;
+        index=lp_next_fallthrough(u,(unsigned)head,1,targets,known);
+        if(index<=head||index>=load||!lp_is(&u->lines[index],"ldx")||u->lines[index].x8||
+           (u->lines[index].out&(LP_N|LP_Z))||!lp_operand_is(&u->lines[index],home,length))continue;
+        for(store=load-1;store>index;--store){
+            LpLine *line=&u->lines[store];
+            if(line->op||(!lp_fallthrough_label(line)&&line->text[0]!=';'))break;
+        }
+        if(store<=index||!lp_is(&u->lines[store],"sta")||u->lines[store].m8||u->lines[store].x8||
+           !lp_operand_is(&u->lines[store],home,length))continue;
+        for(int j=store+1;j<=load&&count>=0;++j){
+            LpLine *line=&u->lines[j];
+            if(j<load&&line->length&&line->text[0]!=';'&&!lp_fallthrough_label(line)){
+                count=-1;
+                break;
+            }
+            for(int p=line->first_incoming;p>=0;p=u->lines[p].next_incoming){
+                LpLine *from=&u->lines[p];
+                if(count==8||p<=index||p>=store||from->x8||
+                   (!lp_is(from,"jmp")&&!lp_is(from,"bra"))){
+                    count=-1;
+                    break;
+                }
+                cold[count++]=p;
+            }
+        }
+        if(count<0)continue;
+        unsigned id=++cg.label;
+        char text[96];
+        lp_insert(&u->lines[store],"; carry workspace index across the loop backedge\n    tax\n");
+        lp_set(&u->lines[store],"    stx %.*s",(int)length,home);
+        for(int j=0;j<count;++j){
+            snprintf(text,sizeof text,"    ldx %.*s\n",(int)length,home);
+            lp_insert(&u->lines[cold[j]],text);
+        }
+        if(can_cpx){
+            u->lines[load].deleted=1;
+            lp_set(&u->lines[compare],"    cpx %.*s",(int)bound_length,bound);
+        }else lp_set(&u->lines[load],"    txa");
+        snprintf(text,sizeof text,"cg_lp_%u:\n",id);
+        lp_insert(&u->lines[index+1],text);
+        lp_set(edge,"    jmp .loword(cg_lp_%u)",id);
+        free(targets);
+        return 1;
+    }
+    free(targets);
+    return 0;
+}
+
 /* Use the incoming accumulator before an independent X calculation would
  * overwrite it. Both arithmetic sequences start with their own carry. */
 static int lp_schedule_entry_words(LpUnit *u,Function *f,size_t at)

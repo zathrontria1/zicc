@@ -9061,6 +9061,7 @@ static void line_passes(Function *f,size_t at)
     while(lp_run(&runner,f,at,lp_keep_frame_argument_in_x)){}
     while(lp_run(&runner,f,at,lp_forward_named_latch_load)){}
     while(lp_run(&runner,f,at,lp_named_counter_in_x)){}
+    while(lp_run(&runner,f,at,lp_workspace_index_backedge)){}
     while(lp_run(&runner,f,at,lp_skip_repeated_far_loop_guard)){}
     while(lp_run(&runner,f,at,lp_repeated_inexact_raise)){}
     lp_run(&runner,f,at,lp_far_advance_return);
