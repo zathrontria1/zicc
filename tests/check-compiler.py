@@ -335,6 +335,7 @@ PARTS = [
     ('ieee64-runtime', 300),
     ('float-abi-mode', 300),
     ('structured-byte-loops', 300),
+    ('reduction-products', 300),
     ('loop-access', 120),
     ('inlining', 300),
     ('body-codegen', 300),

@@ -144,6 +144,7 @@ static int structured_byte_loop(Statement *s);
 static int fixed_byte_copy_loop(Statement *s);
 static int counted_byte_copy_loop(Statement *s);
 static int fixed_byte_sum_loop(Statement *s);
+static int runtime_byte_sum_loop(Statement *s);
 static int strided_byte_store_loop(Statement *s);
 static int packed_byte_mask_loop(Statement *s);
 static void known_prepare(Function *f);
@@ -4814,6 +4815,7 @@ static int fold_constant_choose(Expr *e)
     label(no);code("    lda #$%04X\n",v2);label(end);
     return 1;
 }
+#include "product_sums.inc"
 static void emit_value(Expr *e)
 {
     if(wide_compare_supported(e)){emit_wide_compare(e);return;}
@@ -5154,7 +5156,8 @@ static void emit_value(Expr *e)
         if(!volatile_expression(e)&&dot_emit_expr(e))break;
         if(wide_address_safe(e)&&!volatile_expression(e)&&(power_divmod(e)||divmod_emit(e)||bounded_word_shift(e->left,e->right,e->op)||bounded_expression_lut(e)||word_shift_combined(e)||word_expression(e)||word_constant_product(e)||hardware_byte_product(e)||byte_bitwise_binary(e)||direct_large_shift(e)||
            indexed_pair_binary(e)||indexed_immediate_pair(e)||shifted_indexed_long_bits(e)||indirect_long_binary(e)||near_word_pair(e)||deferred_binary(e)||
-           shared_adjusted_members(e)||shared_element_binary(e)||widened_word_product(e)||staged_binary(e)))break;
+           shared_adjusted_members(e)||shared_element_binary(e)||narrow_product_sum(e)||
+           widened_word_product(e)||staged_binary(e)))break;
         if((volatile_expression(e)||(!fixed_near_pointer_sum(e)&&!indexed_pointer_sum(e)))&&!near_address_scaled_sum(e)){
             Type bt=binary_operands(e->left,e->right,e->op);uint32_t cv;
             if(!cg.parser->no_strength_reduction&&!volatile_expression(e)&&!bt.pointers&&
@@ -9531,6 +9534,7 @@ static int emit_loop_body(Statement *s,int select_copy)
     if(shift_recurrence_loop(s)||low_bit_sum_loop(s))return 1;
     if(select_copy&&counted_byte_copy_loop(s))return 1;
     if(fixed_byte_sum_loop(s))return 1;
+    if(runtime_byte_sum_loop(s))return 1;
     if(strided_byte_store_loop(s))return 1;
     if(packed_byte_mask_loop(s))return 1;
     affine=cg.switch_depth?NULL:affine_find(s);
@@ -9677,6 +9681,7 @@ static void entry_guard(Function *f,Statement **body)
     code("    rts\n");label(no);*body=s->next;
 }
 #include "counted_reductions.inc"
+#include "recursive_products.inc"
 #include "bank_calls.inc"
 #include "guarded_updates.inc"
 #include "range_scans.inc"
@@ -10166,6 +10171,7 @@ static void emit_function(Function *f)
     value_recurrences_prepare(f);
     body_byte_ranges(f);
     if(!volatile_statements(f->body))forward_return(f,f->body);f->frame=f->slots?f->slots+4:0;
+    if(recursive_word_product(f))return;
     strength_prepare(f);
     affine_prepare(f);
     affine_prune_function_cursors(f);

@@ -818,31 +818,108 @@ static int fixed_byte_reduction_operand(Expr *value,Symbol *index,unsigned first
 
 /* Carry an ordinary byte sum in A with its carries in Y. For products, use
  * A to stage both hardware operands and keep the complete running sum in Y. */
-static int fixed_byte_sum_loop(Statement *s)
+static Expr *byte_sum_update(Statement *s,Symbol *index,Symbol **result)
 {
     Statement *body;
     Expr *update,*value;
+    Symbol *sum;
+    body=body_single(s->body);
+    if(!body||body->next||body->kind!=ST_EXPR)return NULL;
+    update=body->expression;
+    if(update->kind!=EX_ASSIGN||update->left->kind!=EX_OBJECT)return NULL;
+    sum=update->left->symbol;
+    if(sum==index||!word_integer(sum->type)||!sum->type.is_unsigned||
+       sum->type.is_bool||!loop_private(sum))return NULL;
+    value=update->right;
+    if(!update->op){
+        if(value->kind!=EX_BINARY||value->op!='+')return NULL;
+        if(reduction_object(value->left,sum))value=value->right;
+        else if(reduction_object(value->right,sum))value=value->left;
+        else return NULL;
+    }else if(update->op!='+')return NULL;
+    *result=sum;
+    return byte_loop_test_bits(value);
+}
+
+/* Count down from the one-past index. Both inputs to the peel and pair
+ * loops are 16-bit unsigned, so the branch cannot confuse $8000 with zero. */
+static void byte_sum_add(IndexedOperand *operand,unsigned back)
+{
+    unsigned offset=operand->offset;
+    operand->base->used=1;
+    code("    adc a:.loword(_%s%c$%04X),x\n    bcc :+\n    iny\n    clc\n:\n",
+         operand->base->asm_name,offset>=back?'+':'-',
+         offset>=back?offset-back:back-offset);
+}
+
+static int runtime_byte_sum_loop(Statement *s)
+{
+    Statement *initial=body_single(s->initial);
+    Expr *init,*test=s->expression,*value,*bound,*left;
+    Symbol *index,*sum;
+    IndexedOperand source;
+    Type comparison_type;
+    uint32_t first;
+    unsigned scale,bias,loop,paired,finish,done;
+    int unroll;
+    if(s->kind!=ST_FOR||!initial||initial->next||initial->kind!=ST_EXPR||
+       !test||test->kind!=EX_BINARY||test->op!='<'||
+       !register_loop_available(s))return 0;
+    left=word_bits(test->left);
+    if(left->kind!=EX_OBJECT)return 0;
+    init=initial->expression;index=left->symbol;bound=test->right;
+    comparison_type=common_type(test->left->type,bound->type);
+    if(init->kind!=EX_ASSIGN||init->op||!reduction_object(init->left,index)||
+       !integer_constant(init->right,&first)||first||!byte_copy_counter(index)||
+       body_step_direction(s->step,index)!=1||loop_mentions(bound,index)||
+       !word_integer(bound->type)||bound->kind==EX_INT||volatile_expression(bound)||
+       (bound->kind!=EX_OBJECT&&!byte_loop_invariant_bound(s,bound))||
+       !word_integer(comparison_type)||!comparison_type.is_unsigned)return 0;
+    value=byte_sum_update(s,index,&sum);
+    if(!value||!value->type.is_unsigned||value->type.is_bool||width(value->type)!=1||
+       loop_mentions(bound,sum)||!indexed_operand(value,&source)||source.scale!=1||
+       !retained_affine_for(source.index,index,&scale,&bias)||scale!=1||
+       bias+source.offset>=width(source.base->type)||bias+source.offset>65535)return 0;
+    source.offset+=bias;
+    unroll=!cg.parser->no_loop_unroll;
+    loop=++cg.label;paired=++cg.label;finish=++cg.label;done=++cg.label;
+    code("; register unsigned byte sum with runtime bound\n");
+    emit_value(bound);
+    if(loop_observed_outside(cg.function->body,s,index))store_symbol(index);
+    code("    tax\n");flag_branch("beq","bne",done,0,0);
+    if(unroll)code("    lsr a\n");
+    load_symbol(sum);
+    code("    phy\n    ldy #0\n    sep #$20\n.a8\n");
+    if(unroll){
+        flag_branch("bcc","bcs",paired,0,0);
+        code("    clc\n");byte_sum_add(&source,1);
+        code("    dex\n");flag_branch("beq","bne",finish,0,0);
+        label(paired);
+    }
+    code("    clc\n");
+    label(loop);
+    byte_sum_add(&source,1);
+    if(unroll)byte_sum_add(&source,2);
+    code(unroll?"    dex\n    dex\n":"    dex\n");
+    flag_branch("bne","beq",loop,0,0);
+    label(finish);
+    code("    phy\n    xba\n    clc\n    adc 1,s\n    xba\n    rep #$20\n.a16\n    ply\n    ply\n");
+    store_symbol(sum);
+    label(done);
+    cg.divmod_available=0;
+    return 1;
+}
+
+static int fixed_byte_sum_loop(Statement *s)
+{
+    Expr *value;
     IndexedOperand left,right;
     Symbol *index,*sum;
     unsigned trips,final,first,factor,loop;
     int product;
     if(s->kind!=ST_FOR||!register_loop_available(s)||
-       !constant_loop_trip_count(s,&index,&trips,&final)||final<trips||trips<8||trips>32768)return 0;
-    body=body_single(s->body);
-    if(!body||body->next||body->kind!=ST_EXPR)return 0;
-    update=body->expression;
-    if(update->kind!=EX_ASSIGN||update->left->kind!=EX_OBJECT)return 0;
-    sum=update->left->symbol;
-    if(sum==index||!word_integer(sum->type)||!sum->type.is_unsigned||
-       sum->type.is_bool||!loop_private(sum))return 0;
-    value=update->right;
-    if(!update->op){
-        if(value->kind!=EX_BINARY||value->op!='+')return 0;
-        if(reduction_object(value->left,sum))value=value->right;
-        else if(reduction_object(value->right,sum))value=value->left;
-        else return 0;
-    }else if(update->op!='+')return 0;
-    value=byte_loop_test_bits(value);
+       !constant_loop_trip_count(s,&index,&trips,&final)||final<trips||trips<8||trips>32768||
+       !(value=byte_sum_update(s,index,&sum)))return 0;
     first=final-trips;
     product=value->kind==EX_BINARY&&word_integer(value->type)&&value->op=='*';
     if(!fixed_byte_reduction_operand(product?value->left:value,index,first,trips,&left)||
