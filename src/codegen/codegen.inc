@@ -1378,7 +1378,11 @@ static int reverse_order(int op)
 {
     return op=='<'?'>':op=='>'?'<':op==TOK_LE?TOK_GE:TOK_LE;
 }
-static int word_range_bound(Expr *e,Expr **value,int32_t *bound,int *lower,int *is_unsigned)
+static int invert_order(int op)
+{
+    return op=='<'?TOK_GE:op==TOK_LE?'>':op=='>'?TOK_LE:'<';
+}
+static int word_range_bound(Expr *e,Expr **value,int32_t *bound,int *lower,int *is_unsigned,int invert)
 {
     uint32_t bits;int op;
     Type t;
@@ -1389,6 +1393,7 @@ static int word_range_bound(Expr *e,Expr **value,int32_t *bound,int *lower,int *
     if(integer_constant(e->right,&bits))*value=e->left;
     else if(integer_constant(e->left,&bits)){*value=e->right;op=reverse_order(op);}
     else return 0;
+    if(invert)op=invert_order(op);
     *is_unsigned=t.is_unsigned;
     *lower=op=='>'||op==TOK_GE;
     *bound=(t.is_unsigned?(int32_t)(uint16_t)bits:(int16_t)bits)+(op=='>'||op==TOK_LE);
@@ -1396,22 +1401,33 @@ static int word_range_bound(Expr *e,Expr **value,int32_t *bound,int *lower,int *
 }
 /* Subtracting the lower bound maps the contiguous interval to [0, span).
  * Inspect carry in the unsigned domain, including for signed inputs. */
-static int word_range_flags(Expr *e)
+static int known_binary_constant(Expr *e);
+static int word_range_pair(Expr *left,Expr *right,int is_or,int emit)
 {
     Expr *a,*b;int32_t first,last,lo,span;int lower_a,lower_b,unsigned_a,unsigned_b;
-    if(cg.parser->no_strength_reduction||e->op!=TOK_LAND||
-       !word_range_bound(e->left,&a,&first,&lower_a,&unsigned_a)||
-       !word_range_bound(e->right,&b,&last,&lower_b,&unsigned_b)||
+    int left_const=known_binary_constant(left),right_const=known_binary_constant(right);
+    if(cg.parser->no_strength_reduction||
+       (left_const&&right_const)||
+       (left_const&&((left->known.min!=0)==is_or))||
+       (right_const&&((right->known.min!=0)==is_or))||
+       !word_range_bound(left,&a,&first,&lower_a,&unsigned_a,is_or)||
+       !word_range_bound(right,&b,&last,&lower_b,&unsigned_b,is_or)||
        lower_a==lower_b||unsigned_a!=unsigned_b||body_effect(a)||
        !body_equal(a,b))return 0;
     lo=lower_a?first:last;
     span=(lower_a?last:first)-lo;
     if(span<=0||span>=65536)return 0;
+    if(!emit)return 1;
     code("; contiguous word range\n");
     emit_value(a);
     if(lo)code("    sec\n    sbc #$%04X\n",(unsigned)lo&65535);
     code("    cmp #$%04X\n",(unsigned)span);
     return 1;
+}
+static int word_range_flags(Expr *e)
+{
+    if(e->op!=TOK_LAND&&e->op!=TOK_LOR)return 0;
+    return word_range_pair(e->left,e->right,e->op==TOK_LOR,1);
 }
 static int checked_word_operand(Expr *e,const char *op,int emit)
 {
@@ -1831,7 +1847,22 @@ static void branch(Expr *e,unsigned yes,unsigned no,unsigned fallthrough)
     if(e->kind==EX_BINARY&&(e->op==TOK_LAND||e->op==TOK_LOR)){
         if(branch_adjacent_byte_checks(e,yes,no,fallthrough))return;
         if(branch_literal_alternatives(e,yes,no,fallthrough))return;
-        if(word_range_flags(e)){flag_branch("bcc","bcs",yes,no,fallthrough);return;}
+        if(word_range_flags(e)){
+            flag_branch(e->op==TOK_LOR?"bcs":"bcc",e->op==TOK_LOR?"bcc":"bcs",yes,no,fallthrough);
+            return;
+        }
+        if(e->left->kind==EX_BINARY&&e->left->op==e->op&&
+           word_range_pair(e->left->right,e->right,e->op==TOK_LOR,0)){
+            unsigned middle=++cg.label;
+            if(e->op==TOK_LAND)branch(e->left->left,middle,no,middle);
+            else branch(e->left->left,yes,middle,middle);
+            {unsigned available=cg.divmod_available;
+                label(middle);
+                word_range_pair(e->left->right,e->right,e->op==TOK_LOR,1);
+                flag_branch(e->op==TOK_LOR?"bcs":"bcc",e->op==TOK_LOR?"bcc":"bcs",yes,no,fallthrough);
+                cg.divmod_available&=available;
+            }return;
+        }
         if(!cg.function->uses_wide&&(branch_word_bits(e,yes,no,fallthrough)||
            branch_byte_update(e,yes,no,fallthrough)||branch_checked_sum(e,yes,no,fallthrough)||
            branch_rom_byte_predecessor(e,yes,no,fallthrough)||
@@ -2223,6 +2254,11 @@ static int byte_equal_branch(Expr *e,unsigned yes,unsigned no,unsigned fallthrou
        (right->kind==EX_OBJECT&&right->symbol==cg.scalar_first))return 0;
     signed_order=ordered&&!a;
     strict=e->op=='>'||e->op==TOK_LE;
+    unsigned cmp_val=right->kind==EX_INT?(right->value&255u):0u;
+    int cmp_op=e->op;
+    if(ordered&&a&&!exact_byte&&right->kind==EX_INT&&strict&&cmp_val<255u){
+        ++cmp_val;strict=0;cmp_op=e->op==TOK_LE?'<':TOK_GE;
+    }
     subtract=exact_byte&&(signed_order||strict);
     if(ordered&&a&&!exact_byte)code("; unsigned byte relation\n");
     if(computed)emit_value(computed);
@@ -2235,15 +2271,15 @@ static int byte_equal_branch(Expr *e,unsigned yes,unsigned no,unsigned fallthrou
     }
     if(subtract)code(strict?"    clc\n    sbc ":"    sec\n    sbc ");
     else code("    cmp ");
-    if(right->kind==EX_INT)code("#$%02X",right->value&255);
+    if(right->kind==EX_INT)code("#$%02X",cmp_val);
     else{unsigned offset=0;Symbol *home=right->kind==EX_OBJECT?right->symbol:fixed_memory_object(right,&offset);array_operand(home,offset);}
     code("\n");
     if(signed_order)code("    bvc :+\n    eor #$80\n:\n");
     code("    rep #$20\n.a16\n");
     if(!ordered)flag_branch(e->op==TOK_EQ?"beq":"bne",e->op==TOK_EQ?"bne":"beq",yes,no,fallthrough);
     else{
-        if(strict&&!subtract){code("    bne :+\n");jump(e->op==TOK_LE?yes:no);code(":\n");}
-        integer_relation_flags(e->op,signed_order,yes,no,fallthrough);
+        if(strict&&!subtract){code("    bne :+\n");jump(cmp_op==TOK_LE?yes:no);code(":\n");}
+        integer_relation_flags(cmp_op,signed_order,yes,no,fallthrough);
     }
     return 1;
 }
@@ -4923,15 +4959,35 @@ static void emit_value(Expr *e)
     case EX_BINARY:
         if(function_address_sum(e))break;
         if(e->op==TOK_LAND||e->op==TOK_LOR||comparison(e->op)){
-            if(word_range_flags(e)){code("    lda #0\n    rol a\n    eor #$0001\n");break;}
+            if(word_range_flags(e)){
+                code(e->op==TOK_LOR?"    lda #0\n    rol a\n":"    lda #0\n    rol a\n    eor #$0001\n");
+                break;
+            }
             yes=++cg.label;no=++cg.label;end=++cg.label;branch(e,yes,no,yes);label(yes);code("    lda #1\n");jump(end);label(no);code("    lda #0\n");label(end);break;
         }
         if(identity_binary(e))break;
+        if(fold_constant_choose(e))break;
         if(!cg.parser->no_value_reuse&&!cg.parser->no_body_optimizations&&
-           (e->op=='|'||e->op=='^'||e->op=='&')&&word_integer(e->type)&&
+           (e->op=='+'||e->op=='|'||e->op=='^'||e->op=='&')&&word_integer(e->type)&&
            e->right->kind==EX_CHOOSE&&!body_effect(e->right)&&!volatile_expression(e)&&
            direct_operand(e->left,e->type,0,0)){
             emit_value(e->right);binary_after_left(e->right,e->left,e->op);break;
+        }
+        if(!cg.parser->no_value_reuse&&!cg.parser->no_body_optimizations&&
+           e->op=='-'&&word_integer(e->type)&&e->right->kind==EX_CHOOSE&&
+           !body_effect(e->right)&&!volatile_expression(e)&&
+           direct_operand(e->left,e->type,0,0)){
+            uint32_t k1,k2;
+            if(integer_constant(e->right->right,&k1)&&integer_constant(e->right->third,&k2)){
+                unsigned y=++cg.label,n=++cg.label,d=++cg.label;
+                branch(e->right->left,y,n,y);
+                label(y);code("    lda ");direct_operand(e->left,e->type,0,1);code("\n");
+                if(k1&0xFFFFu)code("    sec\n    sbc #$%04X\n",(unsigned)(k1&0xFFFFu));
+                jump(d);
+                label(n);code("    lda ");direct_operand(e->left,e->type,0,1);code("\n");
+                if(k2&0xFFFFu)code("    sec\n    sbc #$%04X\n",(unsigned)(k2&0xFFFFu));
+                label(d);break;
+            }
         }
         if(!volatile_expression(e)&&dot_emit_expr(e))break;
         if(wide_address_safe(e)&&!volatile_expression(e)&&(power_divmod(e)||divmod_emit(e)||bounded_word_shift(e->left,e->right,e->op)||bounded_expression_lut(e)||word_shift_combined(e)||word_expression(e)||word_constant_product(e)||hardware_byte_product(e)||byte_bitwise_binary(e)||direct_large_shift(e)||
