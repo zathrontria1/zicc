@@ -757,6 +757,11 @@ static int frame_value_in_a(Symbol *s)
     start=previous_instruction(start,&length);
     return full_accumulator_flags(cg.assembly+start,length);
 }
+static int clean_local_bool(Symbol *s)
+{
+    return !cg.parser->no_strength_reduction&&s&&s->type.is_bool&&!s->type.pointers&&!s->type.array&&
+        s->owner&&s->scope&&!s->wram&&!object_volatile(s->type)&&!loop_escapes(cg.function->body,s);
+}
 static void load_symbol(Symbol *s)
 {
     if(s->wram&&!s->type.array){load_array_element(s,0,s->type);return;}
@@ -785,9 +790,10 @@ static void load_symbol(Symbol *s)
         code("    lda ");array_operand(s,0);code("\n");
     }
     /* If a local Boolean or Boolean parameter never escapes, its low byte is
-     * already 0 or 1. Clear only the high byte after loading the word. */
-    if(!cg.parser->no_strength_reduction&&s->type.is_bool&&s->owner&&
-       !loop_escapes(cg.function->body,s))code("    and #$00FF\n");
+     * already 0 or 1. Local non-escaping Booleans are always stored as 16-bit 0/1. */
+    if(clean_local_bool(s)){}
+    else if(!cg.parser->no_strength_reduction&&s->type.is_bool&&s->owner&&
+            !loop_escapes(cg.function->body,s))code("    and #$00FF\n");
     else narrow_char(s->type);
 }
 static void store_symbol(Symbol *s)
@@ -1242,7 +1248,9 @@ static void truth(Expr *e)
        !e->type.pointers&&!volatile_expression(e)&&e->symbol!=cg.scalar_first&&
        e->symbol!=cg.numeric_index&&e->symbol!=cg.numeric_recurrence&&
        e->symbol!=cg.leaf_count&&e->symbol!=cg.retained_index&&e->symbol!=cg.retained_second){
-        code("    lda ");array_operand(e->symbol,0);code("\n    and #$00FF\n");return;
+        code("    lda ");array_operand(e->symbol,0);code("\n");
+        if(!clean_local_bool(e->symbol))code("    and #$00FF\n");
+        return;
     }
     if(!cg.parser->no_strength_reduction&&!e->type.pointers&&!volatile_expression(e)&&
        reg_width(e->type)==4&&fixed_memory_word(e,4,2,0)){

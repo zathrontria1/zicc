@@ -220,7 +220,7 @@ def main():
     # 5.2 Local _Bool and !!bool reads avoid normalization branches
     lbc = section(asm, 'local_bool_chain')
     assert lbc.count('lda #1') == 3, lbc
-    assert 'lda #1' not in lbc.split('and #$00FF', 1)[1], lbc
+    assert 'and #$00FF' not in lbc, lbc
 
     # 5.3 Out-of-order split switch and constant dense switch LUTs
     oos = section(asm, 'out_of_order_switch')

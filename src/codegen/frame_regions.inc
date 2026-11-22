@@ -523,7 +523,7 @@ static int lp_boolean_join(LpUnit *u,Function *f,size_t at)
     if(cg.lp_volatile||u->indirect)return 0;
     for(i=0;i<u->count;++i){
         LpLine *save=&u->lines[i];
-        int mask,gate,transfer,join,load,test,branch,one,done,valid=1,direct_bool=0;
+        int mask,gate,transfer,join,load,test,branch=-1,one,done,valid=1,direct_bool=0;
         unsigned j,skip_label,done_label;
         size_t n;
         const char *slot=lp_operand(save,&n);
@@ -541,18 +541,23 @@ static int lp_boolean_join(LpUnit *u,Function *f,size_t at)
         load=join;
         do{++load;}while((unsigned)load<u->count&&!u->lines[load].op);
         if((unsigned)load>=u->count||!lp_is(&u->lines[load],"lda")||u->lines[load].m8||
-           !lp_operand_is(&u->lines[load],slot,n)||
-           (test=lp_next(u,(unsigned)load,1))<0||u->lines[test].m8||!lp_line_is(&u->lines[test],"and #$00FF"))continue;
-        if((branch=lp_next(u,(unsigned)test,1))>=0&&lp_is(&u->lines[branch],"beq")&&
-           (one=lp_next(u,(unsigned)branch,1))>=0&&!u->lines[one].m8&&lp_is(&u->lines[one],"lda")&&
-           (lp_line_is(&u->lines[one],"lda #1")||lp_immediate(&u->lines[one])==1)&&
-           (done=u->lines[branch].target)>one){
-            /* Both original outcomes meet at the next instruction after LDA #1 */
-            for(j=(unsigned)one+1;j<(unsigned)done&&!u->lines[j].op;++j){}
-            if(j!=(unsigned)done)continue;
+           !lp_operand_is(&u->lines[load],slot,n))continue;
+        test=lp_next(u,(unsigned)load,1);
+        if(test>=0&&!u->lines[test].m8&&lp_line_is(&u->lines[test],"and #$00FF")){
+            if((branch=lp_next(u,(unsigned)test,1))>=0&&lp_is(&u->lines[branch],"beq")&&
+               (one=lp_next(u,(unsigned)branch,1))>=0&&!u->lines[one].m8&&lp_is(&u->lines[one],"lda")&&
+               (lp_line_is(&u->lines[one],"lda #1")||lp_immediate(&u->lines[one])==1)&&
+               (done=u->lines[branch].target)>one){
+                /* Both original outcomes meet at the next instruction after LDA #1 */
+                for(j=(unsigned)one+1;j<(unsigned)done&&!u->lines[j].op;++j){}
+                if(j!=(unsigned)done)continue;
+            }else if(f->symbol->type.is_bool&&!f->symbol->type.pointers&&
+                     lp_bool_return_epilogue(u,test,&done)){
+                one=test;direct_bool=1;
+            }else continue;
         }else if(f->symbol->type.is_bool&&!f->symbol->type.pointers&&
-                 lp_bool_return_epilogue(u,test,&done)){
-            one=test;direct_bool=1;
+                 lp_bool_return_epilogue(u,load,&done)){
+            test=load;one=load;direct_bool=1;
         }else continue;
         for(j=(unsigned)transfer+1;j<=(unsigned)one;++j){
             LpLine *l=&u->lines[j];
@@ -580,7 +585,7 @@ static int lp_boolean_join(LpUnit *u,Function *f,size_t at)
                    cg.parser->unit,skip_label,cg.parser->unit,done_label,cg.parser->unit,skip_label);
         }
         if(direct_bool){
-            u->lines[load].deleted=1;
+            if(test!=load)u->lines[load].deleted=1;
             lp_set(&u->lines[test],"    lda #1");
         }else u->lines[load].deleted=u->lines[test].deleted=u->lines[branch].deleted=1;
         {
