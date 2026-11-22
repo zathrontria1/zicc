@@ -1245,6 +1245,13 @@ static int lp_dead_code(LpUnit *u,Function *f,size_t at)
         LpLine *l=&u->lines[i];size_t m;const char *p;int pure=0;
         if(!l->op||l->deleted||l->replace)continue;
         p=lp_operand(l,&m);
+        if(lp_is(l,"cmp")&&lp_immediate(l)==0&&!(l->out&LP_C)){
+            int prev=lp_next(u,i,-1);
+            if(prev>=0&&u->lines[prev].m8==l->m8&&(u->lines[prev].def&(LP_N|LP_Z))==(LP_N|LP_Z)&&
+               (u->lines[prev].def&(LP_A|LP_AL))){
+                l->deleted=1;++changed;continue;
+            }
+        }
         if(l->m8&&m>1&&p[0]=='#'&&(lp_is(l,"cmp")||lp_is(l,"lda"))){
             unsigned live=lp_byte_live_out(u,i);
             if(!(live&l->def)){l->deleted=1;++changed;continue;}
