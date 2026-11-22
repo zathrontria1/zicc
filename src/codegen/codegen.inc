@@ -3361,6 +3361,15 @@ static int direct_call_argument(Expr *e)
         if(w==4){code("    pea ");immediate(root,1);code("\n");}
         code("    pea ");immediate(root,0);code("\n");return 1;
     }
+    if(w==4&&root->kind==EX_CAST&&!root->type.pointers&&root->type.base!=TY_FLOAT){
+        Expr *inner=root->left;
+        while(inner->kind==EX_CAST&&value_type(inner->type).pointers&&value_type(inner->left->type).pointers&&
+              far_pointer(value_type(inner->type))==far_pointer(value_type(inner->left->type)))inner=inner->left;
+        if(far_pointer(value_type(inner->type))&&
+           (constant_address(inner)||(inner->kind==EX_OBJECT&&inner->type.array&&!inner->symbol->owner))){
+            code("    pea ");immediate(inner,1);code("\n    pea ");immediate(inner,0);code("\n");return 1;
+        }
+    }
     if(w==4&&far_pointer(value_type(root->type))){
         String *literal=scalar_string_offset(root,&offset);
         if(literal){
