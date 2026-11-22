@@ -4504,6 +4504,48 @@ static void hw_byte_emit_m8_op(const char *opname,const HwByteOperand *op)
         code("\n");
     }
 }
+static int selection_saturating_sub(Expr *e,int byte_target)
+{
+    Expr *test,*diff,*zero,*a,*b;uint32_t zv;int diff_on_yes,gt;
+    e=word_uncast(e);
+    if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||
+       e->kind!=EX_CHOOSE||volatile_expression(e))return 0;
+    test=e->left;
+    if(test->kind!=EX_BINARY||(test->op!='<'&&test->op!='>'&&test->op!=TOK_LE&&test->op!=TOK_GE))return 0;
+    if(integer_constant(e->third,&zv)&&zv==0){diff=word_uncast(e->right);zero=e->third;diff_on_yes=1;}
+    else if(integer_constant(e->right,&zv)&&zv==0){diff=word_uncast(e->third);zero=e->right;diff_on_yes=0;}
+    else return 0;
+    (void)zero;
+    if(diff->kind!=EX_BINARY||diff->op!='-')return 0;
+    a=word_uncast(diff->left);b=word_uncast(diff->right);
+    if(body_effect(a)||body_effect(b))return 0;
+    if(body_equal(word_uncast(test->left),a)&&body_equal(word_uncast(test->right),b))
+        gt=(test->op=='>'||test->op==TOK_GE)==diff_on_yes;
+    else if(body_equal(word_uncast(test->left),b)&&body_equal(word_uncast(test->right),a))
+        gt=(test->op=='<'||test->op==TOK_LE)==diff_on_yes;
+    else return 0;
+    if(!gt)return 0;
+    if(unsigned_byte_value(a)&&unsigned_byte_value(b)){
+        HwByteOperand ha=hw_byte_classify(a),hb=hw_byte_classify(b);
+        if(ha.kind==HW_BYTE_MEM&&(hb.kind==HW_BYTE_MEM||hb.kind==HW_BYTE_IMM)){
+            code("    sep #$20\n.a8\n");
+            hw_byte_emit_m8_load(&ha);
+            code("    sec\n");
+            hw_byte_emit_m8_op("sbc",&hb);
+            code("    bcs :+\n    lda #$00\n:\n    rep #$20\n.a16\n");
+            if(!byte_target)code("    and #$00FF\n");
+            return 1;
+        }
+    }
+    if(word_integer(e->type)&&common_type(test->left->type,test->right->type).is_unsigned&&
+       selection_operand(b,0)){
+        emit_value(a);
+        code("    sec\n    sbc ");selection_operand(b,1);
+        code("\n    bcs :+\n    lda #$0000\n:\n");
+        return 1;
+    }
+    return 0;
+}
 static void emit_m8_byte_value(Expr *e)
 {
     HwByteOperand op;
@@ -4653,6 +4695,42 @@ static int hardware_byte_product(Expr *e)
     code("    rep #$20\n.a16\n    nop\n    lda f:$004216\n");
     return 1;
 }
+static unsigned fold_choose_word_op(int op,uint16_t a,uint16_t b,int is_unsigned)
+{
+    switch(op){
+    case '+':return (uint16_t)(a+b);
+    case '-':return (uint16_t)(a-b);
+    case '&':return (uint16_t)(a&b);
+    case '|':return (uint16_t)(a|b);
+    case '^':return (uint16_t)(a^b);
+    case '*':return (uint16_t)(a*b);
+    case TOK_SHL:return (uint16_t)(a<<b);
+    case TOK_SHR:return is_unsigned?(uint16_t)(a>>b):(uint16_t)((int16_t)a>>b);
+    default:return 0;
+    }
+}
+static int fold_constant_choose(Expr *e)
+{
+    Expr *choose;uint32_t c,k1,k2;int choose_left=0;
+    if(cg.parser->no_strength_reduction||volatile_expression(e)||!word_integer(e->type))return 0;
+    if(e->op!='+'&&e->op!='-'&&e->op!='&'&&e->op!='|'&&e->op!='^'&&e->op!='*'&&e->op!=TOK_SHL&&e->op!=TOK_SHR)return 0;
+    if(integer_constant(e->left,&c)&&e->right->kind==EX_CHOOSE)choose=e->right;
+    else if(e->left->kind==EX_CHOOSE&&integer_constant(e->right,&c)){choose=e->left;choose_left=1;}
+    else return 0;
+    if(body_effect(choose->right)||body_effect(choose->third)||
+       !integer_constant(choose->right,&k1)||!integer_constant(choose->third,&k2))return 0;
+    if((e->op==TOK_SHL||e->op==TOK_SHR)&&(choose_left?(c>=16):(k1>=16||k2>=16)))return 0;
+    uint16_t v1=(uint16_t)(choose_left?fold_choose_word_op(e->op,(uint16_t)k1,(uint16_t)c,e->type.is_unsigned)
+                                      :fold_choose_word_op(e->op,(uint16_t)c,(uint16_t)k1,e->type.is_unsigned));
+    uint16_t v2=(uint16_t)(choose_left?fold_choose_word_op(e->op,(uint16_t)k2,(uint16_t)c,e->type.is_unsigned)
+                                      :fold_choose_word_op(e->op,(uint16_t)c,(uint16_t)k2,e->type.is_unsigned));
+    if(v1==v2&&!body_effect(choose->left)){code("    lda #$%04X\n",v1);return 1;}
+    unsigned yes=++cg.label,no=++cg.label,end=++cg.label;
+    branch(choose->left,yes,no,yes);
+    label(yes);code("    lda #$%04X\n",v1);jump(end);
+    label(no);code("    lda #$%04X\n",v2);label(end);
+    return 1;
+}
 static void emit_value(Expr *e)
 {
     if(wide_compare_supported(e)){emit_wide_compare(e);return;}
@@ -4737,7 +4815,8 @@ static void emit_value(Expr *e)
         if(!cg.parser->no_strength_reduction&&fold_binary32_integer_cast(e->left,e->type))break;
         if(narrow_byte_product(e->left,e->type))break;
         if(!e->type.pointers&&!e->type.is_bool&&e->type.base==TY_CHAR&&e->left->kind==EX_CHOOSE&&
-           accumulator_zero_choose(e->left,e->type))break;
+           (accumulator_zero_choose(e->left,e->type)||
+            (e->type.is_unsigned&&selection_saturating_sub(e->left,1))))break;
         if(!cg.parser->no_strength_reduction&&!e->type.pointers&&e->type.base==TY_CHAR&&
            e->type.is_unsigned&&!e->type.is_bool&&address_bank_byte(e,0)){
             code("    lda ");address_bank_byte(e,1);code("\n");break;
