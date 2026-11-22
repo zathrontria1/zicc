@@ -343,6 +343,10 @@ __noinline void ring_walk(unsigned start,unsigned end) {
  ring_out_head=head;ring_out_tail=tail;ring_sum=sum;
 }
 
+static unsigned char copy_target[16];
+__noinline _Bool near_origin_copy(unsigned char *dst,unsigned source) {
+ return memcpy(dst,(const unsigned char *)source+1,16)==dst;
+}
 struct SpriteStyle { unsigned offset, reverse_offset, top, attr; };
 struct SpriteItem {
  unsigned x,y,index,direction,out,attr;
@@ -541,6 +545,21 @@ int main(void){
  ring_bytes[7]=0;ring_bytes[8]=254;
  ring_walk(7,0);
  if(ring_out_head||ring_out_tail||ring_sum||ring_bytes[7]!=0)return 116;
+
+ for(unsigned i=0;i<20;i++)ring_bytes[i]=1;
+ ring_bytes[7]=0;ring_bytes[10]=0;ring_bytes[8]=128;ring_words[6]=4;
+ ring_walk(6,7);
+ if(ring_out_head!=1||ring_out_tail!=1||ring_sum!=13||
+    ring_words[7]!=3||ring_words[0]!=6||ring_bytes[7]!=129||ring_bytes[10]!=129)return 128;
+
+ for(unsigned i=0;i<16;i++){
+  ((volatile unsigned char * __far)0x7ee9c0ul)[i]=i+21;
+  ((volatile unsigned char * __far)0x7efff8ul)[i]=i+77;
+ }
+ if(!near_origin_copy(copy_target,0xe9bf))return 134;
+ for(unsigned i=0;i<16;i++)if(copy_target[i]!=i+21)return 135;
+ if(!near_origin_copy(copy_target,0xfff7))return 136;
+ for(unsigned i=0;i<16;i++)if(copy_target[i]!=i+77)return 137;
 
  sprite_origin_x=4;sprite_origin_y=7;
  sprite_item.x=160;sprite_item.y=240;sprite_item.index=4;
@@ -926,7 +945,11 @@ def main():
             assert 'scaled ring indices within loop' in ring and 'and #$000E' in ring
             assert 'borrow Y across near byte guard loop' in ring
             assert 'retained byte step and biased guard cursor' in ring and 'cmp #$FFF7' in ring
+            assert 'keep scaled ring tail in X across guards' in ring
+            assert ring.count('    inx')>=8
             assert 'cpy #$FFF7' not in ring
+            near_copy=assemblies.split('_near_origin_copy:',1)[1].split('__size_near_origin_copy',1)[0]
+            assert 'mvn #$7E, #$7E' in near_copy and 'jsr .loword(_memcpy)' in near_copy
             draw=assemblies.split('_place_sprite:',1)[1].split('__size_place_sprite',1)[0]
             early,visible=draw.split('; allocate frame after entry guards',1)
             assert '    tcs' not in early and '    tcs' in visible

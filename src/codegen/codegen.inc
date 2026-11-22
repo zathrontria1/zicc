@@ -70,6 +70,7 @@ typedef struct {
     int stack_leaf;unsigned stack_bias;
     int lp_volatile,lp_frame_address,lp_word_result,lp_value_result;
     int loop_y_borrowed;
+    Symbol *scaled_ring_indices[4];
     FixedWordRows *fixed_rows;
     Symbol *scalar_first;int scalar_leaf,scalar_spill;
     Symbol *leaf_count;
@@ -3607,6 +3608,7 @@ static void emit_call(Expr *e,int needed)
     }
     if(!e->left){
         if(near_library_call(e))return;
+        if(near_origin_memcpy(e,needed))return;
         if(short_memset(e,needed))return;
         if(literal_strcpy(e))return;
         if(literal_sprintf(e,needed))return;
@@ -6825,17 +6827,76 @@ static int copy_cold_guard_tail(Statement *s)
     return !s||((!s->next||!s->next->next)&&!statement_inline_markers(s));
 }
 
+typedef struct {
+    Symbol *index,*array;
+    Symbol *values[8];
+    unsigned adjustment[8];
+    unsigned limit;
+} GuardRingTail;
+
+static int guard_ring_tail(const ByteGuardGroup *g,GuardRingTail *plan)
+{
+    if(!cg.scaled_ring_indices[0]||cg.parser->no_register_cursors)return 0;
+    for(unsigned i=0;i<g->count;++i){
+        Statement *s=g->guards[i].tail;
+        Expr *store=s&&s->kind==ST_EXPR?s->expression:NULL,*next,*address,*base,*index,*rhs,*add,*v;
+        uint32_t mask,step,literal,adjustment=0;
+        if(!store||store->kind!=EX_ASSIGN||store->op||!s->next||s->next->next||
+           !(next=plain_assignment(s->next))||
+           store->left->kind!=EX_DEREF||width(store->left->type)!=2||
+           next->left->kind!=EX_OBJECT)return 0;
+        address=store->left->left;
+        if(address->kind!=EX_BINARY||address->op!='+'||address->left->kind!=EX_CAST)return 0;
+        base=address->left->left;index=word_bits(address->right);
+        if(base->kind!=EX_OBJECT||!base->type.array||index->kind!=EX_OBJECT||
+           index->symbol!=next->left->symbol||!guard_dp_home(index->symbol))return 0;
+        unsigned ring=0;
+        while(ring<4&&cg.scaled_ring_indices[ring]!=index->symbol)++ring;
+        if(ring==4)return 0;
+        rhs=word_bits(next->right);
+        if(rhs->kind!=EX_BINARY||rhs->op!='&'||!integer_constant(rhs->right,&mask)||
+           mask<2*g->count||mask>=0xFFFEu||(mask&1)||((mask+2)&mask))return 0;
+        add=word_bits(rhs->left);
+        if(add->kind!=EX_BINARY||add->op!='+'||!lftr_object(word_bits(add->left),index->symbol)||
+           !integer_constant(add->right,&step)||step!=2)return 0;
+        v=word_bits(store->right);
+        if(v->kind==EX_BINARY&&(v->op=='+'||v->op=='-')&&integer_constant(v->right,&literal)){
+            adjustment=v->op=='+'?literal:0u-literal;
+            v=word_bits(v->left);
+        }
+        if(integer_constant(v,&literal))adjustment+=literal;
+        else{
+            if(v->kind!=EX_OBJECT||v->symbol==index->symbol||value_width(v->type)!=2||
+               !guard_dp_home(v->symbol))return 0;
+            plan->values[i]=v->symbol;
+        }
+        if(i&&(index->symbol!=plan->index||base->symbol!=plan->array||
+               mask-2*g->count+2!=plan->limit))return 0;
+        plan->index=index->symbol;plan->array=base->symbol;
+        plan->limit=mask-2*g->count+2;
+        plan->adjustment[i]=(unsigned)adjustment&65535u;
+    }
+    return 1;
+}
+
 static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *step)
 {
     unsigned fast[8],cold[8],tail[8],i,done=++cg.label;
     unsigned reject=step?++cg.label:0,boundary=(unsigned)(65536-(g->max-g->min));
+    GuardRingTail ring={0};
+    int keep_x=guard_ring_tail(g,&ring);
     unsigned char copied[8];
     for(i=0;i<g->count;++i){
         fast[i]=++cg.label;cold[i]=++cg.label;tail[i]=++cg.label;
-        copied[i]=(unsigned char)(i+1<g->count&&copy_cold_guard_tail(g->guards[i].tail));
+        copied[i]=(unsigned char)(keep_x||(i+1<g->count&&copy_cold_guard_tail(g->guards[i].tail)));
     }
     code("    tay\n    cmp #$%04X\n    bcc :+\n",boundary);
-    jump(cold[0]);code(":\n    sep #$20\n.a8\n");
+    jump(cold[0]);code(":\n");
+    if(keep_x){
+        code("; keep scaled ring tail in X across guards\n    ldx %s\n    cpx #$%04X\n    bcs cg_%s_%u\n",
+             frame_operand(ring.index->offset),ring.limit,cg.parser->unit,cold[0]);
+    }
+    code("    sep #$20\n.a8\n");
     if(step)emit_guard_increment(step,reject,(unsigned)-g->min,0);
     for(i=0;i<g->count;++i){
         ByteGuard *guard=&g->guards[i];
@@ -6846,7 +6907,13 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
         array_operand(guard->value,0);
         code("\n    sta a:0+$%04X,y\n    rep #$20\n.a16\n",offset);
         label(tail[i]);cg.divmod_available=0;
-        if(guard->tail)emit_statements(guard->tail);
+        if(keep_x){
+            if(ring.values[i]){
+                code("    lda ");array_operand(ring.values[i],0);code("\n");
+                strength_adjust(ring.adjustment[i]);
+            }else code("    lda #$%04X\n",ring.adjustment[i]);
+            code("    sta a:.loword(_%s),x\n    inx\n    inx\n",ring.array->asm_name);
+        }else if(guard->tail)emit_statements(guard->tail);
         if(i+1<g->count){
             if(!copied[i]){
                 code("    cpy #$%04X\n    bcc :+\n",boundary);
@@ -6854,7 +6921,10 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
             }
             code("    sep #$20\n.a8\n");
         }else{
-            jump(done);label(skip);code(".a8\n    rep #$20\n.a16\n");jump(done);
+            if(keep_x)code("    stx %s\n",frame_operand(ring.index->offset));
+            jump(done);label(skip);code(".a8\n    rep #$20\n.a16\n");
+            if(keep_x)code("    stx %s\n",frame_operand(ring.index->offset));
+            jump(done);
         }
     }
     for(i=0;i<g->count;++i){
@@ -6871,7 +6941,7 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
         if(copied[i]){
             cg.divmod_available=0;
             if(guard->tail)emit_statements(guard->tail);
-            jump(cold[i+1]);
+            jump(i+1<g->count?cold[i+1]:done);
         }else jump(tail[i]);
         label(skip);code(".a8\n    rep #$20\n.a16\n");
     }
@@ -9258,7 +9328,9 @@ static int emit_scaled_ring_loop(Statement *s,int *result)
         code("    asl a\n    adc #$0000\n");
         store_symbol(p.rings[i].index);
     }
+    for(i=0;i<p.count;++i)cg.scaled_ring_indices[i]=p.rings[i].index;
     if(!emit_guard_y_loop(s,result))*result=emit_loop_body(s,1);
+    memset(cg.scaled_ring_indices,0,sizeof cg.scaled_ring_indices);
     for(i=0;i<p.count;++i){
         load_symbol(p.rings[i].index);
         code("    lsr a\n    bcc :+\n    ora #$8000\n:\n");
