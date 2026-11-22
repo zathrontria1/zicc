@@ -343,6 +343,22 @@ __noinline void ring_walk(unsigned start,unsigned end) {
  ring_out_head=head;ring_out_tail=tail;ring_sum=sum;
 }
 
+static unsigned cursor_a[8],cursor_b[8],cursor_out[8];
+__noinline void branched_cursors(unsigned count) {
+ unsigned *a=cursor_a,*b=cursor_b,*out=&cursor_out[2],*end=cursor_a+count*2;
+ while(a!=end) {
+  if(!*a){ *a=3; continue; }
+  if(*a&1U){
+   *out++=*a+*b;
+   *out++=a[1]+b[1];
+  }else{
+   *out=0xffff;
+   out+=2;
+  }
+  a+=2;
+  b+=2;
+ }
+}
 static unsigned char copy_target[16];
 __noinline _Bool near_origin_copy(unsigned char *dst,unsigned source) {
  return memcpy(dst,(const unsigned char *)source+1,16)==dst;
@@ -551,6 +567,13 @@ int main(void){
  ring_walk(6,7);
  if(ring_out_head!=1||ring_out_tail!=1||ring_sum!=13||
     ring_words[7]!=3||ring_words[0]!=6||ring_bytes[7]!=129||ring_bytes[10]!=129)return 128;
+
+ cursor_a[1]=10;cursor_a[2]=4;cursor_a[4]=9;cursor_a[5]=12;
+ for(unsigned i=0;i<8;i++){cursor_b[i]=20+i;cursor_out[i]=0x8675;}
+ branched_cursors(3);
+ if(cursor_a[0]!=3||cursor_out[0]!=0x8675||cursor_out[1]!=0x8675||
+    cursor_out[2]!=23||cursor_out[3]!=31||cursor_out[4]!=65535U||
+    cursor_out[5]!=0x8675||cursor_out[6]!=33||cursor_out[7]!=37)return 129;
 
  for(unsigned i=0;i<16;i++){
   ((volatile unsigned char * __far)0x7ee9c0ul)[i]=i+21;
@@ -948,6 +971,9 @@ def main():
             assert 'keep scaled ring tail in X across guards' in ring
             assert ring.count('    inx')>=8
             assert 'cpy #$FFF7' not in ring
+            cursors=assemblies.split('_branched_cursors:',1)[1].split('__size_branched_cursors',1)[0]
+            assert re.search(r'sta a:\.loword\(_\w+__cursor_out\+\$0004\),x',cursors)
+            assert re.search(r'sta a:\.loword\(_\w+__cursor_out\+\$0006\),x',cursors)
             near_copy=assemblies.split('_near_origin_copy:',1)[1].split('__size_near_origin_copy',1)[0]
             assert 'mvn #$7E, #$7E' in near_copy and 'jsr .loword(_memcpy)' in near_copy
             draw=assemblies.split('_place_sprite:',1)[1].split('__size_place_sprite',1)[0]

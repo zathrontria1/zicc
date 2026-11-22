@@ -2396,10 +2396,9 @@ static Expr *body_cursor_base(Statement *head,Statement *loop,Symbol *v)
         if(!body_cursor_written(head,head->next,v))continue;
         base=NULL;
         if(head->kind==ST_EXPR&&e&&e->kind==EX_ASSIGN&&!e->op&&e->left->kind==EX_OBJECT&&e->left->symbol==v){
-            Expr *root=e->right;
-            while(root->kind==EX_CAST&&value_type(root->left->type).pointers&&
-                  !far_pointer(value_type(root->left->type)))root=root->left;
-            if(root->kind==EX_OBJECT&&root->type.array&&!root->type.banked&&!root->symbol->owner)base=e->right;
+            unsigned offset;
+            Symbol *root=near_object_address(e->right,&offset);
+            if(root&&root->type.array&&!root->owner&&!root->type.banked)base=e->right;
         }
     }
     return base;
@@ -2427,9 +2426,99 @@ static void body_cursor_substitute(Statement *s,Statement *stop,Symbol *cursor,E
         body_cursor_substitute(s->alternate,NULL,cursor,address);
     }
 }
+
+static Expr *body_shared_cursor_address(Symbol *cursor,Expr *base,Symbol *index,
+                                       unsigned displacement,Location at)
+{
+    Type bytes=pointer_to(type(TY_CHAR,0));
+    Expr *address=new_expr(EX_CAST,at,cursor->type),*sum=new_expr(EX_BINARY,at,bytes);
+    unsigned base_offset;
+    Symbol *object=near_object_address(base,&base_offset);
+    address->left=sum;
+    sum->op='+';sum->left=new_expr(EX_CAST,at,bytes);
+    sum->left->left=body_object(object,at);
+    sum->right=body_object(index,at);
+    if(base_offset+displacement){
+        Expr *offset=new_expr(EX_BINARY,at,bytes);
+        offset->op='+';offset->left=sum->left;
+        offset->right=body_literal(index->type,(base_offset+displacement)&65535u,at);
+        sum->left=offset;
+    }
+    return address;
+}
+
+static void body_branched_cursor_use(Expr **e,Symbol *cursor,Expr *base,Symbol *index,unsigned displacement)
+{
+    if(!index||!loop_mentions(*e,cursor))return;
+    Expr *address=body_shared_cursor_address(cursor,base,index,displacement,(*e)->location);
+    body_cursor_replace(e,cursor,address);
+    free_expression(address);
+}
+
+/* Analyze simple conditional paths up to the shared loop step. A continue
+ * bypasses that step, so it must also bypass every cursor advance */
+static int body_branched_cursor(Statement *s,Statement *stop,Symbol *cursor,
+                                Expr *base,Symbol *index,int displacement)
+{
+    for(;s&&s!=stop;s=s->next){
+        Expr *e=s->expression;
+        switch(s->kind){
+        case ST_EMPTY:break;
+        case ST_BLOCK:
+            if(s->inline_callee)return -1;
+            displacement=body_branched_cursor(s->body,NULL,cursor,base,index,displacement);
+            break;
+        case ST_IF:{
+            if(scalar_writes_expr(e,cursor))return -1;
+            body_branched_cursor_use(&s->expression,cursor,base,index,(unsigned)displacement);
+            int yes=body_branched_cursor(s->body,NULL,cursor,base,index,displacement);
+            int no=body_branched_cursor(s->alternate,NULL,cursor,base,index,displacement);
+            if(yes==-1||no==-1||(yes>=0&&no>=0&&yes!=no))return -1;
+            displacement=yes>=0?yes:no;
+            break;
+        }
+        case ST_EXPR:{
+            Symbol *v=NULL;
+            unsigned step=body_cursor_step(s,&v);
+            if(step&&v==cursor){
+                if(index){free_expression(s->expression);s->expression=NULL;s->kind=ST_EMPTY;}
+                if(step>65535u-(unsigned)displacement)return -1;
+                displacement+=(int)step;
+                break;
+            }
+            if(e&&e->kind==EX_ASSIGN&&!e->op&&e->left->kind==EX_DEREF&&
+               e->left->left->kind==EX_POST&&e->left->left->op==TOK_INC&&
+               lftr_object(e->left->left->left,cursor)){
+                step=increment_step(cursor->type);
+                if(loop_mentions(e->right,cursor)||!step||step>65535u-(unsigned)displacement)return -1;
+                if(index){
+                    free_expression(e->left->left);
+                    e->left->left=body_shared_cursor_address(cursor,base,index,(unsigned)displacement,e->location);
+                }
+                displacement+=(int)step;
+                break;
+            }
+            if(scalar_writes_expr(e,cursor))return -1;
+            body_branched_cursor_use(&s->expression,cursor,base,index,(unsigned)displacement);
+            break;
+        }
+        case ST_CONTINUE:return displacement==0?-2:-1;
+        case ST_BREAK:return -2;
+        case ST_RETURN:
+            if(scalar_writes_expr(e,cursor))return -1;
+            body_branched_cursor_use(&s->expression,cursor,base,index,(unsigned)displacement);
+            return -2;
+        default:return -1;
+        }
+        if(displacement<0)return displacement;
+    }
+    return displacement;
+}
+
 /* Lockstep near cursors starting at fixed arrays share a byte induction
  * variable. Only the common trailing update changes the offset, so an early
- * continue keeps every cursor at its original element. */
+ * continue keeps every cursor at its original element. Other cursors may
+ * complete the same advance across branches before that common step. */
 static void body_share_cursors(Function *f,Statement **head)
 {
     Statement **link;
@@ -2438,9 +2527,9 @@ static void body_share_cursors(Function *f,Statement **head)
         Statement *loop=*link,*s,*first=NULL,*init;
         Symbol *cursors[8],*index;
         Expr *bases[8];
-        unsigned count=0,stride=0,i;
+        unsigned count=0,stride=0,i,trailing;
         char name[64];
-        Type word=type(TY_INT,0),bytes=pointer_to(type(TY_CHAR,0));
+        Type word=type(TY_INT,0);
         word.is_unsigned=1;
         if(loop->kind!=ST_WHILE||!loop->body||loop->body->kind!=ST_BLOCK||
            loop->body->inline_callee||!loop->expression)continue;
@@ -2460,6 +2549,19 @@ static void body_share_cursors(Function *f,Statement **head)
                !(bases[i]=body_cursor_base(*head,loop,cursors[i])))break;
         }
         if(i!=count)continue;
+        trailing=count;
+        for(s=*head;s!=loop&&count<8;s=s->next){
+            Expr *assignment=plain_assignment(s),*base;
+            Symbol *cursor;
+            if(!assignment||!(cursor=assignment->left->symbol)||!body_private(cursor)||
+               !cursor->type.pointers||far_pointer(cursor->type))continue;
+            for(i=0;i<count&&cursors[i]!=cursor;++i){}
+            if(i!=count||loop_mentions(loop->expression,cursor)||
+               body_cursor_written(first,NULL,cursor)||loop_observed_outside(loop->next,NULL,cursor)||
+               !(base=body_cursor_base(*head,loop,cursor))||
+               body_branched_cursor(loop->body->body,first,cursor,base,NULL,0)!=(int)stride)continue;
+            cursors[count]=cursor;bases[count++]=base;
+        }
         snprintf(name,sizeof name,"__stride_%u_%u",f->id,++serial);
         index=new_symbol(cg.parser,name,word,loop->location);
         index->owner=f->id;index->scope=1;index->active=1;index->internal=1;
@@ -2470,11 +2572,11 @@ static void body_share_cursors(Function *f,Statement **head)
         init->expression->right=body_literal(word,0,loop->location);
         init->next=loop;*link=init;link=&init->next;
         for(i=0;i<count;++i){
-            Expr *address=new_expr(EX_CAST,loop->location,cursors[i]->type);
-            Expr *sum=new_expr(EX_BINARY,loop->location,bytes);
-            sum->op='+';sum->left=new_expr(EX_CAST,loop->location,bytes);
-            sum->left->left=body_clone(bases[i]);sum->right=body_object(index,loop->location);
-            address->left=sum;
+            if(i>=trailing){
+                body_branched_cursor(loop->body->body,first,cursors[i],bases[i],index,0);
+                continue;
+            }
+            Expr *address=body_shared_cursor_address(cursors[i],bases[i],index,0,loop->location);
             body_cursor_replace(&loop->expression,cursors[i],address);
             body_cursor_substitute(loop->body->body,first,cursors[i],address);
             free_expression(address);
@@ -2490,6 +2592,7 @@ static void body_share_cursors(Function *f,Statement **head)
         first->expression->right=body_literal(word,stride,first->location);
     }
 }
+
 /* Drop an overwritten private home, keeping evaluation of the original
  * RHS. In particular, separate hardware reads remain in source order. */
 static void body_overwritten_locals(Statement *s)
@@ -4840,7 +4943,8 @@ static void body_optimize(Function *f)
         }
         body_defer_switch_addresses(f,f->body->body);
         body_sink_guard_value(f->body->body);
-        if(!cg.parser->no_indexed_operands)body_share_cursors(f,&f->body->body);
+        if(!cg.parser->no_indexed_operands&&!f->jump_label_count&&!body_asm_statements(f->body))
+            body_share_cursors(f,&f->body->body);
     }
     if(!f->jump_label_count&&!body_asm_statements(f->body)){
         body_flatten_tree(f->body);
