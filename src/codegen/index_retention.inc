@@ -518,7 +518,7 @@ static int retained_byte_fill(Statement *s,Symbol *index,unsigned limit)
     Expr *assignment;
     IndexedOperand operand;
     uint32_t first,value;
-    unsigned count,offset,loop;
+    unsigned count,offset,loop,words,tail;
     int found=0;
     if(!body||body->next||body->kind!=ST_EXPR||!(assignment=body->expression)||
        assignment->kind!=EX_ASSIGN||assignment->op||width(assignment->left->type)!=1||
@@ -531,14 +531,36 @@ static int retained_byte_fill(Statement *s,Symbol *index,unsigned limit)
     if(count<2||count>32768)return 0;
     offset=operand.offset+first;
     operand.base->used=1;
-    code("; constant indexed byte fill\n    lda #$%04X\n",(value&255u)*257u);
-    if(count<=8){
+    value=(value&255u)*257u;
+    words=count/2;
+    code("; constant indexed byte fill\n");
+    if(words>=32&&!cg.parser->no_loop_unroll){
+        enum { GROUP_WORDS=8,GROUP_BYTES=2*GROUP_WORDS };
+        const char *store=value?"sta":"stz";
+        tail=words%GROUP_WORDS;
+        if(value&&tail)code("    lda #$%04X\n",(unsigned)value);
+        for(unsigned i=0;i<tail;++i){
+            code("    %s ",store);array_operand(operand.base,offset+i*2);code("\n");
+        }
+        loop=++cg.label;
+        code("    ldx #$%04X\n",2*(words-tail)-GROUP_BYTES);
+        label(loop);
+        if(value)code("    lda #$%04X\n",(unsigned)value);
+        for(unsigned i=0;i<GROUP_WORDS;++i){
+            operand.offset=offset+2*(tail+i);
+            code("    %s ",store);indexed_text(&operand);code("\n");
+        }
+        code("    txa\n    sec\n    sbc #$%04X\n    tax\n    bpl cg_%s_%u\n",
+             GROUP_BYTES,cg.parser->unit,loop);
+        if(count&1)code("    lda #$%04X\n",(unsigned)value);
+    }else if(count<=8){
+        code("    lda #$%04X\n",(unsigned)value);
         for(unsigned i=0;i+1<count;i+=2){
             code("    sta ");array_operand(operand.base,offset+i);code("\n");
         }
     }else{
         loop=++cg.label;
-        code("    ldx #$%04X\n",(count&~1u)-2);
+        code("    lda #$%04X\n    ldx #$%04X\n",(unsigned)value,(count&~1u)-2);
         label(loop);operand.offset=offset;
         code("    sta ");indexed_text(&operand);
         code("\n    dex\n    dex\n    bpl cg_%s_%u\n",cg.parser->unit,loop);

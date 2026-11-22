@@ -454,11 +454,69 @@ static int byte_loop_stmt_uses_fallback(ByteLoopPlan *p,Statement *s)
     }
     return 0;
 }
+
+static int byte_loop_swap_plan(ByteLoopPlan *plan,IndexedOperand pair[2],int *descending)
+{
+    Statement *body=body_single(plan->statement->body),*arm;
+    Expr *test,*values[2],*save,*move,*restore;
+    Symbol *temporary;
+    unsigned stride[2],offset[2];
+    int first;
+    if(!plan->primary_y||plan->statement->step!=plan->index_step||
+       !body||body->next||body->kind!=ST_IF||body->alternate||
+       statement_inline_markers(plan->statement->body)||volatile_statement(body))return 0;
+    test=body->expression;
+    if(test->kind!=EX_BINARY||(test->op!='<'&&test->op!='>'))return 0;
+    values[0]=promoted_byte_source(test->left);values[1]=promoted_byte_source(test->right);
+    for(unsigned i=0;i<2;++i)
+        if(!values[i]||!values[i]->type.is_unsigned||!indexed_operand(values[i],&pair[i])||
+           !byte_loop_affine(plan,&pair[i],&stride[i],&offset[i])||stride[i]!=1)return 0;
+    if(pair[0].base!=pair[1].base)return 0;
+    first=offset[1]<offset[0];
+    if(offset[first]+1!=offset[1-first]||offset[1-first]+plan->limit>width(pair[0].base->type))return 0;
+    arm=body_single(body->body);
+    if(!arm||arm->kind!=ST_EXPR||!arm->next||arm->next->kind!=ST_EXPR||
+       !arm->next->next||arm->next->next->kind!=ST_EXPR||arm->next->next->next)return 0;
+    save=arm->expression;move=arm->next->expression;restore=arm->next->next->expression;
+    if(save->kind!=EX_ASSIGN||save->op||save->left->kind!=EX_OBJECT||width(save->type)!=1||
+       save->type.is_bool||move->kind!=EX_ASSIGN||move->op||restore->kind!=EX_ASSIGN||restore->op)return 0;
+    temporary=save->left->symbol;
+    if(!body_private(temporary)||statement_references(cg.function->body,temporary)!=2||
+       !reduction_object(byte_loop_bits(restore->right),temporary))return 0;
+    unsigned saved=body_equal(byte_loop_bits(save->right),values[0])?0:1;
+    if(!body_equal(byte_loop_bits(save->right),values[saved])||
+       !body_equal(move->left,values[saved])||!body_equal(byte_loop_bits(move->right),values[1-saved])||
+       !body_equal(restore->left,values[1-saved]))return 0;
+    *descending=(test->op=='<')!=first;
+    if(first){IndexedOperand swap=pair[0];pair[0]=pair[1];pair[1]=swap;}
+    pair[0].offset=offset[first];pair[1].offset=offset[1-first];
+    pair[0].reg=pair[1].reg='y';
+    return 1;
+}
+
+/* The next pair begins with the right-hand byte left by this comparison.
+ * Keep it in A and exchange the two bytes only on the strict swap path. */
+static void byte_loop_emit_swap(IndexedOperand pair[2],int descending,unsigned step)
+{
+    unsigned keep_right=++cg.label;
+    code("    cmp ");indexed_text(&pair[1]);
+    code("\n    beq cg_%s_%u\n    %s cg_%s_%u\n",cg.parser->unit,step,
+         descending?"bcs":"bcc",cg.parser->unit,keep_right);
+    code("    pha\n    lda ");indexed_text(&pair[1]);
+    code("\n    sta ");indexed_text(&pair[0]);
+    code("\n    pla\n    sta ");indexed_text(&pair[1]);code("\n");
+    jump(step);
+    label(keep_right);
+    code("    lda ");indexed_text(&pair[1]);code("\n");
+}
+
 static int structured_byte_loop(Statement *s)
 {
     ByteLoopPlan plan={0};ByteLoopEmit emit={0};Expr *condition=s->expression,*step=s->step;
     Type t;uint32_t limit;unsigned i,best=0,enter,body,step_label,done;int constant,unsigned_cmp;
     Statement *previous=loop_previous,*current=loop_current;
+    IndexedOperand pair[2];
+    int adjacent_swap,descending=0;
     if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||cg.parser->no_register_loops||
        cg.parser->no_register_cursors||cg.parser->no_indexed_operands||!cg.dp_homes||cg.stack_leaf||
        cg.function->jump_label_count||cg.retained_index||cg.numeric_index||cg.bound||cg.affine_active||
@@ -497,6 +555,7 @@ static int structured_byte_loop(Statement *s)
     unsigned_cmp=t.is_unsigned||condition->op==TOK_NE||
         (condition->left->known.valid&&condition->left->known.min>=0&&
          condition->right->known.valid&&condition->right->known.min>=0);
+    adjacent_swap=unsigned_cmp&&byte_loop_swap_plan(&plan,pair,&descending);
     code("; structured byte loop: %s, %s bound, %c=counter",plan.index->name,constant?"constant":"runtime",plan.primary_y?'Y':'X');
     if(!plan.primary_y)code(", Y=stride %u",plan.scale);code("\n");
     if(plan.expr_bound){
@@ -516,7 +575,14 @@ static int structured_byte_loop(Statement *s)
     if(plan.primary_y){code("    ldy ");array_operand(plan.index,0);code("\n");}
     else{code("    ldx ");array_operand(plan.index,0);code("\n    txa\n");strength_scale(plan.scale,condition->left);code("    tay\n");}
     cg.loop_start[cg.loop_count]=step_label;cg.loop_end[cg.loop_count++]=done;
-    code("    sep #$20\n.a8\n");label(body);emit.plan=&plan;byte_loop_emit(&emit,s->body);byte_loop_release(&emit);
+    code("    sep #$20\n.a8\n");
+    if(adjacent_swap){
+        code("; carry adjacent byte into next comparison\n    lda ");
+        indexed_text(&pair[0]);code("\n");
+    }
+    label(body);emit.plan=&plan;
+    if(adjacent_swap)byte_loop_emit_swap(pair,descending,step_label);
+    else{byte_loop_emit(&emit,s->body);byte_loop_release(&emit);}
     label(step_label);
     byte_loop_emit_effect(&emit,s->step);byte_loop_release(&emit);
     if(unsigned_cmp){
@@ -536,9 +602,8 @@ static int structured_byte_loop(Statement *s)
     loop_previous=previous;loop_current=current;return 1;
 }
 
-/* A finite, nonoverlapping byte copy can visit two bytes at once. The proof
- * covers object extents and both offsets; overlapping/volatile copies retain
- * their original byte ordering. Code growth uses the existing unroll budget. */
+/* A finite, nonoverlapping byte copy can use word loads or a native block
+ * move. Both offsets and extents are proven before changing the access size. */
 static int fixed_byte_copy_loop(Statement *s)
 {
     Statement *body=s->body,*initial=s->initial;Expr *e,*init,*test=s->expression,*step=s->step,*rhs;
@@ -557,7 +622,7 @@ static int fixed_byte_copy_loop(Statement *s)
        !initial||initial->next||initial->kind!=ST_EXPR)return 0;
     init=initial->expression;e=body->expression;
     if(!init||init->kind!=EX_ASSIGN||init->op||init->left->kind!=EX_OBJECT||init->left->symbol!=index||
-       !integer_constant(init->right,&first)||first>=end||end-first>UNROLL_FULL_LIMIT||
+       !integer_constant(init->right,&first)||first>=end||
        !(((step->kind==EX_PRE||step->kind==EX_POST)&&step->op==TOK_INC)||
          (step->kind==EX_ASSIGN&&step->op=='+'&&integer_constant(step->right,&a)&&a==1))||
        step->left->kind!=EX_OBJECT||step->left->symbol!=index||!e||e->kind!=EX_ASSIGN||e->op||
@@ -570,11 +635,425 @@ static int fixed_byte_copy_loop(Statement *s)
     if(count<2||destination>65535||source>65535||
        destination+count>width(to.base->type)||source+count>width(from.base->type)||
        (to.base==from.base&&destination<source+count&&source<destination+count))return 0;
-    code("; widened fixed byte copy: %u bytes\n",count);to.base->used=from.base->used=1;
-    for(i=0;i+1<count;i+=2)
-        code("    lda a:.loword(_%s+$%04X)\n    sta a:.loword(_%s+$%04X)\n",from.base->asm_name,source+i,to.base->asm_name,destination+i);
-    if(i<count)code("    sep #$20\n.a8\n    lda a:.loword(_%s+$%04X)\n    sta a:.loword(_%s+$%04X)\n    rep #$20\n.a16\n",
-                    from.base->asm_name,source+i,to.base->asm_name,destination+i);
+    if(count>UNROLL_FULL_LIMIT){
+        if(cg.parser->no_copy_selection)return 0;
+        code("; fixed byte copy: mvn %u bytes\n"
+             "    phx\n    phy\n    phb\n"
+             "    ldx #.loword(_%s+$%04X)\n    ldy #.loword(_%s+$%04X)\n"
+             "    lda #$%04X\n    mvn #.bankbyte(_%s), #.bankbyte(_%s)\n"
+             "    plb\n    ply\n    plx\n",
+             count,from.base->asm_name,source,to.base->asm_name,destination,
+             count-1,from.base->asm_name,to.base->asm_name);
+    }else{
+        code("; widened fixed byte copy: %u bytes\n",count);
+        for(i=0;i+1<count;i+=2)
+            code("    lda a:.loword(_%s+$%04X)\n    sta a:.loword(_%s+$%04X)\n",from.base->asm_name,source+i,to.base->asm_name,destination+i);
+        if(i<count)code("    sep #$20\n.a8\n    lda a:.loword(_%s+$%04X)\n    sta a:.loword(_%s+$%04X)\n    rep #$20\n.a16\n",
+                        from.base->asm_name,source+i,to.base->asm_name,destination+i);
+    }
+    to.base->used=from.base->used=1;
     if(loop_observed_outside(cg.function->body,s,index)){code("    lda #$%04X\n",end&65535);store_symbol(index);strength_sync(index,NULL);}
     cg.divmod_available=0;return 1;
+}
+
+static int byte_copy_counter(Symbol *symbol)
+{
+    return word_integer(symbol->type)&&symbol->type.is_unsigned&&!symbol->type.is_bool&&
+           !symbol->address_taken&&loop_private(symbol);
+}
+
+static int byte_copy_add_cursor(Symbol *symbol,Symbol **cursors,unsigned *count)
+{
+    if(*count==2||!byte_copy_counter(symbol))return 0;
+    for(unsigned i=0;i<*count;++i)if(cursors[i]==symbol)return 0;
+    cursors[(*count)++]=symbol;
+    return 1;
+}
+
+static int byte_copy_invariant(Expr *e,Symbol *count,Symbol **cursors,unsigned cursor_count)
+{
+    uint32_t ignored;
+    if(e->type.pointers||e->type.array||!known_integer(e->type))return 0;
+    if(integer_constant(e,&ignored))return 1;
+    if(e->kind!=EX_OBJECT||e->symbol==count||!body_private(e->symbol))return 0;
+    for(unsigned i=0;i<cursor_count;++i)if(e->symbol==cursors[i])return 0;
+    return 1;
+}
+
+static Symbol *byte_copy_induction(Expr *e,Symbol *count,Symbol **cursors,unsigned cursor_count)
+{
+    while(e->kind==EX_CAST&&word_integer(e->type)&&!e->type.is_bool&&word_integer(e->left->type))
+        e=e->left;
+    if(e->kind==EX_BINARY&&word_integer(e->type)&&(e->op=='+'||e->op=='-')){
+        if(byte_copy_invariant(e->right,count,cursors,cursor_count))
+            return byte_copy_induction(e->left,count,cursors,cursor_count);
+        if(e->op=='+'&&byte_copy_invariant(e->left,count,cursors,cursor_count))
+            return byte_copy_induction(e->right,count,cursors,cursor_count);
+        return NULL;
+    }
+    for(unsigned i=0;i<cursor_count;++i)if(reduction_object(e,cursors[i]))return cursors[i];
+    return NULL;
+}
+
+static void byte_copy_address(IndexedOperand *operand)
+{
+    operand->base->used=1;
+    emit_value(operand->index);
+    code("    clc\n    adc #.loword(_%s+$%04X)\n",operand->base->asm_name,operand->offset);
+}
+
+/* For a countdown copying ascending bytes, each access must advance by
+ * one and stay in its named near object. MVN preserves forward overlap. */
+static int counted_byte_copy_loop(Statement *s)
+{
+    Statement *body,*after;
+    Expr *test=s->expression,*store,*rhs,*update;
+    IndexedOperand operands[2];
+    Symbol *count,*cursors[2],*used[2];
+    unsigned cursor_count=0,done,updates=0,fallback=0;
+    int decremented=0,rom=0;
+    if((s->kind!=ST_WHILE&&(s->kind!=ST_FOR||s->initial))||!test||
+       cg.parser->no_copy_selection||cg.stack_leaf||!register_loop_available(s))return 0;
+    if(test->kind==EX_BINARY&&(test->op==TOK_NE||test->op=='>')&&
+       reg_width(common_type(test->left->type,test->right->type))==2&&reduction_zero(test->right))
+        test=test->left;
+    if(test->kind!=EX_OBJECT||!byte_copy_counter(count=test->symbol))return 0;
+    body=body_single(s->body);
+    if(!body||body->kind!=ST_EXPR||!(store=body->expression)||store->kind!=EX_ASSIGN||store->op||
+       width(store->type)!=1||store->type.is_bool)return 0;
+    rhs=byte_loop_bits(store->right);
+    if(width(rhs->type)!=1||!indexed_operand(store->left,&operands[0]))return 0;
+    if(!indexed_operand(rhs,&operands[1])){
+        int64_t offset=0;
+        IndexedOperand source={0};
+        if(rhs->kind!=EX_DEREF||
+           !(source.base=rom_index_base(rhs->left,&source.index,&source.scale,&offset))||
+           !source.index||offset<0||offset>=width(source.base->type))return 0;
+        source.offset=(unsigned)offset;
+        operands[1]=source;
+        rom=1;
+    }
+    for(unsigned i=0;i<2;++i){
+        IndexedOperand *operand=&operands[i];
+        Expr *index=operand->index;
+        if(operand->scale!=1||width(operand->base->type)>=65536)return 0;
+        if(index->kind==EX_POST&&index->op==TOK_INC&&index->left->kind==EX_OBJECT){
+            Symbol *cursor=index->left->symbol;
+            if(cursor==count||loop_mentions(operands[1-i].index,cursor)||
+               !byte_copy_add_cursor(cursor,cursors,&cursor_count))return 0;
+            operand->index=index->left;
+        }
+    }
+    for(after=body->next;after;after=after->next){
+        Symbol *symbol;
+        if(++updates>3||after->kind!=ST_EXPR||!(update=after->expression)||
+           !update->left||update->left->kind!=EX_OBJECT)return 0;
+        symbol=update->left->symbol;
+        if(symbol==count){
+            if(decremented||body_step_direction(update,count)!=-1)return 0;
+            decremented=1;
+        }else if(body_step_direction(update,symbol)!=1||
+                 !byte_copy_add_cursor(symbol,cursors,&cursor_count))return 0;
+    }
+    if(s->step){
+        if(decremented||body_step_direction(s->step,count)!=-1)return 0;
+        decremented=1;
+    }
+    if(!decremented||!cursor_count)return 0;
+    for(unsigned i=0;i<2;++i){
+        used[i]=byte_copy_induction(operands[i].index,count,cursors,cursor_count);
+        if(!used[i])return 0;
+    }
+    if(cursor_count==2&&used[0]==used[1])return 0;
+
+    done=++cg.label;
+    code("; counted byte copy: forward mvn\n");
+    load_symbol(count);
+    flag_branch("beq","bne",done,0,0);
+    if(rom){
+        /* A linked ROM object can straddle banks. Keep the original loop
+         * for that placement and for lengths where MVN setup costs more. */
+        fallback=++cg.label;
+        code("    cmp #$0008\n");flag_branch("bcc","bcs",fallback,0,0);
+        code("    lda #.loword(_%s)\n    clc\n    adc #$%04X\n",
+             operands[1].base->asm_name,width(operands[1].base->type)-1);
+        flag_branch("bcs","bcc",fallback,0,0);
+    }
+    load_symbol(count);
+    code("    dec a\n    pha\n");
+    byte_copy_address(&operands[0]);code("    pha\n");
+    byte_copy_address(&operands[1]);code("    tax\n");
+    code("    pla\n    phy\n    tay\n    phb\n    lda 4,s\n"
+         "    mvn #.bankbyte(_%s), #.bankbyte(_%s)\n"
+         "    plb\n    ply\n    pla\n",
+         operands[1].base->asm_name,operands[0].base->asm_name);
+    for(unsigned i=0;i<cursor_count;++i){
+        load_symbol(cursors[i]);code("    clc\n    adc ");
+        array_operand(count,0);code("\n");store_symbol(cursors[i]);
+    }
+    code("    lda #0\n");store_symbol(count);
+    if(fallback){
+        Statement *previous=loop_previous,*current=loop_current;
+        jump(done);label(fallback);
+        cg.divmod_available=0;
+        emit_loop_body(s,0);
+        loop_previous=previous;loop_current=current;
+    }
+    label(done);
+    cg.divmod_available=0;
+    return 1;
+}
+
+static int fixed_byte_reduction_operand(Expr *value,Symbol *index,unsigned first,
+                                        unsigned trips,IndexedOperand *operand)
+{
+    unsigned scale,bias;
+    value=byte_loop_test_bits(value);
+    if(!value->type.is_unsigned||value->type.is_bool||width(value->type)!=1||
+       !indexed_operand(value,operand)||operand->scale!=1||
+       !retained_affine_for(operand->index,index,&scale,&bias)||scale!=1)return 0;
+    operand->offset+=bias+first;
+    return operand->offset+trips<=width(operand->base->type)&&operand->offset+trips<=65536;
+}
+
+/* Carry an ordinary byte sum in A with its carries in Y. For products, use
+ * A to stage both hardware operands and keep the complete running sum in Y. */
+static int fixed_byte_sum_loop(Statement *s)
+{
+    Statement *body;
+    Expr *update,*value;
+    IndexedOperand left,right;
+    Symbol *index,*sum;
+    unsigned trips,final,first,factor,loop;
+    int product;
+    if(s->kind!=ST_FOR||!register_loop_available(s)||
+       !constant_loop_trip_count(s,&index,&trips,&final)||final<trips||trips<8||trips>32768)return 0;
+    body=body_single(s->body);
+    if(!body||body->next||body->kind!=ST_EXPR)return 0;
+    update=body->expression;
+    if(update->kind!=EX_ASSIGN||update->left->kind!=EX_OBJECT)return 0;
+    sum=update->left->symbol;
+    if(sum==index||!word_integer(sum->type)||!sum->type.is_unsigned||
+       sum->type.is_bool||!loop_private(sum))return 0;
+    value=update->right;
+    if(!update->op){
+        if(value->kind!=EX_BINARY||value->op!='+')return 0;
+        if(reduction_object(value->left,sum))value=value->right;
+        else if(reduction_object(value->right,sum))value=value->left;
+        else return 0;
+    }else if(update->op!='+')return 0;
+    value=byte_loop_test_bits(value);
+    first=final-trips;
+    product=value->kind==EX_BINARY&&word_integer(value->type)&&value->op=='*';
+    if(!fixed_byte_reduction_operand(product?value->left:value,index,first,trips,&left)||
+       (product&&!fixed_byte_reduction_operand(value->right,index,first,trips,&right)))return 0;
+    factor=1;
+    if(!product&&!cg.parser->no_loop_unroll)
+        factor=!(trips%4)?4:!(trips%2)?2:1;
+    loop=++cg.label;
+    code(product?"; register unsigned byte product sum\n":"; register unsigned byte sum\n");
+    load_symbol(sum);
+    code("    phy\n");
+    code(product?"    tay\n":"    ldy #0\n");
+    code("    ldx #$%04X\n",trips-1);
+    if(!product)code("    sep #$20\n.a8\n");
+    label(loop);
+    for(unsigned i=0;i<factor;++i){
+        if(product){
+            code("    sep #$20\n.a8\n    lda ");indexed_text(&left);
+            code("\n    sta f:$004202\n    lda ");indexed_text(&right);
+            /* REP, TYA and CLC fill seven CPU cycles before the long read */
+            code("\n    sta f:$004203\n    rep #$20\n.a16\n    tya\n    clc\n    adc f:$004216\n    tay\n");
+        }else{
+            unsigned skip=++cg.label;
+            code("    clc\n    adc ");indexed_text(&left);
+            code("\n    bcc cg_%s_%u\n    iny\n",cg.parser->unit,skip);label(skip);
+        }
+        code("    dex\n");
+    }
+    flag_branch("bpl","bmi",loop,0,0);
+    if(product)code("    tya\n    ply\n");
+    else code("    phy\n    xba\n    clc\n    adc 1,s\n    xba\n    rep #$20\n.a16\n    ply\n    ply\n");
+    store_symbol(sum);
+    if(loop_observed_outside(cg.function->body,s,index)){
+        code("    lda #$%04X\n",final);store_symbol(index);
+    }
+    cg.divmod_available=0;
+    return 1;
+}
+
+/* Carry the subscript in A between stores. The transient byte load does not
+ * affect the next index: X still holds the complete subscript. */
+static int strided_byte_store_loop(Statement *s)
+{
+    Statement *body;
+    Expr *test=s->expression,*step=s->step,*store,*stride;
+    Symbol *index;
+    IndexedOperand operand;
+    uint32_t limit,value;
+    unsigned scale,bias,loop,done;
+    if(s->kind!=ST_FOR||!test||test->kind!=EX_BINARY||test->op!='<'||
+       test->left->kind!=EX_OBJECT||!integer_constant(test->right,&limit)||!limit||limit>65535||
+       reg_width(common_type(test->left->type,test->right->type))!=2||
+       !step||step->kind!=EX_ASSIGN||step->op!='+'||!register_loop_available(s))return 0;
+    index=test->left->symbol;
+    stride=step->right;
+    if(!byte_copy_counter(index)||!reduction_object(step->left,index)||stride->kind!=EX_OBJECT||
+       stride->symbol==index||!word_integer(stride->type)||!body_private(stride->symbol)||
+       !direct_operand(stride,index->type,0,0))return 0;
+    for(unsigned i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index)return 0;
+    body=body_single(s->body);
+    if(!body||body->next||body->kind!=ST_EXPR)return 0;
+    store=body->expression;
+    if(store->kind!=EX_ASSIGN||store->op||width(store->type)!=1||store->type.is_bool||
+       !integer_constant(store->right,&value)||!indexed_operand(store->left,&operand)||
+       operand.scale!=1||!retained_affine_for(operand.index,index,&scale,&bias)||scale!=1||
+       operand.offset+bias+limit>width(operand.base->type)||operand.offset+bias+limit>65536)return 0;
+    operand.offset+=bias;
+    if(s->initial)emit_statements(s->initial);
+    loop=++cg.label;done=++cg.label;
+    code("; register-indexed strided byte store\n");
+    load_symbol(index);
+    code("    cmp #$%04X\n    bcs cg_%s_%u\n",(unsigned)limit,cg.parser->unit,done);
+    label(loop);
+    code("    tax\n    sep #$20\n.a8\n    lda #$%02X\n    sta ",(unsigned)value&255);
+    indexed_text(&operand);
+    code("\n    rep #$20\n.a16\n    txa\n    clc\n    adc ");
+    direct_operand(stride,index->type,0,1);
+    code("\n    cmp #$%04X\n    bcc cg_%s_%u\n",(unsigned)limit,cg.parser->unit,loop);
+    label(done);
+    if(loop_observed_outside(cg.function->body,s,index))store_symbol(index);
+    cg.divmod_available=0;
+    return 1;
+}
+
+static Expr *packed_word_index(Expr *e)
+{
+    while(e->kind==EX_CAST&&word_integer(e->type)&&!e->type.is_bool&&word_integer(e->left->type))
+        e=e->left;
+    return e;
+}
+
+static unsigned packed_index_divisor(Expr *e,Symbol *index)
+{
+    uint32_t amount;
+    e=packed_word_index(e);
+    if(e->kind!=EX_BINARY||!word_integer(e->type)||!e->type.is_unsigned||
+       !reduction_object(packed_word_index(e->left),index)||reg_width(e->right->type)>4||
+       !integer_constant(e->right,&amount))return 0;
+    if(e->op==TOK_SHR)return amount&&amount<=7?1u<<amount:0;
+    return e->op=='/'&&amount>=2&&amount<=128&&!(amount&(amount-1))?amount:0;
+}
+
+static int packed_index_remainder(Expr *e,Symbol *index,unsigned divisor)
+{
+    uint32_t amount;
+    e=packed_word_index(e);
+    if(e->kind!=EX_BINARY||!word_integer(e->type)||
+       !reduction_object(packed_word_index(e->left),index)||reg_width(e->right->type)>4||
+       !integer_constant(e->right,&amount))return 0;
+    return (e->op=='&'&&amount==divisor-1)||(e->op=='%'&&e->type.is_unsigned&&amount==divisor);
+}
+
+/* Retain the quotient and remainder of a power-of-two index in Y and X.
+ * Bias the remainder so its 8-bit addition carries directly into Y. */
+static int packed_byte_mask_loop(Statement *s)
+{
+    Statement *body;
+    Expr *test=s->expression,*step=s->step,*store,*stride,*mask,*subscript=NULL;
+    IndexedOperand flags,table;
+    Symbol *index,*values;
+    uint32_t limit;
+    unsigned divisor,shift,scale=0,bias,loop,done,constant_table=0;
+    int64_t displacement=0;
+    int operation,invert;
+    if(s->kind!=ST_FOR||!test||test->kind!=EX_BINARY||test->op!='<'||
+       test->left->kind!=EX_OBJECT||!integer_constant(test->right,&limit)||!limit||limit>65535||
+       reg_width(common_type(test->left->type,test->right->type))!=2||
+       !step||step->kind!=EX_ASSIGN||step->op!='+'||cg.stack_leaf||!register_loop_state_available(s))return 0;
+    index=test->left->symbol;stride=step->right;
+    if(!byte_copy_counter(index)||!reduction_object(step->left,index)||stride->kind!=EX_OBJECT||
+       stride->symbol==index||!word_integer(stride->type)||!body_private(stride->symbol))return 0;
+    for(unsigned i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index)return 0;
+    body=body_single(s->body);
+    if(!body||body->next||body->kind!=ST_EXPR||!(store=body->expression)||store->kind!=EX_ASSIGN||
+       width(store->type)!=1||store->type.is_bool||!indexed_operand(store->left,&flags)||flags.scale!=1)return 0;
+    mask=byte_loop_bits(store->right);
+    operation=store->op;
+    if(!operation){
+        if(mask->kind!=EX_BINARY)return 0;
+        operation=mask->op;
+        if(body_equal(byte_loop_bits(mask->left),store->left))mask=byte_loop_bits(mask->right);
+        else if(body_equal(byte_loop_bits(mask->right),store->left))mask=byte_loop_bits(mask->left);
+        else return 0;
+    }
+    if(operation!='&'&&operation!='|'&&operation!='^')return 0;
+    invert=mask->kind==EX_UNARY&&mask->op=='~';
+    if(invert)mask=byte_loop_bits(mask->left);
+    if(mask->kind!=EX_DEREF||width(mask->type)!=1)return 0;
+    if(indexed_operand(mask,&table)){
+        subscript=table.index;values=table.base;scale=table.scale;displacement=table.offset;
+    }else{
+        values=rom_index_base(mask->left,&subscript,&scale,&displacement);
+    }
+    divisor=packed_index_divisor(flags.index,index);
+    if(!values||!subscript||scale!=1||!divisor||limit%divisor||
+       flags.offset+limit/divisor>width(flags.base->type)||displacement<0||
+       displacement+divisor>width(values->type)||!packed_index_remainder(subscript,index,divisor))return 0;
+    if(invert&&divisor<=16&&!cg.parser->no_known_values&&values->type.banked&&!values->wram&&
+       values->defined&&values->initializer&&!values->relocations&&object_constant(values->type)&&
+       !volatile_type(values->type))
+        constant_table=++cg.label;
+    for(shift=1;1u<<shift!=divisor;++shift){}
+    bias=256-divisor;
+    if(s->initial)emit_statements(s->initial);
+    loop=++cg.label;done=++cg.label;
+    code("; split packed byte index\n");
+    load_symbol(index);
+    code("    cmp #$%04X\n",(unsigned)limit);
+    flag_branch("bcs","bcc",done,0,0);
+    code("    tax\n    phy\n");
+    emit_value(stride);
+    code("    pha\n    and #$%04X\n    pha\n    lda 3,s\n",divisor-1);
+    for(unsigned i=0;i<shift;++i)code("    lsr a\n");
+    code("    sta 3,s\n    txa\n");
+    for(unsigned i=0;i<shift;++i)code("    lsr a\n");
+    code("    tay\n    txa\n    and #$%04X\n    ora #$%04X\n    tax\n"
+         "    sep #$20\n.a8\n    clc\n",divisor-1,bias);
+    label(loop);
+    for(body=s->body;body->kind==ST_BLOCK;body=body->body)inline_marker(body);
+    inline_marker(body);
+    flags.reg='y';
+    if(constant_table){
+        code("    lda f:packed_mask_%s_%u-$%04X,x\n",cg.parser->unit,constant_table,bias);
+    }else{
+        displacement-=bias;values->used=1;
+        code("    lda f:_%s%s$%04X,x\n",values->asm_name,
+             displacement<0?"-":"+",(unsigned)(displacement<0?-displacement:displacement));
+        if(invert)code("    eor #$FF\n");
+    }
+    code("    %s ",operation=='&'?"and":operation=='|'?"ora":"eor");
+    indexed_text(&flags);code("\n    sta ");indexed_text(&flags);
+    code("\n    txa\n    adc 1,s\n    ora #$%02X\n    rep #$20\n.a16\n"
+         "    and #$00FF\n    tax\n    tya\n    adc 3,s\n",bias);
+    if(!stride->known.valid||stride->known.min<0||stride->known.max>(int32_t)(65536-limit))
+        code("    and #$%04X\n",65535u>>shift);
+    code("    tay\n    cmp #$%04X\n    sep #$20\n.a8\n    bcc cg_%s_%u\n"
+         "    rep #$20\n.a16\n",(unsigned)(limit/divisor),cg.parser->unit,loop);
+    int observed=loop_accessed_outside(cg.function->body,s,index,1);
+    if(observed){
+        code("    txa\n    and #$%04X\n    sta 1,s\n    tya\n",divisor-1);
+        for(unsigned i=0;i<shift;++i)code("    asl a\n");
+        code("    ora 1,s\n");
+    }
+    code("    plx\n    plx\n    ply\n");
+    if(observed)store_symbol(index);
+    label(done);
+    if(constant_table){
+        code(".segment \"RODATA\"\npacked_mask_%s_%u:\n    .byte ",cg.parser->unit,constant_table);
+        for(unsigned i=0;i<divisor;++i)code("%s$%02X",i?",":"",255u^values->initializer[displacement+i]);
+        code("\n.segment \"%s\"\n",code_segment());
+    }
+    cg.divmod_available=0;
+    return 1;
 }

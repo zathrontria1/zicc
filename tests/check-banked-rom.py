@@ -764,15 +764,60 @@ int main(void) {
         assert 'overflows memory area' in failure.stderr and '--mapping exhirom' in failure.stderr, failure.stderr
 
 
+def check_rom_byte_copies():
+    source=OUT/'rom-copy.c'
+    source.write_text('''
+extern const unsigned char contained[32],crossed[32];
+unsigned char output[32];
+__noinline unsigned copy_contained(unsigned to,unsigned from,unsigned count) {
+    for(;count;--count) output[to++]=contained[from++];
+    return to+from+count;
+}
+__noinline unsigned copy_crossed(unsigned to,unsigned from,unsigned count) {
+    while(count) {output[to++]=crossed[from++];count--;}
+    return to+from+count;
+}
+int main(void) {
+    unsigned i;
+    if(copy_contained(2,1,0)!=3||output[2]!=0)return 1;
+    if(copy_contained(4,1,3)!=11||output[4]!=18||output[6]!=20)return 2;
+    if(copy_contained(7,3,12)!=34)return 3;
+    for(i=0;i<12;++i)if(output[7+i]!=i+20)return 4;
+    if(copy_crossed(0,0,32)!=64)return 5;
+    for(i=0;i<32;++i)if(output[i]!=i+117)return 6;
+    return 0;
+}
+''')
+    table=OUT/'rom-copy-table.s'
+    table.write_text('.segment "EMBED"\n.export _contained,_crossed\n'
+                     '_contained: .byte '+','.join(str(i+17) for i in range(32))+'\n'
+                     '.res $FFD0, 0\n'
+                     '_crossed: .byte '+','.join(str(i+117) for i in range(32))+'\n')
+    raw=source.with_suffix('.raw')
+    support.run([sys.executable,ROOT/'tools/build-rom.py',source,'--assembly',table,
+                 '--keep-intermediates','-o',raw],timeout=120)
+    m=json.loads(raw.with_suffix('.allocation.json').read_text())
+    generated='\n'.join(p.read_text() for p in (Path(m['evidence'])/f"stage{m['stage']}").glob('*rom_copy.s'))
+    assert generated.count('; counted byte copy: forward mvn')==2,generated
+    sy=labels(raw.with_suffix('.labels'))
+    assert sy['contained']>>16==(sy['contained']+31)>>16
+    assert sy['crossed']>>16!=(sy['crossed']+31)>>16
+    rom=raw.with_suffix('.sfc')
+    support.run([ROOT/'build/romtool.exe',raw,rom,ROOT/'tests/title.txt'])
+    return support.emulate(rom,sy,0)
+
+
 def main():
     global OUT
-    parts=['packing','abi-1','abi-2','abi-3','abi-4','assets','ordinary','code','console-3','console-4','source-names','near-startup','exhirom']
+    parts=['packing','abi-1','abi-2','abi-3','abi-4','assets','ordinary','code','console-3','console-4','source-names','near-startup','exhirom','byte-copies']
     parser=argparse.ArgumentParser();parser.add_argument('--list-parts',action='store_true');parser.add_argument('--part',choices=parts);args=parser.parse_args()
     if args.list_parts:print(json.dumps(parts));return
     if args.part:OUT=OUT/args.part
     OUT.mkdir(parents=True,exist_ok=True);support.OUT=OUT
     (OUT/'resource.bin').write_bytes(bytes(range(256)))
     report={}
+    if args.part is None or args.part=='byte-copies':
+        report['byte-copies']=check_rom_byte_copies()
     if args.part is None or args.part=='exhirom':
         check_exhirom()
         report['exhirom'] = 'passed'

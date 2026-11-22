@@ -5657,6 +5657,52 @@ static int lp_reuse_clear_carry(LpUnit *u,Function *f,size_t at)
     }
     return 0;
 }
+static int lp_edge_has_carry(const LpUnit *u,int edge,int set)
+{
+    const LpLine *branch=&u->lines[edge];
+    int test;
+    if(lp_is(branch,set?"bcs":"bcc"))return 1;
+    if(!lp_is(branch,"jmp")&&!lp_is(branch,"bra")&&!lp_is(branch,"brl"))return 0;
+    test=lp_next(u,(unsigned)edge,-1);
+    if(test<0||u->lines[test].target<=edge||!lp_is(&u->lines[test],set?"bcc":"bcs"))return 0;
+    for(int i=test+1;i<=edge;++i)
+        if(u->lines[i].label&&u->lines[i].first_incoming>=0)return 0;
+    return 1;
+}
+
+/* A branch into a join may already provide its requested carry. Set it on
+ * the linear edge alone, before the join's labels, or remove it entirely. */
+static int lp_carry_on_fallthrough(LpUnit *u,Function *f,size_t at)
+{
+    (void)at;
+    if(u->indirect||cg.parser->no_strength_reduction||body_asm_statements(f->body))return 0;
+    for(unsigned i=0;i<u->count;++i){
+        LpLine *carry=&u->lines[i];
+        int join=-1,fall=-1,set=lp_is(carry,"sec");
+        if(!set&&!lp_is(carry,"clc"))continue;
+        for(unsigned j=i;j-->0;){
+            LpLine *l=&u->lines[j];
+            if(l->label){
+                int edge=l->first_incoming;
+                for(;edge>=0;edge=u->lines[edge].next_incoming)
+                    if(!lp_edge_has_carry(u,edge,set))break;
+                if(edge>=0){join=-1;break;}
+                if(l->first_incoming>=0||join>=0)join=(int)j;
+            }else if(l->op){
+                if(join>=0){fall=(int)j;break;}
+                if(l->call||l->ends||lp_branch(l)||((l->use|l->def)&LP_C))break;
+            }else if(l->length&&l->text[0]!=';'){
+                join=-1;break;
+            }
+        }
+        if(join<0||fall<0)continue;
+        if(!u->lines[fall].ends)lp_insert(&u->lines[join],set?"    sec\n":"    clc\n");
+        carry->deleted=1;
+        return 1;
+    }
+    return 0;
+}
+
 static int lp_slot_written_byte_clean(const LpUnit *u,const char *slot,unsigned off,unsigned read_at)
 {
     unsigned i;int stores=0,safe_before=0;
@@ -8088,6 +8134,50 @@ static int lp_delay_guarded_x_store(LpUnit *u,Function *f,size_t at)
 }
 
 /* Sink a 16-bit workspace store across guard branches when every taken target leaves the slot dead */
+static int lp_next_byte_guard(const LpUnit *u,int at)
+{
+    for(unsigned i=(unsigned)at+1;i<u->count;++i){
+        const LpLine *l=&u->lines[i];
+        if(l->op)return (int)i;
+        if(l->text[0]==';'||lp_fallthrough_label(l)||!strncmp(l->text,".export __inlined_",18)||
+           (l->length==3&&!strncmp(l->text,".a8",3))||
+           (l->length==4&&!strncmp(l->text,".a16",4)))continue;
+        break;
+    }
+    return -1;
+}
+
+static int lp_byte_index_guard_end(const LpUnit *u,const LpWorkspaceLive *memory,
+                                   int store,int index,unsigned mask)
+{
+    int mode,load,edge,next,join,restore;
+    if(index<0||u->lines[index].x8||!lp_line_is(&u->lines[index],"tax"))return -1;
+    mode=lp_next_byte_guard(u,index);
+    if(mode<0||!lp_line_is(&u->lines[mode],"sep #$20"))return -1;
+    load=lp_next_byte_guard(u,mode);
+    if(load<0||!lp_is(&u->lines[load],"lda")||lp_index_use(&u->lines[load])!=LP_X)return -1;
+    edge=lp_next_byte_guard(u,load);
+    if(edge>=0&&lp_is(&u->lines[edge],"cmp")&&lp_immediate(&u->lines[edge])>=0)
+        edge=lp_next_byte_guard(u,edge);
+    if(edge<0||(!lp_is(&u->lines[edge],"beq")&&!lp_is(&u->lines[edge],"bne")))return -1;
+    next=lp_next_byte_guard(u,edge);
+    if(next<0||!lp_is(&u->lines[next],"lda")||lp_index_use(&u->lines[next])!=LP_X)return -1;
+    restore=lp_next_byte_guard(u,next);
+    if(restore>=0&&lp_is(&u->lines[restore],"cmp")&&lp_immediate(&u->lines[restore])>=0){
+        next=restore;
+        restore=lp_next_byte_guard(u,next);
+    }
+    join=u->lines[edge].target;
+    if(restore<0||!lp_line_is(&u->lines[restore],"rep #$20")||join<=next||join>=restore)return -1;
+    for(int i=store+1;i<=restore;++i){
+        const LpLine *l=&u->lines[i];
+        if(memory[i].read&mask)return -1;
+        if(l->label&&l->first_incoming>=0&&
+           (i!=join||l->first_incoming!=edge||u->lines[edge].next_incoming>=0))return -1;
+    }
+    return restore;
+}
+
 static int lp_sink_branch_store(LpUnit *u,Function *f,size_t at)
 {
     unsigned i;
@@ -8100,16 +8190,19 @@ static int lp_sink_branch_store(LpUnit *u,Function *f,size_t at)
     for(i=0;i+3<u->count;++i){
         LpLine *store=&u->lines[i],*cmp,*after;
         size_t n;const char *o=lp_operand(store,&n);
-        int slot,k1,k2,after1=-1,t1,fall;
+        int slot,k1,k2,after1=-1,t1,fall,guard_end,live_index=0;
         if(store->deleted||store->replace||store->m8||store->label||!lp_is(store,"sta"))continue;
         if(n<3||strncmp(o,"z:",2))continue;
         slot=lp_workspace_word(o,n);
         if(slot<0||(slot&1)||!(memory[i].write&(3u<<slot)))continue;
-        k1=lp_next(u,i,1);
+        guard_end=lp_byte_index_guard_end(u,memory,(int)i,lp_next_byte_guard(u,(int)i),3u<<slot);
+        k1=guard_end>=0?guard_end:lp_next(u,i,1);
         if(k1<0)continue;
         cmp=&u->lines[k1];
         int remat_x=0;
-        if(!cmp->deleted&&!cmp->replace&&!cmp->label&&!cmp->m8&&lp_is(cmp,"asl")&&
+        if(guard_end>=0){
+            live_index=1;
+        }else if(!cmp->deleted&&!cmp->replace&&!cmp->label&&!cmp->m8&&lp_is(cmp,"asl")&&
            lp_operand_is(cmp,"a",1)){
             int prev=lp_next(u,i,-1);
             int kx=lp_next(u,(unsigned)k1,1);
@@ -8133,16 +8226,24 @@ static int lp_sink_branch_store(LpUnit *u,Function *f,size_t at)
                 k1=kc;cmp=&u->lines[k1];
             }
         }
-        if(cmp->deleted||cmp->replace||cmp->label||cmp->m8||!lp_is(cmp,"cmp"))continue;
+        if(cmp->deleted||cmp->replace||cmp->label||(!live_index&&(cmp->m8||!lp_is(cmp,"cmp"))))continue;
         if(memory[k1].read&(3u<<slot))continue;
-        k2=lp_next(u,(unsigned)k1,1);
+        k2=live_index?lp_next_byte_guard(u,k1):lp_next(u,(unsigned)k1,1);
+        if(live_index){
+            int j;
+            for(j=k1+1;j<k2;++j)
+                if(u->lines[j].label&&u->lines[j].first_incoming>=0)break;
+            if(j<k2)continue;
+        }
         t1=lp_cond_branch_target(u,k2,&after1);
         if(t1<0||(memory[t1].live&(3u<<slot)))continue;
+        if(live_index&&after1!=k2&&
+           (u->lines[after1].first_incoming!=k2||u->lines[k2].next_incoming>=0))continue;
         fall=after1+1;
         {
             int k3=lp_next(u,(unsigned)after1,1),after2=-1,t2;
             t2=lp_cond_branch_target(u,k3,&after2);
-            if(t2>=0){
+            if(t2>=0&&!live_index){
                 if(memory[t2].live&(3u<<slot))continue;
                 fall=after2+1;
             }
@@ -8153,6 +8254,7 @@ static int lp_sink_branch_store(LpUnit *u,Function *f,size_t at)
         {
             char text[160];
             if(remat_x)snprintf(text,sizeof text,"    txa\n    lsr a\n    sta %.*s\n",(int)n,o);
+            else if(live_index)snprintf(text,sizeof text,"; spill tested index on live edge\n    stx %.*s\n",(int)n,o);
             else snprintf(text,sizeof text,"    sta %.*s\n",(int)n,o);
             lp_insert(after,text);
         }
@@ -8459,6 +8561,73 @@ static int lp_address_only_frame(LpUnit *u,Function *f,size_t at)
     ops[0]->deleted=save->deleted=ops[i]->deleted=1;
     lp_set(address,"    tax");
     return 1;
+}
+
+/* Two adjacent stack words can share storage across a linear handoff. Read
+ * the dying top word into X, then reuse its slot for the new A value. */
+static int lp_reuse_stack_word(LpUnit *u,Function *f,size_t at)
+{
+    (void)at;
+    if(cg.parser->no_stack_frames||cg.parser->no_private_regions||u->indirect||u->calls<2||
+       f->symbol->interrupt||f->uses_varargs||frame_address_visible(f->body)||body_asm_statements(f->body))return 0;
+    lp_liveness(u);
+    for(unsigned i=0;i<u->count;++i){
+        LpLine *reserve=&u->lines[i];
+        int save,put=-1,get=-1,release=-1;
+        unsigned accesses=0,calls=0;
+        if(!lp_line_is(reserve,"pha")||reserve->m8||reserve->x8)continue;
+        save=lp_next(u,i,1);
+        if(save<0||!lp_line_is(&u->lines[save],"phx")||u->lines[save].x8)continue;
+        for(unsigned j=i+1;j<u->count;++j){
+            LpLine *l=&u->lines[j];
+            size_t length;
+            const char *operand=lp_operand(l,&length);
+            if(l->label&&l->first_incoming>=0)break;
+            if(!l->op||j==(unsigned)save)continue;
+            if(l->m8||l->x8||lp_branch(l)||l->ends||l->use==LP_ALL||
+               lp_is(l,"tsc")||lp_is(l,"tsx")||lp_is(l,"tcs")||lp_is(l,"txs"))break;
+            if(put<0&&lp_line_is(l,"sta 3,s")){
+                put=(int)j;get=lp_next(u,j,1);
+                if(get<0||!lp_line_is(&u->lines[get],"lda 1,s")||
+                   (u->lines[get].out&LP_X)||!calls)break;
+                continue;
+            }
+            if((int)j==get)continue;
+            if(lp_operand_has_s(operand,length)){
+                if(put<0||!lp_operand_is(l,"3,s",3)||!lp_accumulator_memory(l))break;
+                ++accesses;
+            }
+            if(l->call){
+                Symbol *callee=lp_callee(l);
+                unsigned args;
+                if(!callee||callee->variadic||callee->param_count<0||structure_object(callee->type))break;
+                for(args=0;args<(unsigned)callee->param_count&&register_parameter(args,callee->params[args]);++args){}
+                if(args!=(unsigned)callee->param_count)break;
+                ++calls;
+                continue;
+            }
+            if(lp_stack_op(l)){
+                int second=lp_next(u,j,1);
+                int ret=second>=0?lp_next(u,(unsigned)second,1):-1;
+                if(put>=0&&accesses&&calls>=2&&lp_line_is(l,"plx")&&ret>=0&&
+                   lp_line_is(&u->lines[second],"plx")&&!u->lines[second].x8&&
+                   (lp_is(&u->lines[ret],"rts")||lp_is(&u->lines[ret],"rtl")))
+                    release=(int)j;
+                break;
+            }
+        }
+        if(release<0)continue;
+        reserve->deleted=1;
+        lp_set(&u->lines[put],"    plx\n    pha");
+        lp_set(&u->lines[get],"    txa");
+        for(int j=get+1;j<release;++j)
+            if(lp_operand_is(&u->lines[j],"3,s",3))
+                lp_set(&u->lines[j],"    %.3s 1,s",u->lines[j].op);
+        u->lines[release].deleted=1;
+        lp_insert(&u->lines[save],"; reuse a stack word across calls\n");
+        return 1;
+    }
+    return 0;
 }
 
 /* Retain an unescaped near cursor in a free caller-clobbered DP word.
@@ -8778,7 +8947,7 @@ static void line_passes(Function *f,size_t at)
     while(lp_run(&runner,f,at,lp_rmw_reload)){}
     while(lp_run(&runner,f,at,lp_narrow_divisor_load)){}
     lp_run(&runner,f,at,lp_divider_wait_mask);
-    lp_run(&runner,f,at,lp_sink_branch_store);
+    while(lp_run(&runner,f,at,lp_sink_branch_store)){}
     lp_run(&runner,f,at,lp_thread_equal_store);
     if(lp_run(&runner,f,at,lp_cache_stored_word)){
         while(lp_run(&runner,f,at,lp_cache_stored_word)){}
@@ -8904,8 +9073,12 @@ static void line_passes(Function *f,size_t at)
     while(lp_run(&runner,f,at,lp_dead_exit_frame_store))lp_cleanup(&runner,f,at,0);
     while(lp_run(&runner,f,at,lp_home_private_cursor)){}
     lp_run(&runner,f,at,lp_address_only_frame);
+    if(lp_run(&runner,f,at,lp_reuse_stack_word))
+        while(lp_run(&runner,f,at,lp_index_transfer_steps)){}
     lp_run(&runner,f,at,lp_home_far_stack_argument);
     lp_run(&runner,f,at,lp_load_index_from_workspace);
+    /* Arithmetic peepholes still need the original carry setup */
+    while(lp_run(&runner,f,at,lp_carry_on_fallthrough)){}
 done:
     lp_invalidate(&runner);
     free(runner.work);

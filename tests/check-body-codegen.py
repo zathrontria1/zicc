@@ -881,8 +881,12 @@ def main():
             assert '    tsc\n    tay\n' not in fs and ',s\n' in fs,fs
             for name in ('u8_dot_retained','u8_dot_dynamic','u8_mul_compound'):
                 fn=function(name)
-                assert 'sta f:$004202' in fn and 'sta f:$004203' in fn and 'lda f:$004216' in fn and '__mul8' not in fn,fn
-            assert '; retained loop indices: X=stride 1' in function('u8_dot_retained')
+                read_op='adc' if name=='u8_dot_retained' else 'lda'
+                assert all(op in fn for op in ('sta f:$004202','sta f:$004203',f'{read_op} f:$004216'))
+                assert '__mul8' not in fn,fn
+            retained_dot=function('u8_dot_retained')
+            assert all(op in retained_dot for op in ('; register unsigned byte product sum',
+                'ldx #$000F','dex','bpl','tay')),retained_dot
             bcl=function('byte_bit_clear')
             assert '    phx\n' not in bcl and '    pha\n' not in bcl and 'a:.loword(_mul_a+$0000),y' in bcl,bcl
             bck=function('byte_bit_check')
@@ -892,7 +896,8 @@ def main():
             wsb=function('word_sign_branch')
             assert '    and #$8000\n' not in wsb and ('    bpl ' in wsb or '    bmi ' in wsb),wsb
             lsx=function('long_shift_xor')
-            assert '; loop lowering: register countdown' in lsx and '    pha\n    stx ' not in lsx,lsx
+            assert all(op in lsx for op in ('; carry-tested shift recurrence',
+                'asl a','rol z:__arith_lhs','eor #$1DB7','eor #$04C1')),lsx
             swu=function('sum_words_unrolled')
             assert '; unrolled retained loop: 8x' in swu and swu.count('    adc a:.loword(_red_words')==8,swu
         else:

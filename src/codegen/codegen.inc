@@ -142,6 +142,10 @@ static int body_has_deref(Expr *e);
 static int mapped_word_home(Symbol *v);
 static int structured_byte_loop(Statement *s);
 static int fixed_byte_copy_loop(Statement *s);
+static int counted_byte_copy_loop(Statement *s);
+static int fixed_byte_sum_loop(Statement *s);
+static int strided_byte_store_loop(Statement *s);
+static int packed_byte_mask_loop(Statement *s);
 static void known_prepare(Function *f);
 static unsigned scalar_writes(Statement *s,Symbol *v);
 static int dot_reserved_symbol(const Symbol *v);
@@ -1271,6 +1275,20 @@ static void flag_branch(const char *when_true,const char *when_false,unsigned ye
     if(fallthrough==yes){code("    %s :+\n",when_true);jump(no);code(":\n");}
     else{code("    %s :+\n",when_false);jump(yes);code(":\n");if(fallthrough!=no)jump(no);}
 }
+static int byte_has_struct_padding(Expr *e,Symbol *array)
+{
+    Type container;
+    unsigned next;
+    if(e->kind!=EX_MEMBER||e->op==TOK_ARROW||e->left->kind!=EX_DEREF||volatile_expression(e))return 0;
+    container=e->left->type;
+    if(!structure_object(container)||container.structure->is_union||!array->type.array||
+       !same_type(unqualified_value(array_element(array->type)),unqualified_value(container)))return 0;
+    next=e->value+1;
+    if(next>=width(container))return 0;
+    for(Member *field=container.structure->members;field;field=field->next)
+        if(field->offset<=next&&next-field->offset<width(field->type))return 0;
+    return 1;
+}
 /* Test a fixed byte without first materializing a promoted C int */
 static int fixed_byte_test(Expr *e)
 {
@@ -1298,6 +1316,13 @@ static int fixed_byte_test(Expr *e)
     if(!s&&indexed_operand(value,&indexed)&&
        (!cg.retained_index||cg.retained_y==5||indexed_retained(&indexed,!update))&&(!update||indexed.reg=='x')){
         indexed_index_mode(&indexed,!update);
+        if(!update&&byte_has_struct_padding(value,indexed.base)){
+            code("; test byte beside struct padding\n    lda ");
+            indexed_text(&indexed);
+            code("\n    and #$%04X\n",mask);
+            indexed_finish(&indexed);
+            return 1;
+        }
         code("    sep #$20\n.a8\n    %s ",update==TOK_INC?"inc":update==TOK_DEC?"dec":"lda");
         indexed_text(&indexed);code("\n");
         if(mask!=255)code("    and #$%02X\n",mask);
@@ -1517,6 +1542,54 @@ static Expr *promoted_byte_source(Expr *e)
     return e&&e->type.base==TY_CHAR&&!e->type.pointers&&!e->type.array&&
         !e->type.is_bool&&!volatile_expression(e)?e:NULL;
 }
+
+static int indexed_byte_equality(Expr *test,IndexedOperand *operand,unsigned *byte)
+{
+    Expr *value;
+    Type compare;
+    uint32_t bits;
+    if(test->kind!=EX_BINARY||(test->op!=TOK_EQ&&test->op!=TOK_NE))return 0;
+    compare=common_type(test->left->type,test->right->type);
+    if(!word_integer(compare)||!integer_constant(test->right,&bits))return 0;
+    value=promoted_byte_source(test->left);
+    if(!value||!indexed_operand(value,operand))return 0;
+    if(value->type.is_unsigned){
+        if(bits>255)return 0;
+    }else{
+        int value_bits=(int16_t)bits;
+        if(compare.is_unsigned||value_bits< -128||value_bits>127)return 0;
+    }
+    *byte=(unsigned)bits&255u;
+    return 1;
+}
+
+/* The first test's Z also gives the final result on a short-circuit edge
+ * when both tests have the same sense. Use one index and one A8 region. */
+static int branch_indexed_byte_pair(Expr *e,unsigned yes,unsigned no,unsigned fallthrough)
+{
+    IndexedOperand first,second;
+    unsigned first_byte,second_byte,done;
+    int equal=e->left->op==TOK_EQ;
+    if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||
+       cg.retained_index||cg.bound||cg.scan_cursor||
+       e->left->op!=e->right->op||body_effect(e)||
+       !indexed_byte_equality(e->left,&first,&first_byte)||
+       !indexed_byte_equality(e->right,&second,&second_byte)||
+       first.scale!=second.scale||!body_equal(first.index,second.index))return 0;
+    done=++cg.label;
+    code("; short-circuit indexed byte pair\n");
+    indexed_index_mode(&first,0);
+    code("    sep #$20\n.a8\n    lda ");indexed_text(&first);code("\n");
+    if(first_byte)code("    cmp #$%02X\n",first_byte);
+    code("    %s cg_%s_%u\n",(equal==(e->op==TOK_LOR))?"beq":"bne",cg.parser->unit,done);
+    code("    lda ");indexed_text(&second);code("\n");
+    if(second_byte)code("    cmp #$%02X\n",second_byte);
+    label(done);
+    code("    rep #$20\n.a16\n");
+    flag_branch(equal?"beq":"bne",equal?"bne":"beq",yes,no,fallthrough);
+    return 1;
+}
+
 static Symbol *rom_index_base(Expr *address,Expr **index,unsigned *scale,int64_t *offset);
 /* Two short-circuited tests may share an immutable indexed ROM byte. The
  * second index is the preceding word index and retains 16-bit wrap. */
@@ -1853,6 +1926,7 @@ static void branch(Expr *e,unsigned yes,unsigned no,unsigned fallthrough)
         return;
     }
     if(e->kind==EX_BINARY&&(e->op==TOK_LAND||e->op==TOK_LOR)){
+        if(branch_indexed_byte_pair(e,yes,no,fallthrough))return;
         if(branch_adjacent_byte_checks(e,yes,no,fallthrough))return;
         if(branch_literal_alternatives(e,yes,no,fallthrough))return;
         if(word_range_flags(e)){
@@ -8764,7 +8838,7 @@ static int emit_statements(Statement *s)
 /* A promoted region spans everything the loop statement emits: its
  * initializers and entry test as well, so every path to the end label,
  * including a zero-trip entry test, has copied the homes in. */
-static int emit_loop_body(Statement *s);
+static int emit_loop_body(Statement *s,int select_copy);
 static int bound_scan(void);
 static int body_private(Symbol *v);
 static int body_address_pure(Expr *e);
@@ -9154,7 +9228,7 @@ static int emit_scaled_ring_loop(Statement *s,int *result)
     borrow_y=!cg.parser->no_register_cursors&&!cg.cursor_count&&ring_y_operand(s->expression)&&
         ring_y_region(s->body,&guards)&&guards>=2;
     if(borrow_y){code("    phy\n");cg.loop_y_borrowed=1;}
-    *result=emit_loop_body(s);
+    *result=emit_loop_body(s,1);
     if(borrow_y){cg.loop_y_borrowed=0;code("    ply\n");}
     for(i=0;i<p.count;++i){
         load_symbol(p.rings[i].index);
@@ -9203,7 +9277,7 @@ static int emit_loop(Statement *s)
     int result;
     region_enter(s);
     if(emit_scaled_ring_loop(s,&result))code("; loop lowering: scaled ring indices\n");
-    else result=emit_loop_body(s);
+    else result=emit_loop_body(s,1);
     region_exit(s);
     return result;
 }
@@ -9446,13 +9520,19 @@ static int fold_fixed_update_loop(Statement *s)
     cg.divmod_available=0;
     return 1;
 }
-static int emit_loop_body(Statement *s)
+#include "shift_recurrence.inc"
+static int emit_loop_body(Statement *s,int select_copy)
 {
     unsigned start,end,body,step;int a,infinite,counted,rotated_while;DpCounter counter={0};unsigned done;AffineLoop *affine,*saved_affine;
     Statement *previous=loop_previous;
     if(fold_fixed_update_loop(s)){code("; loop lowering: folded fixed update\n");return 1;}
     if(unroll_far_doubling_sum(s)){code("; loop lowering: unrolled far doubling sum\n");return 1;}
     if(far_sentinel_doubling_loop(s)){code("; loop lowering: far sentinel doubling sum\n");return 1;}
+    if(shift_recurrence_loop(s)||low_bit_sum_loop(s))return 1;
+    if(select_copy&&counted_byte_copy_loop(s))return 1;
+    if(fixed_byte_sum_loop(s))return 1;
+    if(strided_byte_store_loop(s))return 1;
+    if(packed_byte_mask_loop(s))return 1;
     affine=cg.switch_depth?NULL:affine_find(s);
     if(!cg.function->jump_label_count&&!affine&&counted_indexed_guard_loop(s)){code("; loop lowering: counted indexed byte guard\n");return 1;}
     if(!affine&&!cg.switch_depth&&s->kind==ST_FOR&&s->initial&&!s->initial->next&&s->initial->kind==ST_EXPR&&
