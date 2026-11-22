@@ -348,6 +348,49 @@ static const char *far_pointer_dp_home(Expr *base)
     home=frame_operand(s->offset);
     return !strncmp(home,"z:",2)?home+2:NULL;
 }
+/* Form the scaled displacement and add the base directly into a pointer
+ * home. The bank word serves as the high half of the displacement until
+ * the low-word add supplies the final carry */
+static int discarded_scaled_far_home(Expr *e)
+{
+    Expr *sum,*base,*index;
+    Symbol *dest;
+    unsigned stride,shifts=0;
+    int high;
+    if(cg.parser->no_strength_reduction||cg.parser->no_indexed_operands||
+       e->kind!=EX_ASSIGN||e->op||e->left->kind!=EX_OBJECT||
+       (sum=e->right)->kind!=EX_BINARY||sum->op!='+'||
+       !far_pointer(value_type(sum->type))||volatile_expression(e)||
+       !far_pointer_dp_home(e->left))return 0;
+    dest=e->left->symbol;
+    base=sum->left;index=sum->right;
+    if(base->kind!=EX_OBJECT||base->symbol==dest||base->type.array||
+       !far_pointer(value_type(base->type))||index->kind!=EX_OBJECT||
+       index->type.pointers||!index->type.is_unsigned||!word_integer(index->type))return 0;
+    if(base->symbol->owner&&base->symbol->offset){
+        unsigned word=(base->symbol->offset-1)/2,home=cg.dp_map[(dest->offset-1)/2];
+        for(unsigned i=word;i<=word+1&&i<cg.dp_words;++i)
+            if(cg.dp_map[i]==home||cg.dp_map[i]==home+1)return 0;
+    }
+    stride=width(pointed_type(value_type(base->type)));
+    if(stride<2||stride>16||(stride&(stride-1)))return 0;
+    for(;stride>1;stride>>=1)++shifts;
+    high=!narrow_unsigned_value(index,16-shifts);
+    code("; scaled far address directly into pointer home\n");
+    emit_value(index);
+    if(high)code("    stz %s\n",frame_operand(dest->offset+2));
+    for(unsigned i=0;i<shifts;++i){
+        code("    asl a\n");
+        if(high)code("    rol %s\n",frame_operand(dest->offset+2));
+    }
+    code("    clc\n    adc ");array_operand(base->symbol,0);
+    code("\n    sta %s\n    lda ",frame_operand(dest->offset));
+    array_operand(base->symbol,2);
+    if(high)code("\n    adc %s\n",frame_operand(dest->offset+2));
+    else code("\n    adc #0\n");
+    code("    and #$00FF\n    sta %s\n",frame_operand(dest->offset+2));
+    return 1;
+}
 /* The hardware adds Y to a 24-bit base. Account separately for the
  * seventeenth displacement bit when scaling an unsigned word index. */
 static int indexed_far_word_load(Expr *e)

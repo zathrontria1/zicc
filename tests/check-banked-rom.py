@@ -1014,6 +1014,7 @@ def main():
             assert re.search(r'sta a:\.loword\(_\w+__cursor_out\+\$0004\),x',cursors)
             assert re.search(r'sta a:\.loword\(_\w+__cursor_out\+\$0006\),x',cursors)
             far=assemblies.split('_far_pair:',1)[1].split('__size_far_pair',1)[0]
+            assert 'scaled far address directly into pointer home' in far
             assert far.count('    rol z:')==2
             assert re.search(r'lda \[([^\]]+)\]\n.*\n(?:.*\n)*?    lda \[\1\],y',far)
             guarded_result=assemblies.split('_guarded_word_result:',1)[1].split('__size_guarded_word_result',1)[0]

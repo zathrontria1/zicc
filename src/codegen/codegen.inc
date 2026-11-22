@@ -8894,6 +8894,7 @@ static int emit_statements(Statement *s)
             else if(masked_byte_assignment(s->expression)){}
             else if(!volatile_expression(s->expression)&&strength_update(s->expression,0)){}
             else if(!volatile_expression(s->expression)&&discarded_far_update(s->expression)){}
+            else if(discarded_scaled_far_home(s->expression)){}
             else if(discarded_far_home_copy(s->expression)){}
             else if(scalar_home_update(s->expression,0)){}
             else if(discarded_direct_increment(s->expression)){}
