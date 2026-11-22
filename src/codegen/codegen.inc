@@ -21,7 +21,7 @@ typedef struct {
     UnrollPlan unroll;int unroll_selected,dead_index;
 } AffineLoop;
 
-typedef struct { Expr *expression;unsigned operations,offset;int reused; } DivmodCache;
+typedef struct { Expr *expression;unsigned operations,offset;int reused,survives_indirect; } DivmodCache;
 typedef struct {
     Symbol *source,*destination,*font,*buffer;
     unsigned source_uses,destination_uses,max_offset;
@@ -3946,6 +3946,7 @@ static int scalar_home_update(Expr *e,int needed)
 {
     Symbol *s;Type t;unsigned w,offset;const char *instruction;
     if(e->kind!=EX_ASSIGN||!e->op||e->left->type.array)return 0;
+    if(divmod_assignment(e))return 1;
     if(!cg.parser->no_strength_reduction&&e->type.base==TY_FLOAT&&!e->type.pointers&&
        (e->op=='+'||e->op=='-'||e->op=='*'||e->op=='/')&&
        (s=direct_memory_object(e->left,&offset))!=NULL&&

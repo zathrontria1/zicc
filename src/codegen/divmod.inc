@@ -1,7 +1,7 @@
 /* Reuse a pure scalar /,% pair only when its producer dominates this use.
  * Results belong to the invocation's frame, not caller-clobbered scratch.
  * Codegen intersects availability at branches and clears it at loop entries,
- * calls and indirect stores; scalar stores invalidate dependent pairs. */
+ * and calls. Stores invalidate pairs when they can change an operand. */
 static int divmod_pure(Expr *e)
 {
     if(volatile_expression(e)||e->type.pointers||e->type.array||e->type.base==TY_FLOAT)return 0;
@@ -15,12 +15,19 @@ static int divmod_same(Expr *a,Expr *b)
     if(a->kind==EX_INT)return a->value==b->value;
     return a->kind==EX_CAST&&divmod_same(a->left,b->left);
 }
+static int divmod_operation(Expr *e)
+{
+    unsigned bits;int negative;Type t;
+    if((e->op!='/'&&e->op!='%')||
+       (e->kind!=EX_BINARY&&(e->kind!=EX_ASSIGN||e->left->kind!=EX_OBJECT))||
+       !divmod_pure(e->left)||!divmod_pure(e->right))return 0;
+    t=binary_operands(e->left,e->right,e->op);
+    return (t.base==TY_INT||t.base==TY_LONG)&&!power_divisor(e->right,t,&bits,&negative);
+}
 static DivmodCache *divmod_find(Expr *e)
 {
-    unsigned i,bits;int negative;
-    if(e->kind!=EX_BINARY||(e->op!='/'&&e->op!='%')||
-       !divmod_pure(e->left)||!divmod_pure(e->right))return NULL;
-    if(power_divisor(e->right,common_type(e->left->type,e->right->type),&bits,&negative))return NULL;
+    unsigned i;
+    if(!cg.divmod_count||!divmod_operation(e))return NULL;
     for(i=0;i<cg.divmod_count;++i){
         Expr *other=cg.divmod[i].expression;
         if(divmod_same(e->left,other->left)&&divmod_same(e->right,other->right))return &cg.divmod[i];
@@ -31,18 +38,27 @@ static DivmodCache *divmod_find(Expr *e)
 static int divmod_test_produces(Expr *e)
 {
     if(!e)return 0;
-    return divmod_find(e)!=NULL||divmod_test_produces(e->left)||
+    return (e->kind==EX_BINARY&&divmod_find(e)!=NULL)||divmod_test_produces(e->left)||
            divmod_test_produces(e->right)||divmod_test_produces(e->third);
+}
+static int divmod_unaddressed(Expr *e)
+{
+    if(e->kind==EX_INT)return 1;
+    if(e->kind==EX_CAST)return divmod_unaddressed(e->left);
+    return e->symbol->owner==cg.function->id&&!e->symbol->address_taken&&
+           !loop_escapes(cg.function->body,e->symbol);
 }
 static void divmod_collect_expr(Expr *e)
 {
-    unsigned i,bits;int negative;DivmodCache *c;
+    unsigned i;DivmodCache *c;
     if(!e)return;
-    if(e->kind==EX_BINARY&&(e->op=='/'||e->op=='%')&&
-       divmod_pure(e->left)&&divmod_pure(e->right)&&
-       !power_divisor(e->right,common_type(e->left->type,e->right->type),&bits,&negative)){
+    if(divmod_operation(e)){
         c=divmod_find(e);
-        if(!c&&cg.divmod_count<16){c=&cg.divmod[cg.divmod_count++];c->expression=e;c->operations=0;c->reused=0;}
+        if(!c&&cg.divmod_count<16){
+            c=&cg.divmod[cg.divmod_count++];
+            *c=(DivmodCache){.expression=e,.survives_indirect=
+                divmod_unaddressed(e->left)&&divmod_unaddressed(e->right)};
+        }
         if(c)c->operations|=e->op=='/'?1u:2u;
     }
     divmod_collect_expr(e->left);divmod_collect_expr(e->right);divmod_collect_expr(e->third);
@@ -65,7 +81,8 @@ static void divmod_prepare(Function *f)
     divmod_collect(f->body);
     for(i=0;i<cg.divmod_count;++i){
         DivmodCache c=cg.divmod[i];
-        unsigned bytes=2*reg_width(c.expression->type);
+        Expr *e=c.expression;
+        unsigned bytes=2*reg_width(binary_operands(e->left,e->right,e->op));
         if(c.operations!=3||f->slots+bytes+4>768)continue;
         c.offset=f->slots+1;f->slots+=bytes;cg.divmod[n++]=c;
     }
@@ -81,7 +98,10 @@ static void divmod_prepare(Function *f)
     cg.helper_count=helper_count;cg.arithmetic=arithmetic;cg.loop_count=0;cg.switch_depth=0;
     n=0;f->slots=slots;
     for(i=0;i<cg.divmod_count;++i)if(cg.divmod[i].reused){
-        DivmodCache c=cg.divmod[i];c.offset=f->slots+1;f->slots+=2*reg_width(c.expression->type);cg.divmod[n++]=c;
+        DivmodCache c=cg.divmod[i];Expr *e=c.expression;
+        c.offset=f->slots+1;
+        f->slots+=2*reg_width(binary_operands(e->left,e->right,e->op));
+        cg.divmod[n++]=c;
     }
     cg.divmod_count=n;cg.divmod_available=0;f->frame=f->slots?f->slots+4:0;
 }
@@ -93,10 +113,10 @@ static int divmod_reads(Expr *e,Symbol *s)
 static void divmod_written(Expr *destination)
 {
     unsigned i;
-    if(destination->kind!=EX_OBJECT){cg.divmod_available=0;return;}
     for(i=0;i<cg.divmod_count;++i){
-        Expr *e=cg.divmod[i].expression;
-        if(divmod_reads(e->left,destination->symbol)||divmod_reads(e->right,destination->symbol))
+        DivmodCache *c=&cg.divmod[i];Expr *e=c->expression;
+        if(destination->kind!=EX_OBJECT?!c->survives_indirect:
+           divmod_reads(e->left,destination->symbol)||divmod_reads(e->right,destination->symbol))
             cg.divmod_available&=~(1u<<i);
     }
 }
@@ -137,13 +157,12 @@ static int divmod_byte_guard(Expr *e,Type t)
     return reg_width(t)==2&&t.is_unsigned&&divisor.valid&&
         divisor.min>0&&divisor.min<=255&&divisor.max>255&&divisor.max<65535;
 }
-static int divmod_emit(Expr *e)
+static void divmod_emit_cached(Expr *e,DivmodCache *c)
 {
-    DivmodCache *c=divmod_find(e);unsigned bit,offset,w;Type t;
-    if(!c)return 0;
+    unsigned bit,offset,w;Type t;
+    t=binary_operands(e->left,e->right,e->op);w=reg_width(t);
     bit=1u<<(unsigned)(c-cg.divmod);offset=c->offset;
     if(!(cg.divmod_available&bit)){
-        t=binary_operands(e->left,e->right,e->op);w=reg_width(t);
         code("; divmod produce, frame $%04X\n",offset);
         int byte=arithmetic_byte_inputs(e->op,t,e->left,e->right);
         int guard=divmod_byte_guard(e,t);
@@ -168,8 +187,26 @@ static int divmod_emit(Expr *e)
         if(w==4)code("    lda z:__arith_lhs+10\n    sta %s\n",frame_operand(offset+6));
         cg.divmod_available|=bit;
     }else{c->reused=1;code("; divmod reuse, frame $%04X\n",offset);}
-    if(e->op=='%')offset+=reg_width(e->type);
-    if(reg_width(e->type)==4)code("    lda %s\n    tax\n",frame_operand(offset+2));
+    if(e->op=='%')offset+=w;
+    if(w==4)code("    lda %s\n    tax\n",frame_operand(offset+2));
     code("    lda %s\n",frame_operand(offset));
+}
+static int divmod_emit(Expr *e)
+{
+    DivmodCache *c=divmod_find(e);
+    if(!c)return 0;
+    divmod_emit_cached(e,c);
+    return 1;
+}
+static int divmod_assignment(Expr *e)
+{
+    DivmodCache *c;
+    if(e->kind!=EX_ASSIGN||!cg.divmod_available)return 0;
+    c=divmod_find(e);
+    if(!c||!(cg.divmod_available&(1u<<(unsigned)(c-cg.divmod))))return 0;
+    divmod_emit_cached(e,c);
+    convert_registers(binary_operands(e->left,e->right,e->op),e->type);
+    store_symbol(e->left->symbol);
+    divmod_written(e->left);
     return 1;
 }

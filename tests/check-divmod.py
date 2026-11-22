@@ -29,6 +29,16 @@ CASES = {
         q=a/b;b=9UL;r=a%b;return q!=14UL||r!=2UL;}''',
     'compound': '''int main(void){int a=100,b=7,q,r;q=a/b;a+=1;r=a%b;
         if(q!=14||r!=3)return 1;q=a/b;++b;r=a%b;return q!=14||r!=5;}''',
+    'compound_after_indirect_store': '''unsigned int output[3];
+        int run(unsigned long value,unsigned int divisor,unsigned int index){
+            output[index]=(unsigned int)(value%divisor);
+            value/=divisor;
+            return value!=928327UL||output[index]!=313U;}
+        int main(void){unsigned long input=0x12345678UL;return run(input,329U,1U);}''',
+    'compound_expression': '''int main(void){long a=-1234567L,b=97L,q,r;
+        q=a/b;r=(a%=b);return q!=-12727L||r!=-48L||a!=r;}''',
+    'compound_after_alias_write': '''int main(void){long a=100L,b=7L,r;long *p=&a;
+        r=a%b;*p=105L;a/=b;return r!=2L||a!=15L;}''',
     'alias': '''int main(void){long a=100L,b=7L,q,r;long *p=&a;
         q=a/b;*p=101L;r=a%b;return q!=14L||r!=3L;}''',
     'array_store': '''int main(void){long a=100L,b=7L,q,r;long *p=&a;
@@ -99,10 +109,12 @@ def main():
         assert subprocess.run([str(exe)], timeout=5).returncode == 0, name
         pair = {key: checks.build(name + '_' + key, source, True, divmod_reuse=(key == 'on'))
                 for key in ('off', 'on')}
-        if name in ('unsigned_pair', 'signed_pair', 'remainder_first', 'word_pair', 'scratch_clobber', 'both_arms', 'while_condition'):
+        if name in ('unsigned_pair', 'signed_pair', 'remainder_first', 'word_pair', 'scratch_clobber',
+                    'compound_after_indirect_store', 'compound_expression', 'both_arms', 'while_condition'):
             assert '; divmod reuse' in pair['on']['assembly'], name
         assert '; divmod ' not in pair['off']['assembly']
-        if name in ('alias', 'array_store', 'call', 'recursion', 'branches', 'short_circuit', 'short_side_effect', 'conditional', 'typed_operands'):
+        if name in ('alias', 'array_store', 'compound_after_alias_write', 'call', 'recursion', 'branches',
+                    'short_circuit', 'short_side_effect', 'conditional', 'typed_operands'):
             assert '; divmod ' not in pair['on']['assembly'], name
         if name in ('unsigned_pair', 'signed_pair', 'remainder_first', 'word_pair'):
             calls = re.findall(r'(?:jsr|jmp) .loword\(__(?:[us]div(?:mod)?(?:8|16|32)|[us]mod(?:8|16|32))\)', pair['on']['assembly'])
