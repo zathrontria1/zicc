@@ -4697,6 +4697,29 @@ static int lp_memory_word_steps(LpUnit *u,Function *f,size_t at)
 {
     unsigned i;(void)f;(void)at;lp_liveness(u);
     for(i=0;i<u->count;++i){LpLine *l=&u->lines[i];int step,store,w;size_t n,m;const char *p,*destination;
+        if(lp_is(l,"ldx")&&!l->x8){
+            int txa=lp_next(u,i,1);
+            p=lp_operand(l,&n);w=lp_workspace_word(p,n);
+            if(txa>=0&&lp_line_is(&u->lines[txa],"txa")&&!u->lines[txa].m8&&
+               (w>=0||((n>=4&&!strncmp(p,"a:_",3))||
+                        (n>=13&&!strncmp(p,"a:.loword(_",11)&&p[n-1]==')')))&&
+               (w>=0||(!memchr(p,',',n)&&pr_named(p,n)))){
+                step=lp_next(u,(unsigned)txa,1);
+                if(step>=0&&(lp_line_is(&u->lines[step],"inc a")||lp_line_is(&u->lines[step],"dec a"))){
+                    store=lp_next(u,(unsigned)step,1);
+                    if(store>=0&&lp_is(&u->lines[store],"sta")&&!u->lines[store].m8&&!(u->lines[store].out&LP_A)){
+                        destination=lp_operand(&u->lines[store],&m);
+                        if(lp_operand_is(&u->lines[store],p,n)||
+                           (w<0&&n==m+9&&m>=4&&!strncmp(p,"a:.loword(_",11)&&
+                            !strncmp(destination,"a:_",3)&&!strncmp(p+10,destination+2,m-2))){
+                            lp_set(&u->lines[txa],"    %.3s %.*s",u->lines[step].op,(int)n,p);
+                            u->lines[step].deleted=u->lines[store].deleted=1;
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
         if(!lp_is(l,"lda")||l->m8)continue;
         p=lp_operand(l,&n);w=lp_workspace_word(p,n);
         if(w<0&&((n<4||strncmp(p,"a:_",3))&&
