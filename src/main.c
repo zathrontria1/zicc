@@ -5,6 +5,7 @@
 #endif
 #include <ctype.h>
 #include <errno.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -86,7 +87,7 @@ struct Expr {
     Symbol *symbol; String *string; Expr *args[MAX_ARGUMENTS]; unsigned arg_count;
     Expr *left, *right, *third;
     KnownValue known,range;
-    int known_no_conversion, known_nonnull;
+    int known_no_conversion, known_nonnull, error_reported;
 };
 typedef enum { ST_BLOCK, ST_EMPTY, ST_WHILE, ST_RETURN, ST_EXPR, ST_IF,
                ST_BREAK, ST_CONTINUE, ST_FOR, ST_DO, ST_SWITCH, ST_CASE, ST_GOTO, ST_LABEL } StatementKind;
@@ -250,12 +251,48 @@ static Type enum_specifier(Parser *p);
 static void structure_definition(Parser *p,Structure *record);
 static void free_expression(Expr *e);
 static void free_statements(Statement *s);
+enum { MAX_ERRORS = 50 };
+typedef struct Recovery Recovery;
+struct Recovery {
+    jmp_buf env;
+    Recovery *previous;
+};
+static Recovery *active_recovery;
+static unsigned diagnostic_errors;
+static int diagnostic_limit_hit;
+
+static void stop_if_error_limit(void)
+{
+    if (diagnostic_errors >= MAX_ERRORS) {
+        if (!diagnostic_limit_hit) {
+            diagnostic_limit_hit = 1;
+            fputs("zicc: too many errors, stopping\n", stderr);
+        }
+        exit(EXIT_FAILURE);
+    }
+}
+static void report_error(Location at, const char *format, ...)
+{
+    va_list args;
+    stop_if_error_limit();
+    fprintf(stderr, "%s:%d:%d: error: ", at.path, at.line, at.column);
+    va_start(args, format); vfprintf(stderr, format, args); va_end(args);
+    fputc('\n', stderr);
+    ++diagnostic_errors;
+    stop_if_error_limit();
+}
 static void error_at(Location at, const char *format, ...)
 {
     va_list args;
-    fprintf(stderr, "%s:%d:%d: error: ", at.path, at.line, at.column);
-    va_start(args, format); vfprintf(stderr, format, args); va_end(args);
-    fputc('\n', stderr); exit(EXIT_FAILURE);
+    if (diagnostic_errors < MAX_ERRORS) {
+        fprintf(stderr, "%s:%d:%d: error: ", at.path, at.line, at.column);
+        va_start(args, format); vfprintf(stderr, format, args); va_end(args);
+        fputc('\n', stderr);
+        ++diagnostic_errors;
+    }
+    stop_if_error_limit();
+    if (active_recovery) longjmp(active_recovery->env, 1);
+    exit(EXIT_FAILURE);
 }
 static void warning_at(Location at,const char *format,...)
 {
@@ -927,8 +964,25 @@ int main(int argc, char **argv)
         Parser *options=p;
         for(i=0;i<lto_count;++i){Parser *unit=allocate(sizeof *unit);*unit=*options;
             lto_parse(unit,lto_sources[i],include_directory,dependencies);lto_units[lto_units_count++]=unit;}
+        if(diagnostic_errors){
+            if(dependencies)fclose(dependencies);
+            free(options);for(i=0;i<lto_units_count;++i)lto_free(lto_units[i]);
+            return EXIT_FAILURE;
+        }
         p=lto_merge(options,lto_units,lto_units_count);free(options);
-    }else lto_parse(p,argv[1],include_directory,dependencies);
+        if(diagnostic_errors){
+            if(dependencies)fclose(dependencies);
+            lto_free(p);for(i=0;i<lto_units_count;++i)lto_free(lto_units[i]);
+            return EXIT_FAILURE;
+        }
+    }else{
+        lto_parse(p,argv[1],include_directory,dependencies);
+        if(diagnostic_errors){
+            if(dependencies)fclose(dependencies);
+            lto_free(p);
+            return EXIT_FAILURE;
+        }
+    }
     if (dependencies) {
         failed = ferror(dependencies);
         if (fclose(dependencies)) failed = 1;

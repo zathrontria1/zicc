@@ -71,24 +71,28 @@ static void function_parameters(Parser *p,Symbol *candidate,Type *declared,int *
 static void check_default_promotions(const Symbol *prototype,Location at)
 {
     int i;
-    if(prototype->variadic)error_at(at,"variadic prototype conflicts with old-style declaration");
+    if(prototype->variadic)report_error(at,"variadic prototype conflicts with old-style declaration");
     for(i=0;i<prototype->param_count;++i)
         if(!same_type(unqualified_value(prototype->params[i]),default_argument_promoted(prototype->params[i])))
-            error_at(at,"prototype parameter is incompatible with default argument promotions");
+            report_error(at,"prototype parameter is incompatible with default argument promotions");
 }
 
 static void merge_function(Symbol *s,Symbol *candidate,Location at)
 {
     int i;
     if(s->param_count>=0&&candidate->param_count>=0){
-        if(s->param_count!=candidate->param_count||s->variadic!=candidate->variadic)
-            error_at(at,"conflicting prototype '%s'",candidate->name);
+        if(s->param_count!=candidate->param_count||s->variadic!=candidate->variadic){
+            report_error(at,"conflicting prototype '%s'",candidate->name);
+            return;
+        }
         for(i=0;i<s->param_count;++i){
             Type existing=unqualified_value(s->params[i]),incoming=unqualified_value(candidate->params[i]);
-            if(!same_type(existing,incoming))
-                error_at(at,pointer_far_mismatch(existing,incoming)?
-                         "conflicting parameter type: near/far pointer mismatch":
-                         "conflicting parameter type");
+            if(!same_type(existing,incoming)){
+                report_error(at,pointer_far_mismatch(existing,incoming)?
+                             "conflicting parameter type: near/far pointer mismatch":
+                             "conflicting parameter type");
+                return;
+            }
         }
     }
     if(s->old_style!=candidate->old_style)

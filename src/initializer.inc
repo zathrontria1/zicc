@@ -447,8 +447,8 @@ static int initializer_address(Expr *e,Relocation *r,uint32_t *absolute,int addr
             *absolute=initializer_constant(e->left,1);
         }
         if(r->symbol||r->string){
-            if(!far_pointer(e->type)&&(r->string||r->symbol->type.banked))
-                error_at(e->location,"ROM address is not representable as a near pointer");
+            if(!e->error_reported&&!far_pointer(e->type)&&(r->string||r->symbol->type.banked))
+                report_error(e->location,"ROM address is not representable as a near pointer");
         }else{
             literal.kind=EX_INT;literal.type=source;literal.location=e->location;literal.value=*absolute;
             *absolute=convert(&literal,e->type)->value;
@@ -564,19 +564,21 @@ static void initializer_store(Initializer *init,Type t,unsigned offset,Expr *e)
         if(numeric(e->type)&&e->type.base!=TY_FLOAT&&e->kind!=EX_INT){
             integer_constant_operands(e,"pointer initializer");
             value=initializer_constant(e,1);
-            if(value)error_at(at,"incompatible pointer initializer");
+            if(value){report_error(at,"incompatible pointer initializer");free(r);free_expression(e);return;}
             free_expression(e);
             e=new_expr(EX_INT,at,type(TY_INT,0));
         }
         if(!compatible_argument(t,e)){
             if(far_to_near_mismatch(t,e))
-                error_at(at,"incompatible pointer initializer: far pointer cannot initialize near pointer (declare target with __far)");
-            if(nested_far_mismatch(t,e))
-                error_at(at,"incompatible pointer initializer: nested near/far pointer mismatch");
-            error_at(at,"incompatible pointer initializer");
+                report_error(at,"incompatible pointer initializer: far pointer cannot initialize near pointer (declare target with __far)");
+            else if(nested_far_mismatch(t,e))
+                report_error(at,"incompatible pointer initializer: nested near/far pointer mismatch");
+            else
+                report_error(at,"incompatible pointer initializer");
+            free(r);free_expression(e);return;
         }
         e=assignment_convert(e,t);
-        if(!initializer_address(e,r,&value,0))error_at(at,"pointer initializer requires a constant address");
+        if(!initializer_address(e,r,&value,0)){report_error(at,"pointer initializer requires a constant address");free(r);free_expression(e);return;}
         if(r->symbol||r->string){
             r->offset=offset;r->size=width(t);r->far_value=far_pointer(t);
             if(r->symbol)r->symbol->used=1;if(r->string)r->string->used=1;

@@ -1072,8 +1072,11 @@ def build_image(args, output, log):
                 directory = evidence / f'stage{stage}'; directory.mkdir(exist_ok=True)
                 objects = []; metadata = {}; mandatory = []; inputs = []
                 application_compiles = {}
+                compile_errors = []
                 application_sources=args.sources[:1] if args.lto else args.sources
                 for i, (source, owner) in enumerate([(p.resolve(), 'application') for p in application_sources+getattr(args,'assembly',[])] + [(p, 'runtime') for p in runtime_paths]):
+                    if owner == 'runtime' and compile_errors:
+                        raise RuntimeError('\n'.join(compile_errors))
                     resources = set()
                     ident = f'{i}_' + re.sub(r'[^A-Za-z0-9_]', '_', source.stem); asm = directory / (ident + '.s'); obj = asm.with_suffix('.o')
                     long_return = stage == 4 or stage == 3 and owner == 'runtime'
@@ -1090,8 +1093,14 @@ def build_image(args, output, log):
                         if long_return: flags.append('--long-return')
                         if stage == 3 and owner == 'application':
                             flags += ['--long-calls', ','.join(sorted(runtime_symbols))]
-                        text, dependencies = compile_unit(source, asm, flags, cache_dir, stage, show, log,
-                                                          track_dependencies=can_prove_rounding and owner == 'application')
+                        try:
+                            text, dependencies = compile_unit(source, asm, flags, cache_dir, stage, show, log,
+                                                              track_dependencies=can_prove_rounding and owner == 'application')
+                        except RuntimeError as error:
+                            if owner == 'application':
+                                compile_errors.append(str(error))
+                                continue
+                            raise
                         if owner == 'application':
                             application_compiles[ident] = (flags, dependencies)
                         compile_dependencies.update(dependencies)
@@ -1113,6 +1122,8 @@ def build_image(args, output, log):
                         text = (f'.segment "HEADER"\n.res 21,0\n'
                                 f'.byte ${mode:02X},{cart_type},0,{sram_exponent}\n.res 7,0\n')
                     inputs.append((source, owner, ident, long_return, text, resources))
+                if compile_errors:
+                    raise RuntimeError('\n'.join(compile_errors))
                 if any(far_import.search(text) for _, owner, _, _, text, _ in inputs if owner == 'application'):
                     for file in FAR_LIBRARY:
                         source = ROOT / 'runtime' / file

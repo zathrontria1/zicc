@@ -343,6 +343,7 @@ PARTS = [
     ('loram', 300),
     ('application-wram', 600),
     ('preprocessor', 30),
+    ('multi-errors', 30),
     ('embed', 30),
     ('banked-rom', 600),
     ('volatile', 120),

@@ -4,7 +4,7 @@ static Expr *expression_allow_sram_array(Parser *p);
 static Expr *assignment_expression(Parser *p);
 static Statement *object_initializer(Parser *p,Symbol *s,int automatic);
 static Symbol *new_symbol(Parser *p,const char *name,Type t,Location at);
-static Statement *statement(Parser *p);
+static Statement *statement(Parser *p);;
 static Type named_declarator(Parser *p,Type t,char *name,int optional);
 static Symbol *linked_symbol(Parser *p,const char *name);
 static void merge_function(Symbol *s,Symbol *candidate,Location at);
@@ -137,6 +137,11 @@ static int rom_address(Expr *e,int object)
     default:return 0;
     }
 }
+static Expr *bad_convert(Expr *e,Type target)
+{
+    Expr *cast=new_expr(EX_CAST,e->location,unqualified_value(target));
+    cast->left=e;cast->error_reported=1;return cast;
+}
 static Expr *convert(Expr *e,Type target)
 {
     Type source=unqualified_value(e->type);Expr *cast;
@@ -144,8 +149,10 @@ static Expr *convert(Expr *e,Type target)
     target=unqualified_value(target);
     if((function_pointer(source)&&target.pointers&&!function_pointer(target))||
        (function_pointer(target)&&source.pointers&&!function_pointer(source)&&
-        !(source.pointers==1&&source.base==TY_VOID&&e->kind==EX_INT&&!e->value)))
-        error_at(e->location,"function and object pointers cannot be converted");
+        !(source.pointers==1&&source.base==TY_VOID&&e->kind==EX_INT&&!e->value))){
+        report_error(e->location,"function and object pointers cannot be converted");
+        return bad_convert(e,target);
+    }
     if(structure_object(source)&&target.base==TY_VOID&&!target.pointers){
         cast=new_expr(EX_CAST,e->location,target);cast->left=e;return cast;
     }
@@ -159,22 +166,32 @@ static Expr *convert(Expr *e,Type target)
         e=new_expr(EX_UNARY,e->location,target);e->op='!';e->left=cast;return e;
     }
     if((source.pointers&&!target.pointers&&(target.base==TY_FLOAT||target.base==TY_DOUBLE))||
-       (target.pointers&&!source.pointers&&(source.base==TY_FLOAT||source.base==TY_DOUBLE)))
-        error_at(e->location,"pointer/float conversion is not supported");
-    if(far_pointer(source)&&target.pointers&&!far_pointer(target)&&spillable_address(e,0))
-        error_at(e->location,"spillable WRAM address is not representable as a near pointer");
+       (target.pointers&&!source.pointers&&(source.base==TY_FLOAT||source.base==TY_DOUBLE))){
+        report_error(e->location,"pointer/float conversion is not supported");
+        return bad_convert(e,target);
+    }
+    if(far_pointer(source)&&target.pointers&&!far_pointer(target)&&spillable_address(e,0)){
+        report_error(e->location,"spillable WRAM address is not representable as a near pointer");
+        return bad_convert(e,target);
+    }
     if(e->kind==EX_INT&&target.pointers){
-        if(source.base==TY_LONGLONG&&e->value_high)
-            error_at(e->location,"64-bit pointer constant is out of range");
+        if(source.base==TY_LONGLONG&&e->value_high){
+            report_error(e->location,"64-bit pointer constant is out of range");
+            e->error_reported=1;
+        }
         if(far_pointer(target)&&!source.pointers&&!source.is_unsigned&&value_width(source)==2&&(e->value&32768u))e->value|=0xffff0000u;
         if(far_pointer(target)){if(source.pointers&&!far_pointer(source)&&e->value)e->value=(e->value&65535u)|0x7e0000u;e->value&=0xffffffu;e->type=target;return e;}
         if((source.pointers&&far_pointer(source)&&e->value&&(e->value>>16)!=0x7e)||
-           (e->value>65535u&&((e->value>>16)!=0x7e||!(e->value&65535u))))
-            error_at(e->location,"far address is not representable as a near pointer");
+           (e->value>65535u&&((e->value>>16)!=0x7e||!(e->value&65535u)))){
+            report_error(e->location,"far address is not representable as a near pointer");
+            e->error_reported=1;
+        }
         e->value&=65535;e->type=target;return e;
     }
-    if(far_pointer(source)&&target.pointers&&!far_pointer(target)&&rom_address(e,0))
-        error_at(e->location,"ROM address is not representable as a near pointer");
+    if(far_pointer(source)&&target.pointers&&!far_pointer(target)&&rom_address(e,0)){
+        report_error(e->location,"ROM address is not representable as a near pointer");
+        return bad_convert(e,target);
+    }
     if(e->kind==EX_INT&&numeric(source)&&numeric(target)&&source.base!=TY_DOUBLE&&target.base!=TY_DOUBLE){
         if(target.base==TY_LONGLONG&&source.base!=TY_FLOAT){
             if(source.base!=TY_LONGLONG){uint32_t v=literal_integer(e,source);e->value=v;e->value_high=!source.is_unsigned&&(v&UINT32_C(0x80000000))?UINT32_MAX:0;}
@@ -199,35 +216,39 @@ static Expr *assignment_convert(Expr *e,Type target)
 {
     Type source=unqualified_value(e->type),destination=unqualified_value(target);
     if((function_pointer(source)||function_pointer(destination))&&
-       !compatible_argument(destination,e))error_at(e->location,"incompatible function pointer assignment");
+       !compatible_argument(destination,e)){report_error(e->location,"incompatible function pointer assignment");return bad_convert(e,target);}
     if(source.pointers&&destination.pointers&&far_pointer(source)&&!far_pointer(destination))
-        error_at(e->location,"implicit far-to-near pointer conversion (use __far)");
+        {report_error(e->location,"implicit far-to-near pointer conversion (use __far)");return bad_convert(e,target);}
     if(source.pointers&&destination.pointers&&(void_pointer(source)||void_pointer(destination))){
         Type from=pointed_type(source),to=pointed_type(destination);
-        if(object_constant(from)&&!object_constant(to))error_at(e->location,"conversion discards const qualification");
-        if(object_volatile(from)&&!object_volatile(to))error_at(e->location,"conversion discards volatile qualification");
+        if(object_constant(from)&&!object_constant(to)){report_error(e->location,"conversion discards const qualification");return bad_convert(e,target);}
+        if(object_volatile(from)&&!object_volatile(to)){report_error(e->location,"conversion discards volatile qualification");return bad_convert(e,target);}
         return convert(e,target);
     }
-    if((source.element||destination.element)&&source.pointers&&destination.pointers&&!compatible_argument(destination,e))
-        error_at(e->location,nested_far_mismatch(destination,e)?
-                 "incompatible pointer-to-array assignment: nested near/far pointer mismatch":
-                 "incompatible pointer-to-array assignment");
+    if((source.element||destination.element)&&source.pointers&&destination.pointers&&!compatible_argument(destination,e)){
+        report_error(e->location,nested_far_mismatch(destination,e)?
+                     "incompatible pointer-to-array assignment: nested near/far pointer mismatch":
+                     "incompatible pointer-to-array assignment");
+        return bad_convert(e,target);
+    }
     if(source.pointers&&source.pointers==destination.pointers&&
        ((source.constant&&!destination.constant)||(source.pointer_constants&~destination.pointer_constants)))
-        error_at(e->location,"conversion discards const qualification");
+        {report_error(e->location,"conversion discards const qualification");return bad_convert(e,target);}
     if(source.pointers&&destination.pointers&&
        (source.base==TY_STRUCT||destination.base==TY_STRUCT)&&
        source.base!=TY_VOID&&destination.base!=TY_VOID&&
        !compatible_argument(destination,e))
-        error_at(e->location,"incompatible aggregate pointer assignment");
+        {report_error(e->location,"incompatible aggregate pointer assignment");return bad_convert(e,target);}
     if(source.pointers&&source.pointers==destination.pointers&&
        ((source.is_volatile&&!destination.is_volatile)||(source.pointer_volatiles&~destination.pointer_volatiles)))
-        error_at(e->location,"conversion discards volatile qualification");
+        {report_error(e->location,"conversion discards volatile qualification");return bad_convert(e,target);}
     if(source.pointers&&destination.pointers&&(source.pointers>1||destination.pointers>1)&&
-       !compatible_argument(destination,e))
-        error_at(e->location,nested_far_mismatch(destination,e)?
-                 "incompatible nested pointer assignment: nested near/far pointer mismatch":
-                 "incompatible nested pointer assignment");
+       !compatible_argument(destination,e)){
+        report_error(e->location,nested_far_mismatch(destination,e)?
+                     "incompatible nested pointer assignment: nested near/far pointer mismatch":
+                     "incompatible nested pointer assignment");
+        return bad_convert(e,target);
+    }
     return convert(e,target);
 }
 static int lvalue(Expr *e)
@@ -343,22 +364,23 @@ static Type call_arguments(Parser *p,Expr *e,const char *name,int count,int vari
     }
     Type first_argument=e->arg_count?value_type(e->args[0]->type):type(TY_VOID,0);
     if(count>=0){
+        unsigned checked=(unsigned)count<e->arg_count?(unsigned)count:e->arg_count;
         if(e->arg_count<(unsigned)count||(!variadic&&e->arg_count!=(unsigned)count))
-            error_at(at,"wrong argument count for '%s'",name);
-        for(i=0;i<(unsigned)count;++i){
+            report_error(at,"wrong argument count for '%s'",name);
+        for(i=0;i<checked;++i){
             if(old_style){
                 Type actual=default_argument_promoted(e->args[i]->type),expected=default_argument_promoted(parameters[i]);
                 if(numeric(actual)&&numeric(expected)&&actual.base!=expected.base)
-                    error_at(e->args[i]->location,"argument %u does not match promoted K&R parameter",i+1);
+                    report_error(e->args[i]->location,"argument %u does not match promoted K&R parameter",i+1);
             }
             if(!compatible_argument(parameters[i],e->args[i])){
                 if(far_to_near_mismatch(parameters[i],e->args[i]))
-                    error_at(e->args[i]->location,"incompatible argument %u for '%s': far pointer passed to near pointer parameter (declare parameter with __far)",i+1,name);
-                if(nested_far_mismatch(parameters[i],e->args[i]))
-                    error_at(e->args[i]->location,"incompatible argument %u for '%s': nested near/far pointer mismatch",i+1,name);
-                error_at(e->args[i]->location,"incompatible argument %u for '%s'",i+1,name);
-            }
-            if(!old_style&&!structure_object(parameters[i]))e->args[i]=convert(e->args[i],parameters[i]);
+                    report_error(e->args[i]->location,"incompatible argument %u for '%s': far pointer passed to near pointer parameter (declare parameter with __far)",i+1,name);
+                else if(nested_far_mismatch(parameters[i],e->args[i]))
+                    report_error(e->args[i]->location,"incompatible argument %u for '%s': nested near/far pointer mismatch",i+1,name);
+                else
+                    report_error(e->args[i]->location,"incompatible argument %u for '%s'",i+1,name);
+            }else if(!old_style&&!structure_object(parameters[i]))e->args[i]=convert(e->args[i],parameters[i]);
         }
     }
     for(i=old_style||count<0?0:(unsigned)count;i<e->arg_count;++i)
@@ -1324,10 +1346,12 @@ static void merge_object_type(Symbol *s,Type *candidate,Location at)
         if(composite.array==~0u)composite.array=other.array;
         other.array=composite.array;
     }
-    if(!same_type(composite,other))
-        error_at(at,pointer_far_mismatch(composite,other)?
-                 "conflicting declaration '%s': near/far pointer mismatch":
-                 "conflicting declaration '%s'",s->name);
+    if(!same_type(composite,other)){
+        report_error(at,pointer_far_mismatch(composite,other)?
+                     "conflicting declaration '%s': near/far pointer mismatch":
+                     "conflicting declaration '%s'",s->name);
+        return;
+    }
     s->type=composite;
     *candidate=composite;
 }
@@ -1537,10 +1561,41 @@ static void finish_jump_labels(Function *f)
 {
     while(f->jump_labels){
         JumpLabel *label=f->jump_labels;
-        if(!label->defined)error_at(label->location,"undefined label '%s'",label->name);
+        if(!label->defined)report_error(label->location,"undefined label '%s'",label->name);
         f->jump_labels=label->next;
         free(label);
     }
+}
+static void unwind_scopes(Parser *p,unsigned target_scope)
+{
+    while(p->scope>target_scope)leave_scope(p);
+}
+static void skip_to_statement_sync(Parser *p,size_t start_position,int start_kind)
+{
+    unsigned braces=0;
+    Recovery *saved=active_recovery;
+    active_recovery=NULL;
+    if(p->token.kind!=TOK_EOF&&p->position==start_position&&p->token.kind==start_kind&&p->token.kind!='}')
+        lex(p);
+    while(p->token.kind!=TOK_EOF){
+        if(p->token.kind=='{'){++braces;lex(p);continue;}
+        if(p->token.kind=='}'){
+            if(!braces)break;
+            --braces;lex(p);
+            if(!braces)break;
+            continue;
+        }
+        if(p->token.kind==';'&&!braces){lex(p);break;}
+        lex(p);
+    }
+    active_recovery=saved;
+}
+static Statement *statement(Parser *p);
+static void parse_block_item(Parser *p,Statement ***tail)
+{
+    Statement *item=type_start(p)&&!label_start(p)?local_declaration(p):statement(p);
+    **tail=item;
+    *tail=&item->next;
 }
 static Statement *statement(Parser *p)
 {
@@ -1550,12 +1605,38 @@ static Statement *statement(Parser *p)
     }else if(label_start(p)){
         s->kind=ST_LABEL;s->jump_label=jump_label(p,1);expect(p,':',"':'");s->body=statement(p);
     }else if(accept(p,'{')){
-        Statement **tail=&s->body;++p->scope;s->kind=ST_BLOCK;
+        Statement **volatile tail=&s->body;
+        unsigned volatile saved_scope;
+        unsigned volatile saved_loop=p->loop_depth;
+        unsigned volatile saved_parse=p->parse_depth;
+        Statement *volatile saved_switch=p->current_switch;
+        ++p->scope;saved_scope=p->scope;s->kind=ST_BLOCK;
         while(p->token.kind!='}'){
-            if(p->token.kind==TOK_EOF)error_at(p->token.location,"expected '}'");
-            *tail=type_start(p)&&!label_start(p)?local_declaration(p):statement(p);tail=&(*tail)->next;
+            Recovery frame;
+            size_t volatile start_pos=p->position;
+            int volatile start_kind=p->token.kind;
+            if(p->token.kind==TOK_EOF){
+                report_error(p->token.location,"expected '}'");
+                break;
+            }
+            frame.previous=active_recovery;
+            active_recovery=&frame;
+            if(setjmp(frame.env)==0){
+                Statement **current_tail=(Statement **)tail;
+                parse_block_item(p,&current_tail);
+                tail=current_tail;
+                active_recovery=frame.previous;
+            }else{
+                active_recovery=frame.previous;
+                unwind_scopes(p,saved_scope);
+                p->loop_depth=saved_loop;
+                p->parse_depth=saved_parse;
+                p->current_switch=(Statement *)saved_switch;
+                skip_to_statement_sync(p,start_pos,start_kind);
+            }
         }
-        leave_scope(p);lex(p);
+        leave_scope(p);
+        if(p->token.kind=='}')lex(p);
     }else if(accept(p,TOK_SWITCH)){
         Statement *outer=p->current_switch;Expr *control;
         s->kind=ST_SWITCH;expect(p,'(',"'(' after switch");control=expression(p);expect(p,')',"')'");
@@ -1608,7 +1689,7 @@ static Statement *statement(Parser *p)
             if(structure_object(t)){
                 Expr *destination,*copy;
                 if(!same_type(unqualified_value(t),unqualified_value(value->type)))
-                    error_at(s->location,"incompatible aggregate return");
+                    report_error(s->location,"incompatible aggregate return");
                 destination=new_expr(EX_DEREF,s->location,t);
                 destination->left=new_expr(EX_RESULT_ADDR,s->location,pointer_to(t));
                 copy=new_expr(EX_ASSIGN,s->location,t);copy->left=destination;copy->right=value;
@@ -1616,12 +1697,12 @@ static Statement *statement(Parser *p)
             }else s->expression=assignment_convert(value,t);
             expect(p,';',"';'");
         }
-        else if(p->current->symbol->type.base!=TY_VOID)error_at(s->location,"non-void return needs a value");
+        else if(p->current->symbol->type.base!=TY_VOID)report_error(s->location,"non-void return needs a value");
     }else if(accept(p,TOK_BREAK)){
-        if(!p->loop_depth&&!p->current_switch)error_at(s->location,"break outside loop or switch");
+        if(!p->loop_depth&&!p->current_switch)report_error(s->location,"break outside loop or switch");
         s->kind=ST_BREAK;expect(p,';',"';'");}
     else if(accept(p,TOK_CONTINUE)){
-        if(!p->loop_depth)error_at(s->location,"continue outside loop");
+        if(!p->loop_depth)report_error(s->location,"continue outside loop");
         s->kind=ST_CONTINUE;expect(p,';',"';'");}
     else if(basic_asm_name(p)){
         Expr *literal;Symbol *barrier;const char *instruction;
@@ -1725,219 +1806,264 @@ static int function_attributes(Parser *p,FunctionAttributes *attributes)
     expect(p,')',"')' after function attributes");expect(p,')',"second ')' after function attributes");return 1;
 }
 
+static void parse_top_level(Parser *p,int *has_main)
+{
+    int storage_class=0,is_typedef,is_extern,is_static,dpage=0,loram=0,definition=0,interrupt=INT_NONE;
+    int constant=0,vol=0,wram=WRAM_NONE;Type base;FunctionAttributes shared={0};
+    for(;;){if(storage_specifier(p,&storage_class,0)){}
+        else if(accept(p,TOK_DPAGE))dpage=1;
+        else if(accept(p,TOK_LORAM))loram=1;
+        else if(wram_specifier(p,&wram)){}
+        else if(accept(p,TOK_CONST))constant=1;
+        else if(accept(p,TOK_VOLATILE))vol=1;
+        else if(function_attributes(p,&shared)){}
+        else if(accept(p,TOK_INTERRUPT)){
+            if(interrupt)error_at(p->token.location,"duplicate interrupt attribute");
+            expect(p,'(',"'(' after __interrupt");
+            if(p->token.kind!=TOK_NAME)error_at(p->token.location,"expected nmi, irq, brk or cop");
+            if(!strcmp(p->token.name,"nmi"))interrupt=INT_NMI;
+            else if(!strcmp(p->token.name,"irq"))interrupt=INT_IRQ;
+            else if(!strcmp(p->token.name,"brk"))interrupt=INT_BRK;
+            else if(!strcmp(p->token.name,"cop"))interrupt=INT_COP;
+            else error_at(p->token.location,"unknown interrupt kind '%s'",p->token.name);
+            lex(p);expect(p,')',"')' after interrupt kind");
+        }else break;}
+    base=declaration_base_with_storage(p,&storage_class,0,&wram);
+    if(wram==WRAM_LORAM){loram=1;wram=WRAM_NONE;}
+    is_typedef=storage_class==TOK_TYPEDEF;
+    is_extern=storage_class==TOK_EXTERN;
+    is_static=storage_class==TOK_STATIC;
+    if(loram&&(is_typedef||dpage||interrupt))error_at(p->token.location,"__loram requires an ordinary static-storage object");
+    if(wram&&(is_typedef||dpage||loram||interrupt||
+              (wram>=WRAM_SRAM_FIRST&&storage_class&&!is_extern&&!is_static)))
+        error_at(p->token.location,"conflicting %s placement or storage class",wram>=WRAM_SRAM_FIRST?"SRAM":"WRAM");
+    if(interrupt&&(is_typedef||is_static||dpage))error_at(p->token.location,"interrupt handler must have external function linkage");
+    if(constant)base=const_object(base);if(vol)base=volatile_object(base);
+    while(function_attributes(p,&shared)){}
+    if((base.base==TY_STRUCT||base.enum_tag)&&!is_typedef&&!is_extern&&!is_static&&!dpage&&!loram&&!wram&&!interrupt&&accept(p,';')){
+        if(shared.noclone)error_at(p->token.location,"noclone requires a function");
+        return;
+    }
+    do{
+        Type t=base,declared_params[MAX_PARAMETERS];int old_definition=0;char name[64];Location at=p->token.location;Symbol candidate={0},*s;
+        FunctionAttributes attributes=shared;
+        t=named_declarator_mode(p,t,name,0,is_typedef,&attributes);
+        if(is_typedef){
+            if(attributes.noclone)error_at(at,"noclone requires a function");
+            if(attributes.hint||attributes.force||attributes.never)error_at(at,"inlining specifiers require a function");
+            add_alias(p,name,t,at);continue;
+        }
+        strcpy(candidate.name,name);candidate.type=t;candidate.external=is_extern;candidate.dpage=dpage;candidate.loram=loram;candidate.wram=wram;candidate.internal=is_static;candidate.interrupt=interrupt;
+        if(function_type(t)||accept(p,'(')){
+            if(loram)error_at(at,"__loram cannot qualify a function");
+            if(wram)error_at(at,"%s placement cannot qualify a function",wram>=WRAM_SRAM_FIRST?"SRAM":"WRAM");
+            if(t.array)error_at(at,"function cannot return an array");
+            candidate.function=1;
+            if(function_type(t)){
+                FunctionType *signature=t.signature;
+                candidate.type=t=signature->result;
+                candidate.param_count=signature->count;
+                candidate.variadic=signature->variadic;
+                candidate.old_style=signature->count<0;
+                if(signature->count<0&&p->token.kind=='{')candidate.param_count=0;
+                if(signature->count>0){
+                    size_t count=(size_t)signature->count;
+                    memcpy(candidate.params,signature->parameters,count*sizeof *candidate.params);
+                    memcpy(declared_params,signature->parameters,count*sizeof *declared_params);
+                    memcpy(candidate.param_names,signature->names,count*sizeof *candidate.param_names);
+                }
+            }else function_parameters(p,&candidate,declared_params,&old_definition,at);
+        }else{
+            candidate.defined=!is_extern;
+            candidate.type.banked=wram||(!loram&&object_constant(t)&&!object_volatile(t)&&(is_extern||p->token.kind=='='));
+            if(p->runtime_objects){
+                const char *item=p->runtime_objects;size_t length=strlen(name);
+                while(item&&*item){
+                    const char *end=strchr(item,',');size_t n=end?(size_t)(end-item):strlen(item);
+                    if(n==length&&!strncmp(item,name,n)){
+                        if(dpage||loram||wram||object_constant(t)||p->token.kind=='=')
+                            error_at(at,"runtime object requires uninitialized mutable banked storage");
+                        candidate.runtime_ram=1;candidate.type.banked=1;break;
+                    }
+                    item=end?end+1:NULL;
+                }
+            }
+            if(wram>=WRAM_SRAM_FIRST)check_sram_object(&candidate,p->token.kind=='=',at);
+            else check_static_storage_size(&candidate,name,object_size_limit(&candidate),at);
+        }
+        {
+         while(function_attributes(p,&attributes)){}
+         if(attributes.noclone&&!candidate.function)error_at(at,"noclone requires a function");
+         candidate.noclone=attributes.noclone;
+         if((attributes.hint||attributes.force||attributes.never)&&!candidate.function)error_at(at,"inlining specifiers require a function");
+         candidate.inline_hint=attributes.hint;candidate.always_inline=attributes.force;candidate.noinline=attributes.never;
+         /* ISO C: any extern or non-inline file-scope declaration supplies
+          * the external definition; otherwise an external inline body is
+          * available for substitution only. */
+         candidate.inline_external=candidate.function&&(is_extern||!attributes.hint);
+        }
+        s=linked_symbol(p,name);
+        if(s&&s->implicit_library&&is_static)s=NULL;
+        if(s)s->implicit_library=0;
+        if(s&&s->enumerator)error_at(at,"enumerator '%s' cannot be redeclared as an object/function",name);
+        if(find_alias(p,name))error_at(at,"identifier '%s' was declared as a typedef",name);
+        if(interrupt&&(!candidate.function||t.base!=TY_VOID||t.pointers||candidate.param_count!=0||candidate.variadic||candidate.old_style))
+            error_at(at,"interrupt handler must be void name(void)");
+        if(s){
+            int block_linkage=s->block_linkage;
+            if(s->wram!=wram)
+                error_at(at,"conflicting %s placement for '%s'",
+                         wram>=WRAM_SRAM_FIRST||s->wram>=WRAM_SRAM_FIRST?"SRAM":"WRAM",name);
+            if((loram&&s->dpage)||(dpage&&s->loram))error_at(at,"__loram conflicts with __dpage");
+            if(loram&&!s->loram&&(s->defined||s->placement_used))error_at(at,"__loram must precede the definition and uses of '%s'",name);
+            if(loram){s->loram=1;s->type.banked=0;}
+            if((interrupt||s->interrupt)&&(is_static||s->internal||dpage))error_at(at,"interrupt handler must have external function linkage");
+            if(interrupt&&s->interrupt&&interrupt!=s->interrupt)error_at(at,"conflicting interrupt attribute");
+            if(interrupt&&s->called)error_at(at,"interrupt handler was previously called");
+            if(interrupt&&s->defined&&!s->interrupt)error_at(at,"interrupt attribute must precede the definition");
+            if(interrupt)s->interrupt=interrupt;
+            if(s->block_linkage&&is_static)error_at(at,"conflicting linkage for '%s'",name);
+            s->block_linkage=0;
+            if(!candidate.function&&!s->function)merge_object_type(s,&candidate.type,at);
+            if(s->function!=candidate.function)error_at(at,"conflicting declaration '%s'",name);
+            if(!same_type(s->type,candidate.type))
+                report_error(at,pointer_far_mismatch(s->type,candidate.type)?
+                             "conflicting declaration '%s': near/far pointer mismatch":
+                             "conflicting declaration '%s'",name);
+            if(candidate.function){
+                merge_function(s,&candidate,at);
+                if(block_linkage&&candidate.old_style&&candidate.param_count<0){
+                    s->old_style=1;s->param_count=-1;
+                }
+            }
+            s->inline_hint|=candidate.inline_hint;s->always_inline|=candidate.always_inline;
+            s->noclone|=candidate.noclone;s->noinline|=candidate.noinline;s->inline_external|=candidate.inline_external;
+            if(!candidate.function&&candidate.defined)s->defined=1;
+        }else{s=new_symbol(p,name,t,at);*s=candidate;}
+        if(!s->function&&!is_extern&&!width(s->type)&&
+           !(s->type.array==~0u&&(p->token.kind=='='||!s->internal))&&
+           !(structure_object(s->type)&&!s->type.array&&!s->internal&&p->token.kind!='='))
+            error_at(at,"global requires a complete object type");
+        if(s->always_inline&&s->noinline)error_at(at,"always_inline conflicts with noinline for '%s'",name);
+        if(s->internal)snprintf(s->asm_name,sizeof s->asm_name,"%s__%s",p->unit,name);else strcpy(s->asm_name,name);
+        if(p->token.kind=='{'){
+            Function *f;int i;
+            if(!s->function||s->defined)error_at(at,"invalid/duplicate function definition");
+            if(s->interrupt){
+                Function *previous;
+                if(candidate.param_count!=0||candidate.variadic||candidate.old_style)error_at(at,"interrupt handler must be void name(void)");
+                for(previous=p->functions;previous;previous=previous->next)
+                    if(previous->symbol->interrupt==s->interrupt)error_at(at,"duplicate interrupt handler for this vector");
+            }
+            if(!strcmp(name,"main")){if((!same_type(t,type(TY_INT,0))&&!same_type(t,type(TY_VOID,0)))||candidate.param_count>0||candidate.variadic)error_at(at,"main must be int main(void) or void main(void)");*has_main=1;}
+            s->defined=1;f=allocate(sizeof *f);f->symbol=s;f->id=++p->function_count;*p->function_tail=f;p->function_tail=&f->next;p->current=f;
+            if(structure_object(t)){
+                if(!width(t))error_at(at,"aggregate return requires a complete type");
+                f->aggregate_abi=1;
+            }
+            {
+                Statement *initial=NULL,**tail=&initial;
+                for(i=0;i<s->param_count;++i){
+                    Symbol *param;Type declared=declared_params[i];char incoming[64];
+                    if(structure_object(declared)){
+                        if(!width(declared))error_at(at,"aggregate parameter requires a complete type");
+                        f->aggregate_abi=1;
+                    }
+                    int narrow=old_definition&&!same_type(unqualified_value(declared),unqualified_value(s->params[i]));
+                    if(!candidate.param_names[i][0])error_at(at,"function definition needs parameter names");
+                    strcpy(incoming,candidate.param_names[i]);
+                    if(narrow)snprintf(incoming,sizeof incoming,"$knr_%d",i);
+                    strcpy(s->param_names[i],incoming);
+                    param=new_symbol(p,incoming,narrow?s->params[i]:declared,at);param->owner=f->id;param->active=1;
+                    param->offset=f->slots+1;f->slots+=(width(param->type)+1)&~1u;
+                    if(narrow){
+                        Symbol *local=new_symbol(p,candidate.param_names[i],declared,at);
+                        Expr *lhs=new_expr(EX_OBJECT,at,declared),*rhs=new_expr(EX_OBJECT,at,param->type);
+                        Expr *assignment=new_expr(EX_ASSIGN,at,declared);Statement *init=allocate(sizeof *init);
+                        local->owner=f->id;local->active=1;local->offset=f->slots+1;f->slots+=(width(declared)+1)&~1u;
+                        lhs->symbol=local;rhs->symbol=param;assignment->left=lhs;assignment->right=convert(rhs,declared);
+                        init->kind=ST_EXPR;init->location=at;init->expression=assignment;*tail=init;tail=&init->next;
+                    }
+                }
+                f->body=statement(p);
+                if(!diagnostic_errors)restore_private_compound_operands(f->body);
+                finish_jump_labels(f);
+                if(initial){*tail=f->body->body;f->body->body=initial;}
+            }
+            f->frame=f->slots?f->slots+4:0;p->current=NULL;
+            if(f->frame>768)error_at(at,"function frame exceeds initial stack budget");
+            definition=1;break;
+        }
+        if(p->token.kind=='='){
+            size_t begin=p->position;EmbeddedRange *range;lex(p);
+            if(s->function)error_at(at,"function cannot have an initializer");
+            if(s->initializer)error_at(at,"duplicate initializer for '%s'",name);
+            if(s->dpage)error_at(at,"ROM initializer cannot use __dpage");
+            if(!width(s->type)&&s->type.array!=~0u)
+                error_at(at,"global requires a complete object type");
+            s->type.banked=s->wram||(!s->loram&&object_constant(s->type)&&!object_volatile(s->type));
+            object_initializer(p,s,0);
+            for(range=p->embeds;range;range=range->next)
+                if(range->begin<p->position&&range->end>begin)s->embedded=1;
+            s->defined=1;
+        }
+    }while(accept(p,','));
+    if(!definition)expect(p,';',"';'");
+}
+static void skip_to_top_level_sync(Parser *p,size_t start_position,int start_kind)
+{
+    unsigned braces=0;
+    Recovery *saved=active_recovery;
+    active_recovery=NULL;
+    if(p->token.kind!=TOK_EOF&&p->position==start_position&&p->token.kind==start_kind)
+        lex(p);
+    while(p->token.kind!=TOK_EOF){
+        if(p->token.kind=='{'){++braces;lex(p);continue;}
+        if(p->token.kind=='}'){
+            lex(p);
+            if(!braces){accept(p,';');break;}
+            if(!--braces){accept(p,';');break;}
+            continue;
+        }
+        if(p->token.kind==';'&&!braces){lex(p);break;}
+        lex(p);
+    }
+    active_recovery=saved;
+}
 static Statement *translation_unit(Parser *p)
 {
     int has_main=0;
     while(p->token.kind!=TOK_EOF){
-        int storage_class=0,is_typedef,is_extern,is_static,dpage=0,loram=0,definition=0,interrupt=INT_NONE;
-        int constant=0,vol=0,wram=WRAM_NONE;Type base;FunctionAttributes shared={0};
-        for(;;){if(storage_specifier(p,&storage_class,0)){}
-            else if(accept(p,TOK_DPAGE))dpage=1;
-            else if(accept(p,TOK_LORAM))loram=1;
-            else if(wram_specifier(p,&wram)){}
-            else if(accept(p,TOK_CONST))constant=1;
-            else if(accept(p,TOK_VOLATILE))vol=1;
-            else if(function_attributes(p,&shared)){}
-            else if(accept(p,TOK_INTERRUPT)){
-                if(interrupt)error_at(p->token.location,"duplicate interrupt attribute");
-                expect(p,'(',"'(' after __interrupt");
-                if(p->token.kind!=TOK_NAME)error_at(p->token.location,"expected nmi, irq, brk or cop");
-                if(!strcmp(p->token.name,"nmi"))interrupt=INT_NMI;
-                else if(!strcmp(p->token.name,"irq"))interrupt=INT_IRQ;
-                else if(!strcmp(p->token.name,"brk"))interrupt=INT_BRK;
-                else if(!strcmp(p->token.name,"cop"))interrupt=INT_COP;
-                else error_at(p->token.location,"unknown interrupt kind '%s'",p->token.name);
-                lex(p);expect(p,')',"')' after interrupt kind");
-            }else break;}
-        base=declaration_base_with_storage(p,&storage_class,0,&wram);
-        if(wram==WRAM_LORAM){loram=1;wram=WRAM_NONE;}
-        is_typedef=storage_class==TOK_TYPEDEF;
-        is_extern=storage_class==TOK_EXTERN;
-        is_static=storage_class==TOK_STATIC;
-        if(loram&&(is_typedef||dpage||interrupt))error_at(p->token.location,"__loram requires an ordinary static-storage object");
-        if(wram&&(is_typedef||dpage||loram||interrupt||
-                  (wram>=WRAM_SRAM_FIRST&&storage_class&&!is_extern&&!is_static)))
-            error_at(p->token.location,"conflicting %s placement or storage class",wram>=WRAM_SRAM_FIRST?"SRAM":"WRAM");
-        if(interrupt&&(is_typedef||is_static||dpage))error_at(p->token.location,"interrupt handler must have external function linkage");
-        if(constant)base=const_object(base);if(vol)base=volatile_object(base);
-        while(function_attributes(p,&shared)){}
-        if((base.base==TY_STRUCT||base.enum_tag)&&!is_typedef&&!is_extern&&!is_static&&!dpage&&!loram&&!wram&&!interrupt&&accept(p,';')){
-            if(shared.noclone)error_at(p->token.location,"noclone requires a function");
-            continue;
+        Recovery frame;
+        size_t volatile start_pos=p->position;
+        int volatile start_kind=p->token.kind;
+        frame.previous=active_recovery;
+        active_recovery=&frame;
+        if(setjmp(frame.env)==0){
+            parse_top_level(p,&has_main);
+            active_recovery=frame.previous;
+        }else{
+            unsigned i;
+            active_recovery=frame.previous;
+            if(p->current){
+                unwind_scopes(p,0);
+                p->current=NULL;
+            }
+            p->scope=0;p->loop_depth=0;p->parse_depth=0;p->current_switch=NULL;
+            for(i=0;i<p->tag_count;++i)p->tags[i].defining=0;
+            skip_to_top_level_sync(p,start_pos,start_kind);
         }
-        do{
-            Type t=base,declared_params[MAX_PARAMETERS];int old_definition=0;char name[64];Location at=p->token.location;Symbol candidate={0},*s;
-            FunctionAttributes attributes=shared;
-            t=named_declarator_mode(p,t,name,0,is_typedef,&attributes);
-            if(is_typedef){
-                if(attributes.noclone)error_at(at,"noclone requires a function");
-                if(attributes.hint||attributes.force||attributes.never)error_at(at,"inlining specifiers require a function");
-                add_alias(p,name,t,at);continue;
-            }
-            strcpy(candidate.name,name);candidate.type=t;candidate.external=is_extern;candidate.dpage=dpage;candidate.loram=loram;candidate.wram=wram;candidate.internal=is_static;candidate.interrupt=interrupt;
-            if(function_type(t)||accept(p,'(')){
-                if(loram)error_at(at,"__loram cannot qualify a function");
-                if(wram)error_at(at,"%s placement cannot qualify a function",wram>=WRAM_SRAM_FIRST?"SRAM":"WRAM");
-                if(t.array)error_at(at,"function cannot return an array");
-                candidate.function=1;
-                if(function_type(t)){
-                    FunctionType *signature=t.signature;
-                    candidate.type=t=signature->result;
-                    candidate.param_count=signature->count;
-                    candidate.variadic=signature->variadic;
-                    candidate.old_style=signature->count<0;
-                    if(signature->count<0&&p->token.kind=='{')candidate.param_count=0;
-                    if(signature->count>0){
-                        size_t count=(size_t)signature->count;
-                        memcpy(candidate.params,signature->parameters,count*sizeof *candidate.params);
-                        memcpy(declared_params,signature->parameters,count*sizeof *declared_params);
-                        memcpy(candidate.param_names,signature->names,count*sizeof *candidate.param_names);
-                    }
-                }else function_parameters(p,&candidate,declared_params,&old_definition,at);
-            }else{
-                candidate.defined=!is_extern;
-                candidate.type.banked=wram||(!loram&&object_constant(t)&&!object_volatile(t)&&(is_extern||p->token.kind=='='));
-                if(p->runtime_objects){
-                    const char *item=p->runtime_objects;size_t length=strlen(name);
-                    while(item&&*item){
-                        const char *end=strchr(item,',');size_t n=end?(size_t)(end-item):strlen(item);
-                        if(n==length&&!strncmp(item,name,n)){
-                            if(dpage||loram||wram||object_constant(t)||p->token.kind=='=')
-                                error_at(at,"runtime object requires uninitialized mutable banked storage");
-                            candidate.runtime_ram=1;candidate.type.banked=1;break;
-                        }
-                        item=end?end+1:NULL;
-                    }
-                }
-                if(wram>=WRAM_SRAM_FIRST)check_sram_object(&candidate,p->token.kind=='=',at);
-                else check_static_storage_size(&candidate,name,object_size_limit(&candidate),at);
-            }
-            {
-             while(function_attributes(p,&attributes)){}
-             if(attributes.noclone&&!candidate.function)error_at(at,"noclone requires a function");
-             candidate.noclone=attributes.noclone;
-             if((attributes.hint||attributes.force||attributes.never)&&!candidate.function)error_at(at,"inlining specifiers require a function");
-             candidate.inline_hint=attributes.hint;candidate.always_inline=attributes.force;candidate.noinline=attributes.never;
-             /* ISO C: any extern or non-inline file-scope declaration supplies
-              * the external definition; otherwise an external inline body is
-              * available for substitution only. */
-             candidate.inline_external=candidate.function&&(is_extern||!attributes.hint);
-            }
-            s=linked_symbol(p,name);
-            if(s&&s->implicit_library&&is_static)s=NULL;
-            if(s)s->implicit_library=0;
-            if(s&&s->enumerator)error_at(at,"enumerator '%s' cannot be redeclared as an object/function",name);
-            if(find_alias(p,name))error_at(at,"identifier '%s' was declared as a typedef",name);
-            if(interrupt&&(!candidate.function||t.base!=TY_VOID||t.pointers||candidate.param_count!=0||candidate.variadic||candidate.old_style))
-                error_at(at,"interrupt handler must be void name(void)");
-            if(s){
-                int block_linkage=s->block_linkage;
-                if(s->wram!=wram)
-                    error_at(at,"conflicting %s placement for '%s'",
-                             wram>=WRAM_SRAM_FIRST||s->wram>=WRAM_SRAM_FIRST?"SRAM":"WRAM",name);
-                if((loram&&s->dpage)||(dpage&&s->loram))error_at(at,"__loram conflicts with __dpage");
-                if(loram&&!s->loram&&(s->defined||s->placement_used))error_at(at,"__loram must precede the definition and uses of '%s'",name);
-                if(loram){s->loram=1;s->type.banked=0;}
-                if((interrupt||s->interrupt)&&(is_static||s->internal||dpage))error_at(at,"interrupt handler must have external function linkage");
-                if(interrupt&&s->interrupt&&interrupt!=s->interrupt)error_at(at,"conflicting interrupt attribute");
-                if(interrupt&&s->called)error_at(at,"interrupt handler was previously called");
-                if(interrupt&&s->defined&&!s->interrupt)error_at(at,"interrupt attribute must precede the definition");
-                if(interrupt)s->interrupt=interrupt;
-                if(s->block_linkage&&is_static)error_at(at,"conflicting linkage for '%s'",name);
-                s->block_linkage=0;
-                if(!candidate.function&&!s->function)merge_object_type(s,&candidate.type,at);
-                if(!same_type(s->type,candidate.type)||s->function!=candidate.function)
-                    error_at(at,s->function==candidate.function&&pointer_far_mismatch(s->type,candidate.type)?
-                             "conflicting declaration '%s': near/far pointer mismatch":
-                             "conflicting declaration '%s'",name);
-                if(candidate.function){
-                    merge_function(s,&candidate,at);
-                    if(block_linkage&&candidate.old_style&&candidate.param_count<0){
-                        s->old_style=1;s->param_count=-1;
-                    }
-                }
-                s->inline_hint|=candidate.inline_hint;s->always_inline|=candidate.always_inline;
-                s->noclone|=candidate.noclone;s->noinline|=candidate.noinline;s->inline_external|=candidate.inline_external;
-                if(!candidate.function&&candidate.defined)s->defined=1;
-            }else{s=new_symbol(p,name,t,at);*s=candidate;}
-            if(!s->function&&!is_extern&&!width(s->type)&&
-               !(s->type.array==~0u&&(p->token.kind=='='||!s->internal))&&
-               !(structure_object(s->type)&&!s->type.array&&!s->internal&&p->token.kind!='='))
-                error_at(at,"global requires a complete object type");
-            if(s->always_inline&&s->noinline)error_at(at,"always_inline conflicts with noinline for '%s'",name);
-            if(s->internal)snprintf(s->asm_name,sizeof s->asm_name,"%s__%s",p->unit,name);else strcpy(s->asm_name,name);
-            if(p->token.kind=='{'){
-                Function *f;int i;
-                if(!s->function||s->defined)error_at(at,"invalid/duplicate function definition");
-                if(s->interrupt){
-                    Function *previous;
-                    if(candidate.param_count!=0||candidate.variadic||candidate.old_style)error_at(at,"interrupt handler must be void name(void)");
-                    for(previous=p->functions;previous;previous=previous->next)
-                        if(previous->symbol->interrupt==s->interrupt)error_at(at,"duplicate interrupt handler for this vector");
-                }
-                if(!strcmp(name,"main")){if((!same_type(t,type(TY_INT,0))&&!same_type(t,type(TY_VOID,0)))||candidate.param_count>0||candidate.variadic)error_at(at,"main must be int main(void) or void main(void)");has_main=1;}
-                s->defined=1;f=allocate(sizeof *f);f->symbol=s;f->id=++p->function_count;*p->function_tail=f;p->function_tail=&f->next;p->current=f;
-                if(structure_object(t)){
-                    if(!width(t))error_at(at,"aggregate return requires a complete type");
-                    f->aggregate_abi=1;
-                }
-                {
-                    Statement *initial=NULL,**tail=&initial;
-                    for(i=0;i<s->param_count;++i){
-                        Symbol *param;Type declared=declared_params[i];char incoming[64];
-                        if(structure_object(declared)){
-                            if(!width(declared))error_at(at,"aggregate parameter requires a complete type");
-                            f->aggregate_abi=1;
-                        }
-                        int narrow=old_definition&&!same_type(unqualified_value(declared),unqualified_value(s->params[i]));
-                        if(!candidate.param_names[i][0])error_at(at,"function definition needs parameter names");
-                        strcpy(incoming,candidate.param_names[i]);
-                        if(narrow)snprintf(incoming,sizeof incoming,"$knr_%d",i);
-                        strcpy(s->param_names[i],incoming);
-                        param=new_symbol(p,incoming,narrow?s->params[i]:declared,at);param->owner=f->id;param->active=1;
-                        param->offset=f->slots+1;f->slots+=(width(param->type)+1)&~1u;
-                        if(narrow){
-                            Symbol *local=new_symbol(p,candidate.param_names[i],declared,at);
-                            Expr *lhs=new_expr(EX_OBJECT,at,declared),*rhs=new_expr(EX_OBJECT,at,param->type);
-                            Expr *assignment=new_expr(EX_ASSIGN,at,declared);Statement *init=allocate(sizeof *init);
-                            local->owner=f->id;local->active=1;local->offset=f->slots+1;f->slots+=(width(declared)+1)&~1u;
-                            lhs->symbol=local;rhs->symbol=param;assignment->left=lhs;assignment->right=convert(rhs,declared);
-                            init->kind=ST_EXPR;init->location=at;init->expression=assignment;*tail=init;tail=&init->next;
-                        }
-                    }
-                    f->body=statement(p);
-                    restore_private_compound_operands(f->body);
-                    finish_jump_labels(f);
-                    if(initial){*tail=f->body->body;f->body->body=initial;}
-                }
-                f->frame=f->slots?f->slots+4:0;p->current=NULL;
-                if(f->frame>768)error_at(at,"function frame exceeds initial stack budget");
-                definition=1;break;
-            }
-            if(p->token.kind=='='){
-                size_t begin=p->position;EmbeddedRange *range;lex(p);
-                if(s->function)error_at(at,"function cannot have an initializer");
-                if(s->initializer)error_at(at,"duplicate initializer for '%s'",name);
-                if(s->dpage)error_at(at,"ROM initializer cannot use __dpage");
-                if(!width(s->type)&&s->type.array!=~0u)
-                    error_at(at,"global requires a complete object type");
-                s->type.banked=s->wram||(!s->loram&&object_constant(s->type)&&!object_volatile(s->type));
-                object_initializer(p,s,0);
-                for(range=p->embeds;range;range=range->next)
-                    if(range->begin<p->position&&range->end>begin)s->embedded=1;
-                s->defined=1;
-            }
-        }while(accept(p,','));
-        if(!definition)expect(p,';',"';'");
     }
-    for(unsigned i=0;i<p->symbol_count;++i){
-        Symbol *s=&p->symbols[i];
-        if(s->owner||s->function||!s->defined||s->enumerator)continue;
-        if(s->type.array==~0u)s->type.array=1;
-        if(!width(s->type))error_at(p->token.location,"global '%s' requires a complete object type",s->name);
-        if(s->wram>=WRAM_SRAM_FIRST)continue;
-        unsigned limit=s->initializer||s->wram?object_size_limit(s):65534u;
-        check_static_storage_size(s,s->name,limit,p->token.location);
+    if(!diagnostic_errors){
+        for(unsigned i=0;i<p->symbol_count;++i){
+            Symbol *s=&p->symbols[i];
+            if(s->owner||s->function||!s->defined||s->enumerator)continue;
+            if(s->type.array==~0u)s->type.array=1;
+            if(!width(s->type)){report_error(p->token.location,"global '%s' requires a complete object type",s->name);continue;}
+            if(s->wram>=WRAM_SRAM_FIRST)continue;
+            unsigned limit=s->initializer||s->wram?object_size_limit(s):65534u;
+            check_static_storage_size(s,s->name,limit,p->token.location);
+        }
     }
     // Library translation units need no main; the linker selects the entry unit
     (void)has_main;return NULL;

@@ -118,29 +118,31 @@ static void lto_check_declaration(LtoMerge *m,Symbol *a,Symbol *b)
 {
     int i;Symbol *prototype;
     m->pairs=0;
-    if(a->function!=b->function||!lto_compatible(m,a->type,b->type))
-        error_at(m->at,"source LTO conflicting type for '%s'",b->name);
+    if(a->function!=b->function||!lto_compatible(m,a->type,b->type)){
+        report_error(m->at,"source LTO conflicting type for '%s'",b->name);
+        if(a->function!=b->function)return;
+    }
     if(!a->function){
         if(a->dpage!=b->dpage||a->loram!=b->loram||a->type.banked!=b->type.banked||a->runtime_ram!=b->runtime_ram||a->wram!=b->wram)
-            error_at(m->at,"source LTO conflicting placement for '%s'",b->name);
+            report_error(m->at,"source LTO conflicting placement for '%s'",b->name);
         return;
     }
     if(a->param_count>=0&&b->param_count>=0){
-        if(a->param_count!=b->param_count||a->variadic!=b->variadic)error_at(m->at,"source LTO conflicting prototype for '%s'",b->name);
-        for(i=0;i<a->param_count;++i){m->pairs=0;
+        if(a->param_count!=b->param_count||a->variadic!=b->variadic)report_error(m->at,"source LTO conflicting prototype for '%s'",b->name);
+        else for(i=0;i<a->param_count;++i){m->pairs=0;
             if(!lto_compatible(m,unqualified_value(a->params[i]),unqualified_value(b->params[i])))
-                error_at(m->at,"source LTO conflicting parameter type for '%s'",b->name);
+                report_error(m->at,"source LTO conflicting parameter type for '%s'",b->name);
         }
     }
     if(a->old_style!=b->old_style){
         prototype=a->old_style?b:a;
-        if(prototype->variadic)error_at(m->at,"source LTO variadic/non-prototype conflict for '%s'",b->name);
+        if(prototype->variadic)report_error(m->at,"source LTO variadic/non-prototype conflict for '%s'",b->name);
         for(i=0;i<prototype->param_count;++i){m->pairs=0;
             if(!lto_compatible(m,unqualified_value(prototype->params[i]),promoted(prototype->params[i])))
-                error_at(m->at,"source LTO default-promotion conflict for '%s'",b->name);
+                report_error(m->at,"source LTO default-promotion conflict for '%s'",b->name);
         }
     }
-    if(a->interrupt&&b->interrupt&&a->interrupt!=b->interrupt)error_at(m->at,"source LTO conflicting interrupt kind for '%s'",b->name);
+    if(a->interrupt&&b->interrupt&&a->interrupt!=b->interrupt)report_error(m->at,"source LTO conflicting interrupt kind for '%s'",b->name);
 }
 static LtoExternal *lto_external(LtoMerge *m,const char *name)
 {
