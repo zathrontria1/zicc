@@ -201,7 +201,7 @@ static Expr *assignment_convert(Expr *e,Type target)
     if((function_pointer(source)||function_pointer(destination))&&
        !compatible_argument(destination,e))error_at(e->location,"incompatible function pointer assignment");
     if(source.pointers&&destination.pointers&&far_pointer(source)&&!far_pointer(destination))
-        error_at(e->location,"implicit far-to-near pointer conversion");
+        error_at(e->location,"implicit far-to-near pointer conversion (use __far)");
     if(source.pointers&&destination.pointers&&(void_pointer(source)||void_pointer(destination))){
         Type from=pointed_type(source),to=pointed_type(destination);
         if(object_constant(from)&&!object_constant(to))error_at(e->location,"conversion discards const qualification");
@@ -209,7 +209,9 @@ static Expr *assignment_convert(Expr *e,Type target)
         return convert(e,target);
     }
     if((source.element||destination.element)&&source.pointers&&destination.pointers&&!compatible_argument(destination,e))
-        error_at(e->location,"incompatible pointer-to-array assignment");
+        error_at(e->location,nested_far_mismatch(destination,e)?
+                 "incompatible pointer-to-array assignment: nested near/far pointer mismatch":
+                 "incompatible pointer-to-array assignment");
     if(source.pointers&&source.pointers==destination.pointers&&
        ((source.constant&&!destination.constant)||(source.pointer_constants&~destination.pointer_constants)))
         error_at(e->location,"conversion discards const qualification");
@@ -223,7 +225,9 @@ static Expr *assignment_convert(Expr *e,Type target)
         error_at(e->location,"conversion discards volatile qualification");
     if(source.pointers&&destination.pointers&&(source.pointers>1||destination.pointers>1)&&
        !compatible_argument(destination,e))
-        error_at(e->location,"incompatible nested pointer assignment");
+        error_at(e->location,nested_far_mismatch(destination,e)?
+                 "incompatible nested pointer assignment: nested near/far pointer mismatch":
+                 "incompatible nested pointer assignment");
     return convert(e,target);
 }
 static int lvalue(Expr *e)
@@ -347,7 +351,13 @@ static Type call_arguments(Parser *p,Expr *e,const char *name,int count,int vari
                 if(numeric(actual)&&numeric(expected)&&actual.base!=expected.base)
                     error_at(e->args[i]->location,"argument %u does not match promoted K&R parameter",i+1);
             }
-            if(!compatible_argument(parameters[i],e->args[i]))error_at(e->args[i]->location,"incompatible argument %u for '%s'",i+1,name);
+            if(!compatible_argument(parameters[i],e->args[i])){
+                if(far_to_near_mismatch(parameters[i],e->args[i]))
+                    error_at(e->args[i]->location,"incompatible argument %u for '%s': far pointer passed to near pointer parameter (declare parameter with __far)",i+1,name);
+                if(nested_far_mismatch(parameters[i],e->args[i]))
+                    error_at(e->args[i]->location,"incompatible argument %u for '%s': nested near/far pointer mismatch",i+1,name);
+                error_at(e->args[i]->location,"incompatible argument %u for '%s'",i+1,name);
+            }
             if(!old_style&&!structure_object(parameters[i]))e->args[i]=convert(e->args[i],parameters[i]);
         }
     }
@@ -1314,7 +1324,10 @@ static void merge_object_type(Symbol *s,Type *candidate,Location at)
         if(composite.array==~0u)composite.array=other.array;
         other.array=composite.array;
     }
-    if(!same_type(composite,other))error_at(at,"conflicting declaration '%s'",s->name);
+    if(!same_type(composite,other))
+        error_at(at,pointer_far_mismatch(composite,other)?
+                 "conflicting declaration '%s': near/far pointer mismatch":
+                 "conflicting declaration '%s'",s->name);
     s->type=composite;
     *candidate=composite;
 }
@@ -1833,7 +1846,10 @@ static Statement *translation_unit(Parser *p)
                 if(s->block_linkage&&is_static)error_at(at,"conflicting linkage for '%s'",name);
                 s->block_linkage=0;
                 if(!candidate.function&&!s->function)merge_object_type(s,&candidate.type,at);
-                if(!same_type(s->type,candidate.type)||s->function!=candidate.function)error_at(at,"conflicting declaration '%s'",name);
+                if(!same_type(s->type,candidate.type)||s->function!=candidate.function)
+                    error_at(at,s->function==candidate.function&&pointer_far_mismatch(s->type,candidate.type)?
+                             "conflicting declaration '%s': near/far pointer mismatch":
+                             "conflicting declaration '%s'",name);
                 if(candidate.function){
                     merge_function(s,&candidate,at);
                     if(block_linkage&&candidate.old_style&&candidate.param_count<0){

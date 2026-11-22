@@ -235,8 +235,17 @@ far pointer to reach data stored in ROM or in the other RAM bank.
   two-byte address, a one-byte bank number and a zero padding byte.
 - `__far` qualifies the pointer level immediately after `*`. `const` and `__far`
   may appear in either order.
-- Explicit casts to a 64-bit integer zero-extend the near 16-bit or far 24-bit
-  address. Casts back use the low 16 or 24 bits, respectively.
+- Explicit casts from a pointer to an integer keep the raw address bits:
+  a far pointer yields its 24-bit address (`0x00BBAAAA`, bank in bits 16-23)
+  in 32-bit (`long`/`unsigned long`) and 64-bit integers, and truncates to its
+  low bits in narrower integers. A near pointer zero-extends its 16-bit offset
+  (`0x0000AAAA`) in 32-bit and 64-bit integers without adding bank `$7E`;
+  widen to `__far` first if you need the full `$7E` address.
+  Pointer-to-integer casts are runtime conversions and cannot initialize
+  static integers from symbol addresses.
+- Explicit casts from an integer to a pointer use the low 16 bits for near
+  pointers and the low 24 bits (clearing the padding byte) for far pointers;
+  signed 16-bit inputs sign-extend before masking to 24 bits.
 - Typedefs and pointers to arrays retain the qualifier.
 - A compact pointer type supports up to 31 consecutive pointer levels.
 - A near pointer to a far-pointer object is still two bytes. For example,
@@ -250,8 +259,6 @@ far pointer to reach data stored in ROM or in the other RAM bank.
 - Implicit far-to-near conversion is diagnosed. An explicit narrowing cast
   requires null or a bank-`$7E` address with a nonzero low word. Known wrong-bank
   constants, ROM addresses and `$7E:0000` are diagnosed.
-- Integer-to-far casts sign-extend signed word inputs, use the low 24 address
-  bits and clear the padding byte.
 - Far arithmetic and comparisons use the full address. Far pointer differences
   use signed `long`; near differences use signed `int`.
 - Pointer stepping and differences use the pointed-to element size, including

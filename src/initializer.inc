@@ -568,7 +568,13 @@ static void initializer_store(Initializer *init,Type t,unsigned offset,Expr *e)
             free_expression(e);
             e=new_expr(EX_INT,at,type(TY_INT,0));
         }
-        if(!compatible_argument(t,e))error_at(at,"incompatible pointer initializer");
+        if(!compatible_argument(t,e)){
+            if(far_to_near_mismatch(t,e))
+                error_at(at,"incompatible pointer initializer: far pointer cannot initialize near pointer (declare target with __far)");
+            if(nested_far_mismatch(t,e))
+                error_at(at,"incompatible pointer initializer: nested near/far pointer mismatch");
+            error_at(at,"incompatible pointer initializer");
+        }
         e=assignment_convert(e,t);
         if(!initializer_address(e,r,&value,0))error_at(at,"pointer initializer requires a constant address");
         if(r->symbol||r->string){

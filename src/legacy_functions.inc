@@ -83,9 +83,13 @@ static void merge_function(Symbol *s,Symbol *candidate,Location at)
     if(s->param_count>=0&&candidate->param_count>=0){
         if(s->param_count!=candidate->param_count||s->variadic!=candidate->variadic)
             error_at(at,"conflicting prototype '%s'",candidate->name);
-        for(i=0;i<s->param_count;++i)
-            if(!same_type(unqualified_value(s->params[i]),unqualified_value(candidate->params[i])))
-                error_at(at,"conflicting parameter type");
+        for(i=0;i<s->param_count;++i){
+            Type existing=unqualified_value(s->params[i]),incoming=unqualified_value(candidate->params[i]);
+            if(!same_type(existing,incoming))
+                error_at(at,pointer_far_mismatch(existing,incoming)?
+                         "conflicting parameter type: near/far pointer mismatch":
+                         "conflicting parameter type");
+        }
     }
     if(s->old_style!=candidate->old_style)
         check_default_promotions(s->old_style?candidate:s,at);

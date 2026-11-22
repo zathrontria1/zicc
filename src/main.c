@@ -562,6 +562,34 @@ static int compatible_argument(Type parameter, const Expr *arg)
     }
     return same_type(parameter, value);
 }
+static Type strip_far(Type t)
+{
+    t.far_pointers=0;
+    if(t.element)t.element=type_copy(strip_far(*t.element));
+    return t;
+}
+static int pointer_far_mismatch(Type a,Type b)
+{
+    if(function_pointer(a)||function_pointer(b))return 0;
+    return !same_type(a,b)&&same_type(strip_far(a),strip_far(b));
+}
+static int far_to_near_mismatch(Type target,const Expr *arg)
+{
+    Type value=unqualified_value(arg->type);
+    target=unqualified_value(target);
+    return target.pointers&&value.pointers&&
+        !function_pointer(target)&&!function_pointer(value)&&
+        far_pointer(value)&&!far_pointer(target);
+}
+static int nested_far_mismatch(Type target,const Expr *arg)
+{
+    Expr copy=*arg;
+    Type value=unqualified_value(arg->type);
+    target=unqualified_value(target);
+    if(!target.pointers||!value.pointers||function_pointer(target)||function_pointer(value))return 0;
+    copy.type=strip_far(value);
+    return compatible_argument(strip_far(target),&copy);
+}
 static void declaration_qualifiers(Parser *p,int *constant,int *vol)
 {
     while(p->token.kind==TOK_CONST||p->token.kind==TOK_VOLATILE){

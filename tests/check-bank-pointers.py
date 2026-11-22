@@ -82,6 +82,7 @@ int main(void){
  const struct Pair * __far source=&rompair;
  if(sizeof(near)!=2||sizeof(far)!=4||sizeof(slot)!=2)return 1;
  if((unsigned long)far!=0x7e0500UL+10000UL*sizeof(data[0]))return 2;
+ if((unsigned long)near!=0x0500UL+10000UL*sizeof(data[0]))return 35;
  if((unsigned long)(char * __far)minus_one!=0xffffffUL||(unsigned long)(char * __far)-1!=0xffffffUL)return 19;
  if(zero!=0||(unsigned long)(unsigned * __far)(unsigned *)0x1234!=0x7e1234UL)return 3;
  *far=301;(*far)++;if(*near!=302)return 4;
@@ -178,13 +179,19 @@ for region in (sys.argv[1],):
  finally:
   core.close_with_log(home/'check.log')
 diagnostics=(
- ('implicit','int main(void){int * __far f;int *n;n=f;return 0;}','implicit far-to-near'),
- ('rom','int main(void){char *p;p="rom";return 0;}','implicit far-to-near'),
+ ('implicit','int main(void){int * __far f;int *n;n=f;return 0;}','implicit far-to-near pointer conversion (use __far)'),
+ ('rom','int main(void){char *p;p="rom";return 0;}','implicit far-to-near pointer conversion (use __far)'),
  ('constant','int main(void){int *p=(int *)0x804200UL;return 0;}','not representable'),
  ('bank_zero','int main(void){int *p=(int *)(int * __far)0x4200UL;return 0;}','not representable'),
  ('reserved_zero','int main(void){int *p=(int *)(int * __far)0x7e0000UL;return 0;}','not representable'),
  ('float_pointer','int main(void){char * __far p=(char * __far)1.0f;return 0;}','pointer/float'),
- ('identity','void f(int *p);void f(int * __far p){}','conflicting parameter type'),
+ ('identity','void f(int *p);void f(int * __far p){}','conflicting parameter type: near/far pointer mismatch'),
+ ('rom_table_init','const unsigned char rom_table[4]={1,2,3,4};const unsigned char *table[1]={rom_table};','incompatible pointer initializer: far pointer cannot initialize near pointer (declare target with __far)'),
+ ('rom_near_param','const unsigned char rom_table[4]={1,2,3,4};void f(const unsigned char *p);void g(void){f(rom_table);}','incompatible argument 1 for \'f\': far pointer passed to near pointer parameter (declare parameter with __far)'),
+ ('nested_init_far','const char * __far table[1]={"a"};const char ** __far p=table;','incompatible pointer initializer: nested near/far pointer mismatch'),
+ ('nested_arg_far','int *p;void take(int * __far *q);void g(void){take(&p);}','incompatible argument 1 for \'take\': nested near/far pointer mismatch'),
+ ('decl_far_conflict','extern const char *p;const char * __far p;','conflicting declaration \'p\': near/far pointer mismatch'),
+ ('return_far_conflict','const char *f(void);const char * __far f(void){return 0;}','conflicting declaration \'f\': near/far pointer mismatch'),
  ('rom_array_arg','const unsigned char rom_table[4]={1,2,3,4};extern void sink(const unsigned char * __far p);void a(void){sink((unsigned char *)rom_table);}','ROM address is not representable as a near pointer'),
  ('rom_array_return','const unsigned char rom_table[4]={1,2,3,4};unsigned char *f(void){return (unsigned char *)rom_table;}','ROM address is not representable as a near pointer'),
  ('rom_array_offset','const unsigned char rom_table[4]={1,2,3,4};unsigned char *f(void){return (unsigned char *)(rom_table+2);}','ROM address is not representable as a near pointer'),
@@ -202,6 +209,11 @@ for name,source,message in diagnostics:
  path=c.OUT/(name+'.c');path.write_text(source)
  result=c.run([ROOT/'build/zicc.exe',path,'-o',path.with_suffix('.s')],expected=1)
  assert message in result.stderr,(name,result.stderr)
+non_far_path=c.OUT/'non_far_mismatch.c'
+non_far_path.write_text('unsigned a;char *p=&a;')
+non_far_result=c.run([ROOT/'build/zicc.exe',non_far_path,'-o',non_far_path.with_suffix('.s')],expected=1)
+assert 'incompatible pointer initializer' in non_far_result.stderr,non_far_result.stderr
+assert '__far' not in non_far_result.stderr and 'near/far' not in non_far_result.stderr,non_far_result.stderr
 for name,source in (
  ('rom_ptr_value','unsigned char near_buf[4];unsigned char * __far const rom_ptr=near_buf;unsigned char *f(void){return (unsigned char *)rom_ptr;}'),
  ('rom_ptr_array_elem','unsigned char near_buf[4];unsigned char * __far const rom_ptrs[1]={near_buf};unsigned char *g(void){return (unsigned char *)rom_ptrs[0];}'),
