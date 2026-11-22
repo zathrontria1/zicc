@@ -4774,7 +4774,7 @@ static void emit_value(Expr *e)
         if(!volatile_expression(e)&&store_previous_element(e))break;
         array=fixed_memory_object(e->left,&offset);
         if(!e->op&&array){emit_value(e->right);store_array_element(array,offset,e->type);break;}
-        if(array&&!array->owner&&reg_width(e->type)==2&&width(e->type)==2&&
+        if(array&&reg_width(e->type)==2&&width(e->type)==2&&
            !e->type.pointers&&!volatile_expression(e)&&!cg.parser->no_indexed_operands){
             load_array_element(array,offset,e->left->type);
             binary_after_left(e->left,e->right,e->op);
