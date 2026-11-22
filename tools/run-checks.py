@@ -53,6 +53,7 @@ SUITES = [
     ('indexed-dpage', []),
     ('relax', []),
     ('decimal', []),
+    ('codegen-optimizations', []),
 ]
 
 
