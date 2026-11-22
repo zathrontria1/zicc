@@ -4427,9 +4427,11 @@ static int lp_byte_region_modes(LpUnit *u,Function *f,size_t at)
             }
             if(load<0)continue;
             o=lp_operand(&u->lines[load],&n);
-            if(lp_is_mmio_operand(o,n))continue;
+            long imm=lp_immediate(&u->lines[load]);
+            if(imm<0&&!lp_operand_has_s(o,n)&&lp_is_mmio_operand(o,n))continue;
             /* Only the low byte survives this region. Shorten its logical
              * immediates alongside the load; they do not read the flags. */
+            if(imm>=0)lp_set(&u->lines[load],"    lda #$%02lX",imm&255);
             for(k=load+1;k<(int)i;++k){
                 LpLine *l=&u->lines[k];
                 if(!l->deleted&&(lp_is(l,"and")||lp_is(l,"ora")||lp_is(l,"eor")))
@@ -5034,22 +5036,24 @@ static int lp_store_zero(LpUnit *u,Function *f,size_t at)
     lp_liveness(u);
     for(i=0;i<u->count;++i){
         LpLine *load=&u->lines[i];
-        int k,last=-1,m8=0;
+        int k,last=-1,m8=load->m8;
         const char *operand;
         size_t length;
-        if(!lp_is(load,"lda")||load->m8||load->deleted||load->replace||lp_immediate(load)!=0)continue;
+        unsigned live_mask=m8?(LP_A|LP_AL|LP_N|LP_Z):(LP_A|LP_N|LP_Z);
+        if(!lp_is(load,"lda")||load->deleted||load->replace||lp_immediate(load)!=0)continue;
         k=lp_next(u,i,1);
-        if(k>=0&&lp_line_is(&u->lines[k],"sep #$20")&&(unsigned)k+1<u->count&&
+        if(!m8&&k>=0&&lp_line_is(&u->lines[k],"sep #$20")&&(unsigned)k+1<u->count&&
            !u->lines[k+1].deleted&&u->lines[k+1].length==3&&!strncmp(u->lines[k+1].text,".a8",3)){
             m8=1;k=lp_next(u,(unsigned)(k+1),1);
+            live_mask=LP_A|LP_AL|LP_N|LP_Z;
         }
         if(k<0)continue;
         for(;k>=0&&(unsigned)k<u->count;k=lp_next(u,(unsigned)k,1)){
             if(!lp_store_zero_operand(&u->lines[k],&operand,&length,m8))break;
             last=k;
-            if(!(u->lines[k].out&(LP_A|LP_N|LP_Z)))break;
+            if(!(u->lines[k].out&live_mask))break;
         }
-        if(last<0||(u->lines[last].out&(LP_A|LP_N|LP_Z)))continue;
+        if(last<0||(u->lines[last].out&live_mask))continue;
         for(k=(int)i+1;k<=last;++k){
             LpLine *store=&u->lines[k];
             if(lp_store_zero_operand(store,&operand,&length,m8))
@@ -8677,6 +8681,7 @@ static void line_passes(Function *f,size_t at)
     }
     lp_run(&runner,f,at,lp_store_zero);
     while(lp_run(&runner,f,at,lp_byte_region_modes)){}
+    lp_run(&runner,f,at,lp_store_zero);
     lp_run(&runner,f,at,lp_sink_branch_store);
     lp_run(&runner,f,at,lp_thread_equal_store);
     if(lp_run(&runner,f,at,lp_cache_stored_word)){
