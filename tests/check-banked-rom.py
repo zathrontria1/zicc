@@ -363,6 +363,12 @@ static unsigned char copy_target[16];
 __noinline _Bool near_origin_copy(unsigned char *dst,unsigned source) {
  return memcpy(dst,(const unsigned char *)source+1,16)==dst;
 }
+struct FarPair { unsigned left,right; };
+__noinline unsigned far_pair(const struct FarPair * __far entries,unsigned index,unsigned read_left) {
+ unsigned left=0;
+ if(read_left)left=entries[index].left;
+ return left+entries[index].right;
+}
 struct SpriteStyle { unsigned offset, reverse_offset, top, attr; };
 struct SpriteItem {
  unsigned x,y,index,direction,out,attr;
@@ -574,6 +580,14 @@ int main(void){
  if(cursor_a[0]!=3||cursor_out[0]!=0x8675||cursor_out[1]!=0x8675||
     cursor_out[2]!=23||cursor_out[3]!=31||cursor_out[4]!=65535U||
     cursor_out[5]!=0x8675||cursor_out[6]!=33||cursor_out[7]!=37)return 129;
+
+ *(volatile unsigned * __far)0x7f0000ul=0x1134;
+ *(volatile unsigned * __far)0x7f0002ul=0x2256;
+ *(volatile unsigned * __far)0x7feb40ul=0x6743;
+ *(volatile unsigned * __far)0x7feb42ul=0x1078;
+ if(far_pair((const struct FarPair * __far)0x7efffcul,1,1)!=0x338a||
+    far_pair((const struct FarPair * __far)0x7eeb40ul,0x4000U,1)!=0x77bb||
+    far_pair((const struct FarPair * __far)0x7eeb40ul,0x4000U,0)!=0x1078)return 130;
 
  for(unsigned i=0;i<16;i++){
   ((volatile unsigned char * __far)0x7ee9c0ul)[i]=i+21;
@@ -974,6 +988,9 @@ def main():
             cursors=assemblies.split('_branched_cursors:',1)[1].split('__size_branched_cursors',1)[0]
             assert re.search(r'sta a:\.loword\(_\w+__cursor_out\+\$0004\),x',cursors)
             assert re.search(r'sta a:\.loword\(_\w+__cursor_out\+\$0006\),x',cursors)
+            far=assemblies.split('_far_pair:',1)[1].split('__size_far_pair',1)[0]
+            assert far.count('    rol z:')==2
+            assert re.search(r'lda \[([^\]]+)\]\n.*\n(?:.*\n)*?    lda \[\1\],y',far)
             near_copy=assemblies.split('_near_origin_copy:',1)[1].split('__size_near_origin_copy',1)[0]
             assert 'mvn #$7E, #$7E' in near_copy and 'jsr .loword(_memcpy)' in near_copy
             draw=assemblies.split('_place_sprite:',1)[1].split('__size_place_sprite',1)[0]

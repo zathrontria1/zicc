@@ -2593,6 +2593,122 @@ static void body_share_cursors(Function *f,Statement **head)
     }
 }
 
+static int body_far_address(Expr *e)
+{
+    if(!e||e->kind!=EX_BINARY||e->op!='+'||!far_pointer(value_type(e->type))||
+       e->left->kind!=EX_OBJECT||!body_fact_home(e->left->symbol)||
+       e->right->kind!=EX_OBJECT||!body_private(e->right->symbol)||
+       !e->right->type.is_unsigned||!known_integer(e->right->type)||
+       value_width(e->right->type)!=2)return 0;
+    unsigned stride=width(pointed_type(value_type(e->left->type)));
+    return stride>=2&&stride<=8&&!(stride&(stride-1));
+}
+
+static void body_far_candidates(Expr *e,Expr **list,unsigned *count)
+{
+    if(!e||*count==16)return;
+    if(body_far_address(e)){
+        for(unsigned i=0;i<*count;++i)if(body_equal(list[i],e))return;
+        list[(*count)++]=e;
+        return;
+    }
+    body_far_candidates(e->left,list,count);
+    body_far_candidates(e->right,list,count);
+    body_far_candidates(e->third,list,count);
+    for(unsigned i=0;i<e->arg_count;++i)body_far_candidates(e->args[i],list,count);
+}
+
+static int body_far_region(Statement *s,Expr *pattern,int *uses)
+{
+    for(;s;s=s->next){
+        int yes=0,no=0;
+        if(s->inline_callee||body_hidden_control(s->expression)||
+           body_changes_address(s->expression,pattern))return 0;
+        *uses+=(int)body_occurs(s->expression,pattern);
+        switch(s->kind){
+        case ST_EMPTY:case ST_EXPR:break;
+        case ST_BLOCK:
+            if(!body_far_region(s->body,pattern,uses))return 0;
+            break;
+        case ST_IF:
+            if(!body_far_region(s->body,pattern,&yes)||!body_far_region(s->alternate,pattern,&no))return 0;
+            *uses+=yes>no?yes:no;
+            break;
+        case ST_RETURN:return 1;
+        default:return 0;
+        }
+    }
+    return 1;
+}
+
+static void body_far_arm_candidates(Statement *s,Expr **list,unsigned *count)
+{
+    for(;s&&*count<16;s=s->next){
+        if(s->kind!=ST_EXPR&&s->kind!=ST_IF&&s->kind!=ST_BLOCK&&s->kind!=ST_RETURN)break;
+        body_far_candidates(s->expression,list,count);
+        body_far_arm_candidates(s->body,list,count);
+        body_far_arm_candidates(s->alternate,list,count);
+    }
+}
+
+static void body_far_replace(Statement *s,Statement *stop,Expr *pattern,Symbol *home)
+{
+    for(;s!=stop;s=s->next){
+        body_address_replace(&s->expression,pattern,home);
+        body_far_replace(s->body,NULL,pattern,home);
+        body_far_replace(s->alternate,NULL,pattern,home);
+    }
+}
+
+/* Keep a frequently used far record address in a compiler-owned pointer.
+ * The address calculation may move earlier, while the field reads stay
+ * on their original paths and retain the full bank carry */
+static void body_reuse_far_addresses(Function *f,Statement **head,unsigned *serial)
+{
+    for(Statement **at=head;*at&&*serial<4;at=&(*at)->next){
+        Statement *s=*at,*end;
+        Expr *candidates[16];
+        unsigned count=0;
+        if(s->inline_callee)continue;
+        if(s->kind==ST_BLOCK){
+            body_reuse_far_addresses(f,&s->body,serial);
+            continue;
+        }
+        if(s->kind!=ST_IF&&s->kind!=ST_EXPR&&s->kind!=ST_RETURN)continue;
+        body_far_candidates(s->expression,candidates,&count);
+        if(s->kind==ST_IF){
+            body_far_arm_candidates(s->body,candidates,&count);
+            body_far_arm_candidates(s->alternate,candidates,&count);
+        }
+        for(unsigned i=0;i<count;++i){
+            int uses=0;
+            Expr *pattern=candidates[i];
+            for(end=s;end;end=end->next){
+                Statement one=*end;
+                int n=0;
+                one.next=NULL;
+                if(!body_far_region(&one,pattern,&n))break;
+                uses+=n;
+                if(end->kind==ST_RETURN){end=end->next;break;}
+            }
+            if(uses<2||cg.parser->symbol_count>=1024||f->slots+4>768)continue;
+            char name[64];
+            Expr *definition=body_clone(pattern);
+            snprintf(name,sizeof name,"__far_entry_%u_%u",f->id,++*serial);
+            Symbol *home=new_symbol(cg.parser,name,definition->type,s->location);
+            home->owner=f->id;home->scope=1;home->active=1;home->internal=1;
+            home->offset=f->slots+1;f->slots+=4;
+            Statement *store=body_statement(ST_EXPR,s->location);
+            store->expression=new_expr(EX_ASSIGN,s->location,home->type);
+            store->expression->left=body_object(home,s->location);
+            store->expression->right=definition;
+            body_far_replace(s,end,definition,home);
+            store->next=s;*at=store;
+            break;
+        }
+    }
+}
+
 /* Drop an overwritten private home, keeping evaluation of the original
  * RHS. In particular, separate hardware reads remain in source order. */
 static void body_overwritten_locals(Statement *s)
@@ -4973,6 +5089,10 @@ static void body_optimize(Function *f)
        !f->jump_label_count&&!body_asm_statements(f->body))body_place_word_shifts(f->body);
     if(!cg.parser->no_value_reuse&&!f->jump_label_count&&!body_asm_statements(f->body))
         body_forward_long_doubles(f,f->body);
+    if(!cg.parser->no_value_reuse&&!f->jump_label_count&&!body_asm_statements(f->body)&&f->body->kind==ST_BLOCK){
+        unsigned far_addresses=0;
+        body_reuse_far_addresses(f,&f->body->body,&far_addresses);
+    }
 }
 /* Adjacent private selections can share one unchanged pure predicate. Keep
  * both assignments on their original selected path; never speculate an arm. */
