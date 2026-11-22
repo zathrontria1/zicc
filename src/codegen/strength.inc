@@ -84,6 +84,64 @@ static int strength_cursor_reads(Statement *s,InductionCursor *c)
            strength_cursor_reads(s->alternate,c))return 1;
     return 0;
 }
+static int strength_cursor_read_count_expr(Expr *e,InductionCursor *c)
+{
+    unsigned i,delta,count=0;
+    if(!e||volatile_expression(e))return 0;
+    if(e->kind==EX_ASSIGN){
+        IndexedOperand operand;
+        if(indexed_operand(e->left,&operand))
+            return strength_cursor_read_count_expr(e->right,c);
+    }
+    if(e->kind==EX_PRE||e->kind==EX_POST){
+        IndexedOperand operand;
+        if(indexed_operand(e->left,&operand))return 0;
+    }
+    if(e->kind==EX_MEMBER||e->kind==EX_DEREF){
+        IndexedOperand operand;
+        if(indexed_operand(e,&operand))return 0;
+    }
+    InductionCursor *p=strength_pointer_plan(e,&delta);
+    if(p&&p->base==c->base&&p->index==c->index)count=1;
+    count+=strength_cursor_read_count_expr(e->left,c)+strength_cursor_read_count_expr(e->right,c)+
+           strength_cursor_read_count_expr(e->third,c);
+    for(i=0;i<e->arg_count;++i)count+=strength_cursor_read_count_expr(e->args[i],c);
+    return (int)count;
+}
+static int strength_cursor_read_count(Statement *s,InductionCursor *c)
+{
+    int count=0;
+    for(;s;s=s->next)
+        count+=strength_cursor_read_count_expr(s->expression,c)+
+               strength_cursor_read_count_expr(s->step,c)+
+               strength_cursor_read_count(s->initial,c)+
+               strength_cursor_read_count(s->body,c)+
+               strength_cursor_read_count(s->alternate,c);
+    return count;
+}
+static int strength_has_step_expr(Expr *e,Symbol *index)
+{
+    unsigned i;
+    if(!e)return 0;
+    if((e->kind==EX_PRE||e->kind==EX_POST)&&
+       e->left->kind==EX_OBJECT&&e->left->symbol==index)return 1;
+    if(e->kind==EX_ASSIGN&&e->left->kind==EX_OBJECT&&e->left->symbol==index&&
+       (e->op||expression_references(e->right,index)))return 1;
+    if(strength_has_step_expr(e->left,index)||strength_has_step_expr(e->right,index)||
+       strength_has_step_expr(e->third,index))return 1;
+    for(i=0;i<e->arg_count;++i)if(strength_has_step_expr(e->args[i],index))return 1;
+    return 0;
+}
+static int strength_has_step(Statement *s,Symbol *index,unsigned depth)
+{
+    for(;s;s=s->next){
+        unsigned nested=depth+(s->kind==ST_FOR||s->kind==ST_WHILE||s->kind==ST_DO);
+        if(nested&&(strength_has_step_expr(s->expression,index)||strength_has_step_expr(s->step,index)))return 1;
+        if(strength_has_step(s->initial,index,depth)||strength_has_step(s->body,index,nested)||
+           strength_has_step(s->alternate,index,nested))return 1;
+    }
+    return 0;
+}
 static int strength_cursor_needed(Function *f,InductionCursor *c)
 {
     if(strength_cursor_reads(f->body,c))return 1;
@@ -190,6 +248,7 @@ static void strength_prepare(Function *f)
     for(i=0;i<cg.cursor_count;++i){
         InductionCursor *c=&cg.cursors[i];
         if(!strength_cursor_needed(f,c))continue;
+        if(c->index->scope&&!strength_has_step(f->body,c->index,0)&&strength_cursor_read_count(f->body,c)<=1)continue;
         if(strength_invalid(f->body,c)||strength_wrapped_step(f->body,c->index)||f->slots+6>768)continue;
         c->wram=c->base->type.array&&(c->base->dpage||c->base->owner);
         c->offset=f->slots+1;f->slots+=2;cg.cursors[n++]=*c;
