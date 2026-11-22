@@ -354,6 +354,7 @@ static Expr *widened_word(Expr *e)
 static int widened_word_product(Expr *e)
 {
     Expr *left,*right,*first,*second,*other=NULL;Type t=e->type;int swap;uint32_t factor=0;
+    Expr left_constant,right_constant;
     if(e->kind!=EX_BINARY||e->op!='*'||t.pointers||t.base!=TY_LONG)return 0;
     if(integer_constant(e->right,&factor)&&factor&&!(factor&(factor-1)))other=e->left;
     else if(integer_constant(e->left,&factor)&&factor&&!(factor&(factor-1)))other=e->right;
@@ -382,6 +383,18 @@ static int widened_word_product(Expr *e)
         return 1;
     }
     left=widened_word(e->left);right=widened_word(e->right);
+    if(!cg.parser->no_strength_reduction&&!left&&e->left->kind==EX_INT&&
+       integer_constant(e->left,&factor)&&factor<=65535){
+        left_constant=*e->left;
+        left_constant.type=type(TY_INT,1);
+        left=&left_constant;
+    }
+    if(!cg.parser->no_strength_reduction&&!right&&e->right->kind==EX_INT&&
+       integer_constant(e->right,&factor)&&factor<=65535){
+        right_constant=*e->right;
+        right_constant.type=type(TY_INT,1);
+        right=&right_constant;
+    }
     if(!left&&!right)return 0;
     first=left?left:e->left;second=right?right:e->right;swap=!left;
     /* Preserve evaluation order even when the word is the right operand.
@@ -395,6 +408,7 @@ static int widened_word_product(Expr *e)
     }
     helper(left&&right?"__mul16wide":"__mul16x32");return 1;
 }
+
 static void wide_compare_branch(Expr *e,unsigned yes,unsigned no,unsigned fallthrough);
 static Symbol *leaf_parameter(Function *f,unsigned index)
 {

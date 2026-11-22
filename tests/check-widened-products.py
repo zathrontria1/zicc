@@ -29,12 +29,12 @@ def main():
         sb = b if b<32768 else b-65536
         return (a,b,base,*[v&0xffffffff for v in
             (sa*sb,a*b,sa*b,a*sb,base+sa*sb,base^(sa*sb),
-             base+(sa*sb)*3,(a&255)*(b&255),sa*base,a*base,sa*base*3)])
+             base+(sa*sb)*3,(a&255)*(b&255),sa*base,a*base,sa*base*3,base*65535,a*31337)])
     for a,b in pairs:
         rows.append(row(a,b,rng.getrandbits(32)))
     long_boundary=(0,1,255,256,65535,65536,65537,0x7fffffff,0x80000000,0x80000001,0xfffffffe,0xffffffff)
     rows += [row(a,65535,value) for a in boundary for value in long_boundary]
-    source = '''unsigned int a,b;unsigned long base,expected[11];
+    source = '''unsigned int a,b;unsigned long base,expected[13];
 unsigned long ss(int x,int y){return (unsigned long)x*(unsigned long)y;}
 unsigned long uu(unsigned int x,unsigned int y){return (unsigned long)x*(unsigned long)y;}
 unsigned long su(int x,unsigned int y){return (long)x*(unsigned long)y;}
@@ -67,6 +67,8 @@ unsigned long word_long(int x,unsigned long y){return (unsigned long)x*y;}
 unsigned long long_word(unsigned long x,int y){return x*(unsigned long)y;}
 unsigned long uword_long(unsigned int x,unsigned long y){return (unsigned long)x*y;}
 unsigned long long_uword(unsigned long x,unsigned int y){return x*(unsigned long)y;}
+unsigned long long_literal(unsigned long x){return x*65535UL;}
+unsigned long word_literal(unsigned int x){return 31337UL*x;}
 long signed_word_long(int x,long y){return (long)x*y;}
 long signed_long_word(long x,int y){return x*(long)y;}
 unsigned long mixed_truncation(unsigned long x,unsigned long y){return (unsigned long)(int)x*y;}
@@ -101,6 +103,7 @@ calls=0;if(mixed_effects((int)a,base)!=expected[10]||calls!=2)return 20;
 calls=0;if(reversed_effects(base,(int)a)!=expected[10]||calls!=2)return 21;
 mixed.guard=a;mixed.value=base;
 if(mixed_member(&mixed)!=expected[9]||reversed_member(&mixed)!=expected[9])return 22;
+if(long_literal(base)!=expected[11]||word_literal(a)!=expected[12])return 24;
 return 0;}
 int main(void){int i;changed=11UL;if(across_call()!=18UL||changed!=99UL)return 11;
 product_left=0x12345678UL;product_right=0xfedcba98UL;
@@ -116,6 +119,8 @@ for(i=0;i<COUNT;i++){if(check())return i+1;}return 0;}
     for name in ('ss','uu','su','us','scaled','bits','effects','truncation','bytes','member_sum','array_sum','band','bor'):
         assert '__mul16wide' in body(name), name
     assert '__mul32' in body('full')
+    assert '__mul16x32' in body('long_literal')
+    assert '__mul16wide' in body('word_literal')
     for name in ('word_long','long_word','uword_long','long_uword','signed_word_long','signed_long_word',
                  'mixed_truncation','changed_sign','mixed_effects','reversed_effects','mixed_member','reversed_member'):
         assert '__mul16x32' in body(name),name
@@ -132,23 +137,46 @@ local minimum=1000000
 local active=nil
 local products=0
 local verified={{}}
+local word_word_counts={{}}
+local word_long_counts={{}}
 local function word(p,v) emu.write(((p)&0x1ffff),v&255,emu.memType.snesWorkRam);emu.write(((p+1)&0x1ffff),(v>>8)&255,emu.memType.snesWorkRam) end
 local function long(p,v) word(p,v);word(p+2,v>>16) end
-emu.addMemoryCallback(function() if index<=1 then trigger=emu.getState().masterClock;if active then products=products+1 end end end,emu.callbackType.write,0x004203,0x004203)
-local function hardware_count(name,first,last,expected)
- emu.addMemoryCallback(function() if index<=1 then active=name;products=0 end end,emu.callbackType.exec,first,first)
+local function sampling() return index<=1 or index>#cases-{len(boundary)*len(long_boundary)} end
+emu.addMemoryCallback(function() if sampling() then trigger=emu.getState().masterClock;if active then products=products+1 end end end,emu.callbackType.write,0x004203,0x004203)
+local function hardware_count(name,first,last,count)
+ local expected=nil
  emu.addMemoryCallback(function()
-  if index>1 then return end
+  if sampling() then
+   active=name;products=0;expected=type(count)=='function' and count() or count
+  end
+ end,emu.callbackType.exec,first,first)
+ emu.addMemoryCallback(function()
+  if not sampling() then return end
   if active~=name or products~=expected then error(name..' hardware products '..products) end
+  if name=='word_word' then word_word_counts[products]=true end
+  if name=='word_long' then word_long_counts[products]=true end
   verified[name]=true;active=nil
  end,emu.callbackType.exec,last,last)
 end
-hardware_count('word_word',{labels['_mul16wide']},{labels['_mul16wide']+code_size('mul16wide')-1},4)
-hardware_count('word_long',{labels['_mul16x32']},{labels['_mul16x32']+code_size('mul16x32')-1},7)
+local function word_word_products()
+ local wram=emu.memType.snesWorkRam
+ local left=emu.read({labels['_arith_lhs']+1},wram,false)==0 and 1 or 2
+ local right=emu.read({labels['_arith_rhs']+1},wram,false)==0 and 1 or 2
+ return left*right
+end
+local function word_long_products()
+ local wram=emu.memType.snesWorkRam
+ local high_byte=emu.read({labels['_arith_lhs']+1},wram,false)
+ local high_word=emu.read16({labels['_arith_rhs']+2},wram,false)
+ if high_byte==0 then return high_word==0 and 2 or 4 end
+ return high_word==0 and 4 or 7
+end
+hardware_count('word_word',{labels['_mul16wide']},{labels['_mul16wide']+code_size('mul16wide')-1},word_word_products)
+hardware_count('word_long',{labels['_mul16x32']},{labels['_mul16x32']+code_size('mul16x32')-1},word_long_products)
 hardware_count('long_long',{labels['_mul32']},{labels['mul32_byte']-1},10)
 hardware_count('long_byte',{labels['mul32_byte']},{labels['_mul32']+code_size('mul32')-1},4)
 emu.addMemoryCallback(function()
- if index>1 then return end
+ if not sampling() then return end
  local delta=emu.getState().masterClock-trigger
  if delta<48 then error('early multiply read '..delta) end
  minimum=math.min(minimum,delta)
@@ -156,7 +184,7 @@ end,emu.callbackType.read,0x004216,0x004217)
 emu.addMemoryCallback(function()
  index=index+1;local c=cases[index];if not c then error('extra case') end
  word({labels['a']},c[1]);word({labels['b']},c[2]);long({labels['base']},c[3])
- for i=1,11 do long({labels['expected']}+(i-1)*4,c[i+3]) end
+ for i=1,13 do long({labels['expected']}+(i-1)*4,c[i+3]) end
 end,emu.callbackType.exec,{labels['check']},{labels['check']})
 emu.addMemoryCallback(function()
  local s=emu.getState()
@@ -164,6 +192,8 @@ emu.addMemoryCallback(function()
  if index~=#cases or s['cpu.sp']~=0x04ff or s['cpu.y']~=0 or s['cpu.d']~=0 or s['cpu.dbr']~=0x7e or (s['cpu.ps']&0x38)~=0 then error('count/ABI') end
  if minimum==1000000 then error('no hardware reads') end
  if not verified.word_word or not verified.word_long or not verified.long_long or not verified.long_byte then error('missing hardware count') end
+ if not word_word_counts[1] or not word_word_counts[2] or not word_word_counts[4] then error('missing adaptive word multiply path') end
+ if not word_long_counts[2] or not word_long_counts[4] or not word_long_counts[7] then error('missing adaptive multiply path') end
  emu.log('PASS '..index..' vectors; minimum multiply delay '..minimum);emu.log('DONE');emu.breakExecution()
 end,emu.callbackType.exec,{labels['main_exit']},{labels['main_exit']})
 '''
@@ -177,7 +207,7 @@ end,emu.callbackType.exec,{labels['main_exit']},{labels['main_exit']})
         assert 'PASS' in log,log
     finally:
         core.close_with_log(OUT/'products.log')
-    (OUT/'results.json').write_text(json.dumps(dict(vectors=len(rows),products=len(rows)*26,seed=160032,hardware_products=dict(word_word=4,word_long=7,long_long=10,long_byte=4)),indent=2))
+    (OUT/'results.json').write_text(json.dumps(dict(vectors=len(rows),products=len(rows)*28,seed=160032,hardware_products=dict(word_word=[1,2,4],word_long=[2,4,7],long_long=10,long_byte=4)),indent=2))
     print(log)
 
 

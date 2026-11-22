@@ -7,14 +7,13 @@ L=__arith_lhs
 R=__arith_rhs
 T=__arith_lhs+8
 .segment "CODE"
-; Full product of independently sign/zero-extended word operands. The caller
-; supplies each extension in L+2/R+2 (zero or $FFFF). Four hardware products
-; suffice; each negative source subtracts the opposite low word from high
-__mul16wide:
-    stz z:T
-    stz z:T+2
-    .repeat 2, I
+.macro accumulate_byte I
+    .local narrow
         .repeat 2, J
+            .if J = 1
+    cpx #$0100
+    bcc narrow
+            .endif
     sep #$20
 .a8
                 .if J = 0
@@ -44,7 +43,21 @@ __mul16wide:
 .a16
             .endif
         .endrepeat
-    .endrepeat
+narrow:
+.endmacro
+
+; Full product of independently sign/zero-extended word operands. Skip the
+; partial products for high bytes that are zero, then correct signed inputs
+__mul16wide:
+    stz z:T
+    stz z:T+2
+    ldx z:R
+    accumulate_byte 0
+    lda z:L
+    cmp #$0100
+    bcc mul16wide_correct_sign
+    accumulate_byte 1
+mul16wide_correct_sign:
     lda z:L+2
     bpl @left_unsigned
     sec

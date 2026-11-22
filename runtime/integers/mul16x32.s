@@ -7,15 +7,14 @@ L=__arith_lhs
 R=__arith_rhs
 T=__arith_lhs+8
 .segment "CODE"
-; Low 32 bits of a sign/zero-extended word times an arbitrary long
-; L+2 is the caller's extension (0 or $FFFF); R is unrestricted. Seven
-; hardware products suffice, followed by a negative-word correction
-__mul16x32:
-    stz z:T
-    stz z:T+2
-    .repeat 2, I
+.macro accumulate_byte I
+    .local narrow
         .repeat 4, J
             .if I+J < 4
+                .if J = 2
+    cpx #0
+    beq narrow
+                .endif
     sep #$20
 .a8
                 .if J = 0
@@ -56,7 +55,21 @@ __mul16x32:
                 .endif
             .endif
         .endrepeat
-    .endrepeat
+narrow:
+.endmacro
+
+; Low 32 bits of a sign/zero-extended word times an arbitrary long
+; Skip entire sets of partial products when the corresponding bytes are zero
+__mul16x32:
+    stz z:T
+    stz z:T+2
+    ldx z:R+2
+    accumulate_byte 0
+    lda z:L
+    and #$FF00
+    beq mul16x32_correct_sign
+    accumulate_byte 1
+mul16x32_correct_sign:
     ; (low_word - 65536) * R differs in its high result word by -R.low
     lda z:L+2
     bpl @unsigned_word

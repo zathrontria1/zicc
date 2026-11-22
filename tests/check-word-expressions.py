@@ -150,7 +150,7 @@ def worker(args):
             assert '__mul16' in body('variable') and '__mul16' in body('scale_right_20')
         else:
             assert '__mul16' not in body('left') and '__mul16' not in body('zero')
-            assert '__mul32' in body('wide')
+            assert '__mul16x32' in body('wide') and '__mul32' not in body('wide'),body('wide')
     table=[]
     for values in rows:
         table.append('{'+','.join(map(str,list(values)+[fn(values) for _,_,fn in functions]))+'}')

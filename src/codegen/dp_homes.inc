@@ -10,7 +10,7 @@ static const struct { const char *name;unsigned writes; } helper_clobbers[]={
 /* helper-clobbers begin */
         {"__mul16",0x0010},
         {"__mul16wide",0x0030},
-        {"__mul16x32",0x0070},
+        {"__mul16x32",0x0030},
         {"__mul16x8",0x0010},
         {"__mul32",0x00F0},
         {"__mul8",0x0000},
