@@ -630,6 +630,22 @@ def check_intermediate_retention():
         assert len(list(full.rglob('*.s'))) > len(list(warm.rglob('*.s')))
         assert list(full.rglob('*.o'))
 
+        _, r1 = build('history', 'int main(void) { return 0; }')
+        _, r2 = build('history', 'int main(void) { return 1; }')
+        custom = r1.parent / 'saved-baseline'
+        custom.mkdir()
+        runs = sorted(p for p in r1.parent.iterdir() if p != custom)
+        assert runs == [r1, r2] and custom.is_dir(), runs
+        _, r3 = build('history', 'int main(void) { return 2; }')
+        runs = sorted(p for p in r1.parent.iterdir() if p != custom)
+        assert runs == [r2, r3] and not r1.exists() and custom.is_dir(), runs
+        source.write_text('int main(void) { return ; }')
+        failed = subprocess.run([sys.executable, ROOT/'tools/build-rom.py', source, '-o', folder/'history.raw'],
+                                env=environment, capture_output=True, text=True, timeout=120)
+        assert failed.returncode != 0
+        runs = sorted(p for p in r1.parent.iterdir() if p != custom)
+        assert len(runs) == 2 and runs[0] == r3 and not r2.exists() and custom.is_dir(), runs
+
 
 def check_exhirom():
     # A file-contiguous run from the end of $FF into $40 is not CPU-contiguous

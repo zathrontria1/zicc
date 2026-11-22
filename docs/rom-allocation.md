@@ -125,6 +125,9 @@ For `build/application.raw`, the useful outputs are:
   linked debug file, layout records and build diagnostics. The builder discards
   temporary objects and unlinked runtime assembly when it exits. Builds made
   with `--keep-intermediates` retain those files as well.
+- `build/<name>-allocation/` keeps only the latest and previous timestamped
+  run directories automatically; copy or archive a directory externally if you
+  want to keep older history.
 - If packing fails, inspect the rejected-layout messages for the unit and bank
   constraint that prevented placement. Check the ROM cap and individual object
   sizes before raising the limit.

@@ -114,7 +114,8 @@ embedded-resource hashes. The final `.sfc` checksum is reported by romtool.
 
 Default raw-image rules rerun the driver so changes to resource bytes are
 observed without maintaining a generated initializer or hand-written asset
-count. Old evidence directories are retained. Failed builds remove the previous
+count. Only the latest and previous timestamped evidence directories are kept;
+copy or archive a directory externally for longer retention. Failed builds remove the previous
 raw image and success manifest so stale placement cannot be mistaken for a
 successful rebuild.
 

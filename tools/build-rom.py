@@ -49,6 +49,22 @@ FAR_LIBRARY = {
 }
 
 
+EVIDENCE_RUN = re.compile(r'^\d{8}T\d{6}\.\d{6}Z$')
+
+
+def prune_evidence_runs(evidence, keep=2):
+    root = evidence.parent
+    if not root.is_dir():
+        return
+    previous = sorted(
+        (p for p in root.iterdir()
+         if p != evidence and p.is_dir() and not p.is_symlink() and EVIDENCE_RUN.fullmatch(p.name)),
+        key=lambda p: p.name,
+    )
+    for stale in previous[:max(0, len(previous) - max(0, keep - 1))]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 class BuildTranscript:
     def __init__(self, evidence):
         self.evidence = evidence
@@ -984,6 +1000,7 @@ def build(args):
     finally:
         if not getattr(args, 'keep_intermediates', False):
             log.prune_intermediates()
+        prune_evidence_runs(evidence)
 
 
 def build_image(args, output, log):

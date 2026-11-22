@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import re
+import tempfile
 from pathlib import Path
 import sys
 
@@ -76,6 +77,18 @@ decimal_start: .res 284
         assert sy['_RUNTIME_CONSOLE_RUN__']==HIGH-4096-284-4-8
         assert sy['_NEAR_LAST__']==0x7e0580
         report[cfg.stem]=sy['_RUNTIME_RAM_BOTTOM__']
+    with tempfile.TemporaryDirectory(dir=OUT) as temporary:
+        folder=Path(temporary)
+        raw=folder/'retention.raw'
+        ev_root=folder/'retention-runtime-ram'
+        custom=ev_root/'saved-baseline'
+        for i in range(3):
+            c.run([sys.executable,ROOT/'tools/link-runtime-ram.py','-C',ROOT/'linker/lorom32.cfg',
+                   '-o',raw,asm.with_suffix('.o'),ROOT/'build/rom_header.o',ROOT/'build/vectors.o'])
+            if i==0:
+                custom.mkdir()
+            runs=sorted(p for p in ev_root.iterdir() if p!=custom)
+            assert len(runs)==(1 if i==0 else 2) and custom.is_dir(),(i,runs)
     return report
 
 

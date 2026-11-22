@@ -81,7 +81,8 @@ python tools/link-runtime-ram.py -C linker/lorom32.cfg -o build/app.raw ...objec
 The wrapper first resolves archive members with a temporary region in bank $7F,
 measures only selected segments, then relinks the same inputs with exact
 backfilled extents. Both commands, configs, the probe map and runtime-ram.json
-are retained under `build/app-runtime-ram/<UTC timestamp>/`. All 16 supplied
+are retained under `build/app-runtime-ram/<UTC timestamp>/`, keeping only the
+latest and previous timestamped run directories. All 16 supplied
 LoROM/HiROM layouts are covered. Bare ld65 still places these classes in $7F,
 but the wrapper is required for top-down placement and the report showing where each buffer went.
 The normal automatic HiROM builder performs selection/measurement directly and

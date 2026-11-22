@@ -23,6 +23,20 @@ CC65 = Path(os.environ.get('CC65_BIN') or ('C:/bin/cc65/bin' if os.name == 'nt' 
                                            Path(shutil.which('ca65') or '/usr/bin/ca65').parent))
 ROM_AREA=re.compile(r'^\s*(ROM(?:_DATA|[0-9A-F]{2})?):[^;]*\bfile\s*=\s*%O[^;]*;', re.M)
 INIT='ZWRAM_INIT'
+EVIDENCE_RUN = re.compile(r'^\d{8}T\d{6}\.\d{6}Z$')
+
+
+def prune_evidence_runs(evidence, keep=2):
+    root = evidence.parent
+    if not root.is_dir():
+        return
+    previous = sorted(
+        (p for p in root.iterdir()
+         if p != evidence and p.is_dir() and not p.is_symlink() and EVIDENCE_RUN.fullmatch(p.name)),
+        key=lambda p: p.name,
+    )
+    for stale in previous[:max(0, len(previous) - max(0, keep - 1))]:
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def capacity_hint(config_path):
@@ -255,100 +269,103 @@ def main():
     output=Path(args[args.index('-o')+1]).resolve()
     evidence=output.parent/(output.stem+'-runtime-ram')/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     evidence.mkdir(parents=True)
-    original=cfg.read_text()
-    probe_cfg=evidence/'probe.cfg'
-    # Retain all input/selection options, replacing only output artifacts
-    probe=[];index=0
-    output_options={'-C','-o','-m','-Ln','--dbgfile','--mapfile','--label-file','--config'}
-    while index<len(args):
-        if args[index] in output_options:index+=2
-        else:probe.append(args[index]);index+=1
-    ld65=CC65/f'ld65{EXE}'
-    names=annotated_segments(probe,evidence)
-    probe_cfg.write_text(probe_config(original,names,sram) if names else config(original,sram=sram))
-    probe_map=evidence/'probe.map'
-    label=evidence/'probe.labels'
-    label_args=['-Ln',label] if names else []
-    run([ld65,*probe,'-C',probe_cfg,'-m',probe_map,*label_args,'-o',evidence/'probe.raw'],
-        evidence/'link.log', rom_hint=rom_hint)
-    sram.check_rom_size((evidence/'probe.raw').stat().st_size)
-    text=probe_map.read_text();records=[]
-    for name in RUNTIME_RAM:
-        match=re.search(r'^'+name+r'\s+[0-9A-F]+\s+[0-9A-F]+\s+([0-9A-F]+)\s+([0-9A-F]+)\s*$',text,re.M)
-        if match and int(match[1],16):
-            members=[];owner=None
-            for line in text.splitlines():
-                if line and not line[0].isspace() and line.endswith(':'):owner=line[:-1]
-                m=re.match(r'\s+'+name+r'\s+Offs=\w+\s+Size=(\w+)\s+Align=(\w+)',line)
-                if m and int(m[1],16):members.append(dict(object=owner,owner='explicit-runtime-class',size=int(m[1],16),alignment=int(m[2],16)))
-            records.append(dict(name=name,size=int(match[1],16),alignment=int(match[2],16),members=members))
-    layout=backfill(records)
-    expanded=None
-    sram_objects=[]
-    if names:
-        extents=map_extents(text)
-        live=wram.objects((name,size,alignment) for name,(_,size,alignment) in extents.items())
-        sy=label_values(label)
-        for obj in live:
-            if f'__{wram.UNQUALIFIED}{obj.name}_RUN__' in sy:
-                raise ValueError(f"conflicting WRAM placement for '{obj.name}'")
-        if any(wram.PART.fullmatch(name) for name in names):
-            expanded=wram.place(live,sy['__NEAR_START__'],sy['__NEAR_LAST__'],layout,bool(sy.keys() & wram.HEAP_EXPORTS))
-        sram_objects=sram.allocate(
-            [(name,size,alignment) for name,(_,size,alignment) in extents.items()
-             if size and cartridge_sram.PART.fullmatch(name)],
-            [name.removeprefix(f'__{wram.UNQUALIFIED}').removesuffix('_RUN__')
-             for name in sy if name.startswith(f'__{wram.UNQUALIFIED}') and name.endswith('_RUN__')])
-    final_cfg=evidence/'link.cfg'
-    final=list(args);final[final.index('-C')+1]=str(final_cfg)
-    if expanded:
-        if '__zicc_reset_offset__' not in sy or 'reset_native' not in sy:
-            raise ValueError('expanded WRAM requires a current zicc startup object and linker configuration')
-        final_text, init, loads=expanded_config(original,layout,expanded,evidence,sy,rom_hint,
-                                               sram=sram,sram_objects=sram_objects)
-        final.append(init)
-    else:
-        final_text=config(original,layout,sram=sram,sram_objects=sram_objects)
-    if expanded or sram_objects:
-        final_map=evidence/'link.map'
-        final_labels=evidence/'link.labels'
-        artifacts = [(('-m','--mapfile'),final_map,'map')]
+    try:
+        original=cfg.read_text()
+        probe_cfg=evidence/'probe.cfg'
+        # Retain all input/selection options, replacing only output artifacts
+        probe=[];index=0
+        output_options={'-C','-o','-m','-Ln','--dbgfile','--mapfile','--label-file','--config'}
+        while index<len(args):
+            if args[index] in output_options:index+=2
+            else:probe.append(args[index]);index+=1
+        ld65=CC65/f'ld65{EXE}'
+        names=annotated_segments(probe,evidence)
+        probe_cfg.write_text(probe_config(original,names,sram) if names else config(original,sram=sram))
+        probe_map=evidence/'probe.map'
+        label=evidence/'probe.labels'
+        label_args=['-Ln',label] if names else []
+        run([ld65,*probe,'-C',probe_cfg,'-m',probe_map,*label_args,'-o',evidence/'probe.raw'],
+            evidence/'link.log', rom_hint=rom_hint)
+        sram.check_rom_size((evidence/'probe.raw').stat().st_size)
+        text=probe_map.read_text();records=[]
+        for name in RUNTIME_RAM:
+            match=re.search(r'^'+name+r'\s+[0-9A-F]+\s+[0-9A-F]+\s+([0-9A-F]+)\s+([0-9A-F]+)\s*$',text,re.M)
+            if match and int(match[1],16):
+                members=[];owner=None
+                for line in text.splitlines():
+                    if line and not line[0].isspace() and line.endswith(':'):owner=line[:-1]
+                    m=re.match(r'\s+'+name+r'\s+Offs=\w+\s+Size=(\w+)\s+Align=(\w+)',line)
+                    if m and int(m[1],16):members.append(dict(object=owner,owner='explicit-runtime-class',size=int(m[1],16),alignment=int(m[2],16)))
+                records.append(dict(name=name,size=int(match[1],16),alignment=int(match[2],16),members=members))
+        layout=backfill(records)
+        expanded=None
+        sram_objects=[]
+        if names:
+            extents=map_extents(text)
+            live=wram.objects((name,size,alignment) for name,(_,size,alignment) in extents.items())
+            sy=label_values(label)
+            for obj in live:
+                if f'__{wram.UNQUALIFIED}{obj.name}_RUN__' in sy:
+                    raise ValueError(f"conflicting WRAM placement for '{obj.name}'")
+            if any(wram.PART.fullmatch(name) for name in names):
+                expanded=wram.place(live,sy['__NEAR_START__'],sy['__NEAR_LAST__'],layout,bool(sy.keys() & wram.HEAP_EXPORTS))
+            sram_objects=sram.allocate(
+                [(name,size,alignment) for name,(_,size,alignment) in extents.items()
+                 if size and cartridge_sram.PART.fullmatch(name)],
+                [name.removeprefix(f'__{wram.UNQUALIFIED}').removesuffix('_RUN__')
+                 for name in sy if name.startswith(f'__{wram.UNQUALIFIED}') and name.endswith('_RUN__')])
+        final_cfg=evidence/'link.cfg'
+        final=list(args);final[final.index('-C')+1]=str(final_cfg)
         if expanded:
-            artifacts.append((('-Ln','--label-file'),final_labels,'labels'))
-        for options, default, current in artifacts:
-            used=next((Path(final[final.index(o)+1]) for o in options if o in final),None)
-            if used is None:final.extend([options[0], default])
-            elif current=='map':final_map=used
-            else:final_labels=used
-    final_output = output
-    if mapping:
-        final_output = evidence/'image.raw'
-        final[final.index('-o')+1] = str(final_output)
-    final_cfg.write_text(final_text)
-    result=run([ld65,*final],evidence/'link.log', rom_hint=rom_hint)
-    if expanded or sram_objects:
-        final_extents={n:(a,s) for n,(a,s,_) in map_extents(final_map.read_text()).items()}
-        cartridge_sram.verify(sram_objects, final_extents)
-    if expanded:
-        final_symbols=label_values(final_labels)
-        wram.verify(expanded,final_extents,final_symbols,loads)
-        if final_symbols.get('__zicc_wram_reset') != loads[INIT]:
-            raise RuntimeError('final WRAM startup initializer address differs from plan')
-        for record in layout['objects']:
-            if final_extents.get(record['name']) != (record['address'],record['size']):
-                raise RuntimeError(f"final runtime RAM placement differs for {record['name']}")
-    if mapping:
-        sram.check_manual_header(final_output)
-        final_output.replace(output)
-    if expanded or sram.capacity:
-        manifest=dict(evidence=str(evidence),runtime_ram=layout,sram=dict(sram.manifest(),objects=sram_objects))
+            if '__zicc_reset_offset__' not in sy or 'reset_native' not in sy:
+                raise ValueError('expanded WRAM requires a current zicc startup object and linker configuration')
+            final_text, init, loads=expanded_config(original,layout,expanded,evidence,sy,rom_hint,
+                                                   sram=sram,sram_objects=sram_objects)
+            final.append(init)
+        else:
+            final_text=config(original,layout,sram=sram,sram_objects=sram_objects)
+        if expanded or sram_objects:
+            final_map=evidence/'link.map'
+            final_labels=evidence/'link.labels'
+            artifacts = [(('-m','--mapfile'),final_map,'map')]
+            if expanded:
+                artifacts.append((('-Ln','--label-file'),final_labels,'labels'))
+            for options, default, current in artifacts:
+                used=next((Path(final[final.index(o)+1]) for o in options if o in final),None)
+                if used is None:final.extend([options[0], default])
+                elif current=='map':final_map=used
+                else:final_labels=used
+        final_output = output
+        if mapping:
+            final_output = evidence/'image.raw'
+            final[final.index('-o')+1] = str(final_output)
+        final_cfg.write_text(final_text)
+        result=run([ld65,*final],evidence/'link.log', rom_hint=rom_hint)
+        if expanded or sram_objects:
+            final_extents={n:(a,s) for n,(a,s,_) in map_extents(final_map.read_text()).items()}
+            cartridge_sram.verify(sram_objects, final_extents)
         if expanded:
-            manifest['application_wram'] = expanded
-        output.with_suffix('.allocation.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    else:
-        output.with_suffix('.allocation.json').unlink(missing_ok=True)
-    (evidence/'runtime-ram.json').write_text(json.dumps(layout,indent=2)+'\n')
-    sys.stdout.write(result.stdout);sys.stderr.write(result.stderr)
+            final_symbols=label_values(final_labels)
+            wram.verify(expanded,final_extents,final_symbols,loads)
+            if final_symbols.get('__zicc_wram_reset') != loads[INIT]:
+                raise RuntimeError('final WRAM startup initializer address differs from plan')
+            for record in layout['objects']:
+                if final_extents.get(record['name']) != (record['address'],record['size']):
+                    raise RuntimeError(f"final runtime RAM placement differs for {record['name']}")
+        if mapping:
+            sram.check_manual_header(final_output)
+            final_output.replace(output)
+        if expanded or sram.capacity:
+            manifest=dict(evidence=str(evidence),runtime_ram=layout,sram=dict(sram.manifest(),objects=sram_objects))
+            if expanded:
+                manifest['application_wram'] = expanded
+            output.with_suffix('.allocation.json').write_text(json.dumps(manifest,indent=2)+'\n')
+        else:
+            output.with_suffix('.allocation.json').unlink(missing_ok=True)
+        (evidence/'runtime-ram.json').write_text(json.dumps(layout,indent=2)+'\n')
+        sys.stdout.write(result.stdout);sys.stderr.write(result.stderr)
+    finally:
+        prune_evidence_runs(evidence)
 
 
 if __name__=='__main__':
