@@ -343,6 +343,35 @@ __noinline void ring_walk(unsigned start,unsigned end) {
  ring_out_head=head;ring_out_tail=tail;ring_sum=sum;
 }
 
+struct SpriteStyle { unsigned offset, reverse_offset, top, attr; };
+struct SpriteItem {
+ unsigned x,y,index,direction,out,attr;
+ const struct SpriteStyle * __far style;
+};
+static const struct SpriteStyle styles[2]={{5,11,3,0x28},{9,14,6,0x21}};
+static struct SpriteItem sprite_item;
+static unsigned char sprite_flags[16];
+__dpage unsigned sprite_origin_x,sprite_origin_y;
+void hide_sprite(struct SpriteItem *p);
+void clear_style(struct SpriteItem *p);
+__noinline void place_sprite(struct SpriteItem *p) {
+ unsigned x=(p->x>>4)-sprite_origin_x, y=(p->y>>4)-sprite_origin_y;
+ if(x>=80U||y>=60U) {
+  hide_sprite(p);
+  if(sprite_flags[p->index]&2U)clear_style(p);
+  return;
+ }
+ const struct SpriteStyle * __far s=p->style;
+ unsigned line=y+s->top;
+ if(line>=60U){
+  p->out=0xff00;
+  p->attr=0;
+ }else{
+  unsigned column=x+(p->direction==2?s->reverse_offset:s->offset);
+  p->out=(column&255)|(line<<8);
+  p->attr=((column>>2)&64)|s->attr;
+ }
+}
 static unsigned char search_field[8],search_taken[8];
 __dpage unsigned char *search_ready;
 #define BYTE_SEARCH(name, forward, reverse) \
@@ -507,6 +536,24 @@ int main(void){
  ring_walk(7,0);
  if(ring_out_head||ring_out_tail||ring_sum||ring_bytes[7]!=0)return 116;
 
+ sprite_origin_x=4;sprite_origin_y=7;
+ sprite_item.x=160;sprite_item.y=240;sprite_item.index=4;
+ sprite_item.style=styles;sprite_item.direction=2;
+ place_sprite(&sprite_item);
+ if(sprite_item.out!=0x0b11||sprite_item.attr!=0x28)return 122;
+ sprite_item.style=styles+1;sprite_item.direction=0;
+ place_sprite(&sprite_item);
+ if(sprite_item.out!=0x0e0f||sprite_item.attr!=0x21)return 123;
+ sprite_item.y=16*65;
+ place_sprite(&sprite_item);
+ if(sprite_item.out!=0xff00||sprite_item.attr)return 124;
+ sprite_item.attr=55;sprite_item.x=1600;
+ place_sprite(&sprite_item);
+ if(sprite_item.out!=65535U||sprite_item.attr!=55)return 125;
+ sprite_flags[4]=2;sprite_item.x=160;sprite_item.y=1600;
+ place_sprite(&sprite_item);
+ if(sprite_item.out!=65535U||sprite_item.attr)return 126;
+
  if(search_index(4)!=65535u||search_code(4)!=65535u)return 110;
  search_ready=search_field;
  if(search_index(4)!=65535u||search_code(4)!=65535u)return 111;
@@ -536,6 +583,13 @@ int main(void){
 '''
 
 FRAME_CALLEE = '''
+struct SpriteStyle { unsigned offset, reverse_offset, top, attr; };
+struct SpriteItem {
+ unsigned x,y,index,direction,out,attr;
+ const struct SpriteStyle * __far style;
+};
+void hide_sprite(struct SpriteItem *p) { p->out=0xffff; }
+void clear_style(struct SpriteItem *p) { p->attr=0; }
 unsigned frame_calls;
 unsigned frame_probe(unsigned x,unsigned y,unsigned w,unsigned h) {
  frame_calls++;
@@ -866,6 +920,9 @@ def main():
             assert 'borrow Y across near byte guard loop' in ring
             assert 'retained byte step and biased guard cursor' in ring and 'cmp #$FFF7' in ring
             assert 'cpy #$FFF7' not in ring
+            draw=assemblies.split('_place_sprite:',1)[1].split('__size_place_sprite',1)[0]
+            early,visible=draw.split('; allocate frame after entry guards',1)
+            assert '    tcs' not in early and '    tcs' in visible
             search=assemblies.split('_search_index:',1)[1].split('__size_search_index',1)[0]
             assert search.count('reuse field address before probing reservation')==2
             assert 'byte load, lower-bound guard and decrement' in search

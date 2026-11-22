@@ -6919,6 +6919,8 @@ static int lp_fixed_workspace(const LpUnit *u)
     return 1;
 }
 
+#include "guard_frames.inc"
+
 /* A register argument already spilled in the opposite operand order can feed
  * a commutative add directly. Later DSE removes the unused A spill. */
 static int lp_direct_rhs_operand(LpUnit *u,Function *f,size_t at)
@@ -9077,6 +9079,7 @@ static void line_passes(Function *f,size_t at)
         while(lp_run(&runner,f,at,lp_index_transfer_steps)){}
     lp_run(&runner,f,at,lp_home_far_stack_argument);
     lp_run(&runner,f,at,lp_load_index_from_workspace);
+    lp_run(&runner,f,at,lp_delay_guard_frame);
     /* Arithmetic peepholes still need the original carry setup */
     while(lp_run(&runner,f,at,lp_carry_on_fallthrough)){}
 done:
