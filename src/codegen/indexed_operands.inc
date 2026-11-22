@@ -50,7 +50,8 @@ static int indexed_operand(Expr *e,IndexedOperand *out)
         Expr *index=NULL;
         if(offset>65535||!(symbol=indexed_near_base(address,&index,&scale,&offset))||
            !index||symbol->owner||symbol->dpage||
-           offset+width(e->type)>width(symbol->type))return 0;
+           (width(symbol->type)&&offset+width(e->type)>width(symbol->type))||
+           offset+width(e->type)>65536)return 0;
         *out=(IndexedOperand){symbol,index,scale,offset,0,0};return 1;
     }
     base=address->left;
