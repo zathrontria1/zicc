@@ -372,6 +372,12 @@ __noinline void place_sprite(struct SpriteItem *p) {
   p->attr=((column>>2)&64)|s->attr;
  }
 }
+__noinline unsigned shifted_collision(unsigned x,unsigned y) {
+ unsigned dx=x-37,dy=y-49,mask=0;
+ if((dx&255)>=48)mask=1;
+ if((dy&255)>=48)mask|=2;
+ return mask+((dx>>8)^(dy>>8))*8;
+}
 static unsigned char search_field[8],search_taken[8];
 __dpage unsigned char *search_ready;
 #define BYTE_SEARCH(name, forward, reverse) \
@@ -553,6 +559,7 @@ int main(void){
  sprite_flags[4]=2;sprite_item.x=160;sprite_item.y=1600;
  place_sprite(&sprite_item);
  if(sprite_item.out!=65535U||sprite_item.attr)return 126;
+ if(shifted_collision(37+0x12f,49+0x130)!=2||shifted_collision(36,49+0x130)!=2035)return 127;
 
  if(search_index(4)!=65535u||search_code(4)!=65535u)return 110;
  search_ready=search_field;
@@ -923,6 +930,9 @@ def main():
             draw=assemblies.split('_place_sprite:',1)[1].split('__size_place_sprite',1)[0]
             early,visible=draw.split('; allocate frame after entry guards',1)
             assert '    tcs' not in early and '    tcs' in visible
+            assert visible.count('; reused frame word in direct-page scratch')==2
+            collision=assemblies.split('_shifted_collision:',1)[1].split('__size_shifted_collision',1)[0]
+            assert '; calculate with incoming A before X' in collision
             search=assemblies.split('_search_index:',1)[1].split('__size_search_index',1)[0]
             assert search.count('reuse field address before probing reservation')==2
             assert 'byte load, lower-bound guard and decrement' in search

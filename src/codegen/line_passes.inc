@@ -6919,6 +6919,7 @@ static int lp_fixed_workspace(const LpUnit *u)
     return 1;
 }
 
+#include "region_register_values.inc"
 #include "guard_frames.inc"
 
 /* A register argument already spilled in the opposite operand order can feed
@@ -9079,6 +9080,8 @@ static void line_passes(Function *f,size_t at)
         while(lp_run(&runner,f,at,lp_index_transfer_steps)){}
     lp_run(&runner,f,at,lp_home_far_stack_argument);
     lp_run(&runner,f,at,lp_load_index_from_workspace);
+    while(lp_run(&runner,f,at,lp_reuse_frame_copies)){}
+    lp_run(&runner,f,at,lp_schedule_entry_words);
     lp_run(&runner,f,at,lp_delay_guard_frame);
     /* Arithmetic peepholes still need the original carry setup */
     while(lp_run(&runner,f,at,lp_carry_on_fallthrough)){}
