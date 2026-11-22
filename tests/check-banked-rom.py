@@ -307,7 +307,9 @@ static unsigned ring_words[8];
 static unsigned char ring_bytes[20];
 static unsigned ring_out_head,ring_out_tail,ring_sum;
 __noinline void ring_walk(unsigned start,unsigned end) {
- unsigned head=start,tail=end,budget=6,sum=0;
+ unsigned head=start,tail=end,sum=0;
+ for(unsigned batch=0;batch<2U;++batch) {
+ unsigned budget=6;
  do {
   if(head==tail)break;
   unsigned item=ring_words[head];
@@ -337,8 +339,10 @@ __noinline void ring_walk(unsigned start,unsigned end) {
   }
   sum+=item;
  } while(--budget);
+ }
  ring_out_head=head;ring_out_tail=tail;ring_sum=sum;
 }
+
 static unsigned char search_field[8],search_taken[8];
 __dpage unsigned char *search_ready;
 #define BYTE_SEARCH(name, forward, reverse) \

@@ -9182,7 +9182,8 @@ static int ring_uses(RingLoop *p,Expr *e,int discarded)
 static int ring_check_body(RingLoop *p,Statement *s)
 {
     for(;s;s=s->next)
-        if(!ring_uses(p,s->expression,s->kind==ST_EXPR)||
+        if(s->kind==ST_FOR||s->kind==ST_WHILE||s->kind==ST_DO||
+           !ring_uses(p,s->expression,s->kind==ST_EXPR)||
            !ring_check_body(p,s->body)||!ring_check_body(p,s->alternate))return 0;
     return 1;
 }
@@ -9242,7 +9243,8 @@ static int emit_scaled_ring_loop(Statement *s,int *result)
     RingLoop p={0};unsigned i;
     if(s->kind!=ST_DO||!cg.dp_homes||cg.parser->no_strength_reduction||
        cg.parser->no_indexed_operands||cg.bound||cg.affine_active||cg.retained_index||
-       cg.loop_count||volatile_statement(s)||!ring_collect(&p,s->body)||!p.count||
+       cg.switch_depth||cg.function->jump_label_count||
+       volatile_statement(s)||!ring_collect(&p,s->body)||!p.count||
        !ring_check_body(&p,s->body)||!ring_uses(&p,s->expression,0))return 0;
     for(i=0;i<p.count;++i){
         ScaledRing *r=&p.rings[i];unsigned offset=r->index->offset;
