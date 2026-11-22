@@ -6822,7 +6822,7 @@ static void emit_guard_increment(const ByteIncrement *step,unsigned reject,unsig
  * fast-path dispatch. Longer tails still share one copy. */
 static int copy_cold_guard_tail(Statement *s)
 {
-    return !s||!s->next||!s->next->next;
+    return !s||((!s->next||!s->next->next)&&!statement_inline_markers(s));
 }
 
 static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *step)
@@ -6832,7 +6832,7 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
     unsigned char copied[8];
     for(i=0;i<g->count;++i){
         fast[i]=++cg.label;cold[i]=++cg.label;tail[i]=++cg.label;
-        copied[i]=(unsigned char)(step&&i+1<g->count&&copy_cold_guard_tail(g->guards[i].tail));
+        copied[i]=(unsigned char)(i+1<g->count&&copy_cold_guard_tail(g->guards[i].tail));
     }
     code("    tay\n    cmp #$%04X\n    bcc :+\n",boundary);
     jump(cold[0]);code(":\n    sep #$20\n.a8\n");
