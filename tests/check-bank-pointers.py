@@ -177,15 +177,37 @@ for region in (sys.argv[1],):
   results[region]='PASS';print('PASS bank pointers '+region)
  finally:
   core.close_with_log(home/'check.log')
-for name,source,message in (
+diagnostics=(
  ('implicit','int main(void){int * __far f;int *n;n=f;return 0;}','implicit far-to-near'),
  ('rom','int main(void){char *p;p="rom";return 0;}','implicit far-to-near'),
  ('constant','int main(void){int *p=(int *)0x804200UL;return 0;}','not representable'),
  ('bank_zero','int main(void){int *p=(int *)(int * __far)0x4200UL;return 0;}','not representable'),
  ('reserved_zero','int main(void){int *p=(int *)(int * __far)0x7e0000UL;return 0;}','not representable'),
  ('float_pointer','int main(void){char * __far p=(char * __far)1.0f;return 0;}','pointer/float'),
- ('identity','void f(int *p);void f(int * __far p){}','conflicting parameter type')):
+ ('identity','void f(int *p);void f(int * __far p){}','conflicting parameter type'),
+ ('rom_array_arg','const unsigned char rom_table[4]={1,2,3,4};extern void sink(const unsigned char * __far p);void a(void){sink((unsigned char *)rom_table);}','ROM address is not representable as a near pointer'),
+ ('rom_array_return','const unsigned char rom_table[4]={1,2,3,4};unsigned char *f(void){return (unsigned char *)rom_table;}','ROM address is not representable as a near pointer'),
+ ('rom_array_offset','const unsigned char rom_table[4]={1,2,3,4};unsigned char *f(void){return (unsigned char *)(rom_table+2);}','ROM address is not representable as a near pointer'),
+ ('rom_array_elem_addr','const unsigned char rom_table[4]={1,2,3,4};unsigned char *f(void){return (unsigned char *)&rom_table[2];}','ROM address is not representable as a near pointer'),
+ ('rom_2d_row','const unsigned char rom_2d[2][4]={{1,2,3,4},{5,6,7,8}};unsigned char *f(void){return (unsigned char *)rom_2d[1];}','ROM address is not representable as a near pointer'),
+ ('rom_member_array','struct S{unsigned char a[4];};const struct S rs={{1,2,3,4}};unsigned char *f(void){return (unsigned char *)rs.a;}','ROM address is not representable as a near pointer'),
+ ('rom_member_addr','struct S{int x;};const struct S rs={1};int *f(void){return (int *)&rs.x;}','ROM address is not representable as a near pointer'),
+ ('rom_cast_chain','const unsigned char rom_table[4]={1,2,3,4};unsigned char *f(void){return (unsigned char *)(const void * __far)rom_table;}','ROM address is not representable as a near pointer'),
+ ('rom_comma','const unsigned char rom_table[4]={1,2,3,4};unsigned char *f(void){return (unsigned char *)(0,rom_table);}','ROM address is not representable as a near pointer'),
+ ('rom_choose','const unsigned char rom_table[4]={1,2,3,4};unsigned char near_buf[4];unsigned char *f(int c){return (unsigned char *)(c?rom_table:near_buf);}','ROM address is not representable as a near pointer'),
+ ('rom_string_offset','char *f(void){return (char *)("abc"+1);}','ROM address is not representable as a near pointer'),
+ ('rom_local_static','unsigned char *f(void){static const unsigned char t[4]={1,2,3,4};return (unsigned char *)t;}','ROM address is not representable as a near pointer'),
+ ('rom_extern_array','extern const unsigned char t[4];unsigned char *f(void){return (unsigned char *)t;}','ROM address is not representable as a near pointer'))
+for name,source,message in diagnostics:
  path=c.OUT/(name+'.c');path.write_text(source)
  result=c.run([ROOT/'build/zicc.exe',path,'-o',path.with_suffix('.s')],expected=1)
  assert message in result.stderr,(name,result.stderr)
-(c.OUT/(sys.argv[1]+'-results.json')).write_text(json.dumps(dict(regions=results,diagnostics=7),indent=2)+'\n')
+for name,source in (
+ ('rom_ptr_value','unsigned char near_buf[4];unsigned char * __far const rom_ptr=near_buf;unsigned char *f(void){return (unsigned char *)rom_ptr;}'),
+ ('rom_ptr_array_elem','unsigned char near_buf[4];unsigned char * __far const rom_ptrs[1]={near_buf};unsigned char *g(void){return (unsigned char *)rom_ptrs[0];}'),
+ ('rom_ptr_member','unsigned char near_buf[4];struct P{unsigned char * __far p;};const struct P rp={near_buf};unsigned char *h(void){return (unsigned char *)rp.p;}'),
+ ('rom_choose_false','const unsigned char rom_table[4]={1,2,3,4};unsigned char near_buf[4];unsigned char *f(void){return (unsigned char *)(0?rom_table:near_buf);}'),
+ ('rom_diff_offset','const unsigned char rom_table[4]={1,2,3,4};unsigned char near_buf[4];unsigned char *f(void){return (unsigned char *)((unsigned char * __far)near_buf+(rom_table-rom_table));}')):
+ path=c.OUT/(name+'.c');path.write_text(source)
+ c.run([ROOT/'build/zicc.exe',path,'-o',path.with_suffix('.s')],expected=0)
+(c.OUT/(sys.argv[1]+'-results.json')).write_text(json.dumps(dict(regions=results,diagnostics=len(diagnostics)),indent=2)+'\n')

@@ -116,6 +116,27 @@ static int spillable_address(Expr *e,int object)
     default:return 0;
     }
 }
+static int rom_address(Expr *e,int object)
+{
+    if(!e)return 0;
+    switch(e->kind){
+    case EX_STRING:return 1;
+    case EX_OBJECT:return (object||e->type.array)&&e->symbol->type.banked&&!e->symbol->wram;
+    case EX_MEMBER:return (object||e->type.array)&&rom_address(e->left,e->op=='.');
+    case EX_DEREF:return (object||e->type.array)&&rom_address(e->left,0);
+    case EX_ADDRESS:return rom_address(e->left,1);
+    case EX_CAST:return value_type(e->left->type).pointers&&rom_address(e->left,0);
+    case EX_BINARY:return (e->op=='+'||e->op=='-')&&value_type(e->type).pointers&&
+        ((value_type(e->left->type).pointers&&rom_address(e->left,0))||
+         (e->op=='+'&&value_type(e->right->type).pointers&&rom_address(e->right,0)));
+    case EX_COMMA:return rom_address(e->right,object);
+    case EX_CHOOSE:
+        if(e->left->kind==EX_INT&&e->left->type.base!=TY_FLOAT&&e->left->type.base!=TY_DOUBLE)
+            return (e->left->value||e->left->value_high)?rom_address(e->right,object):rom_address(e->third,object);
+        return rom_address(e->right,object)||rom_address(e->third,object);
+    default:return 0;
+    }
+}
 static Expr *convert(Expr *e,Type target)
 {
     Type source=unqualified_value(e->type);Expr *cast;
@@ -152,8 +173,7 @@ static Expr *convert(Expr *e,Type target)
             error_at(e->location,"far address is not representable as a near pointer");
         e->value&=65535;e->type=target;return e;
     }
-    if(source.pointers&&far_pointer(source)&&target.pointers&&!far_pointer(target)&&
-       (e->kind==EX_STRING||(e->kind==EX_ADDRESS&&e->left->kind==EX_OBJECT&&e->left->symbol->type.banked)))
+    if(far_pointer(source)&&target.pointers&&!far_pointer(target)&&rom_address(e,0))
         error_at(e->location,"ROM address is not representable as a near pointer");
     if(e->kind==EX_INT&&numeric(source)&&numeric(target)&&source.base!=TY_DOUBLE&&target.base!=TY_DOUBLE){
         if(target.base==TY_LONGLONG&&source.base!=TY_FLOAT){
