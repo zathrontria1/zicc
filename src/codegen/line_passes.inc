@@ -2421,17 +2421,34 @@ static int lp_dead_stack_word_save(LpUnit *u,Function *f,size_t at)
     lp_liveness(u);
     for(unsigned i=0;i<u->count;++i){
         LpLine *push=&u->lines[i];
-        if(!lp_line_is(push,"pha")||push->m8||push->x8)continue;
-        int high=lp_next(u,i,1),store=high<0?-1:lp_next(u,(unsigned)high,1);
-        int pull=store<0?-1:lp_next(u,(unsigned)store,1);
-        if(pull<0||!lp_line_is(&u->lines[high],"txa")||!lp_is(&u->lines[store],"sta")||
-           !lp_line_is(&u->lines[pull],"pla")||(u->lines[pull].out&(LP_A|LP_N|LP_Z)))continue;
-        size_t n;
-        const char *operand=lp_operand(&u->lines[store],&n);
-        char *end;
-        long displacement=strtol(operand,&end,10);
-        if(n<3||end!=operand+n-2||end[0]!=','||end[1]!='s'||displacement<3||displacement>255)continue;
-        lp_set(&u->lines[store],"    sta %ld,s",displacement-2);
+        int k,pull=-1;
+        if(push->deleted||push->replace||!lp_line_is(push,"pha")||push->m8||push->x8)continue;
+        for(k=lp_next(u,i,1);k>=0;k=lp_next(u,(unsigned)k,1)){
+            LpLine *cur=&u->lines[k];
+            size_t n;const char *operand;
+            if(cur->deleted||cur->replace||cur->m8||cur->x8)break;
+            if(lp_line_is(cur,"pla")){
+                if(!(cur->out&(LP_A|LP_N|LP_Z)))pull=k;
+                break;
+            }
+            if(cur->ends||lp_branch(cur)||cur->call||lp_stack_op(cur)||cur->use==LP_ALL||
+               lp_is(cur,"sep")||lp_is(cur,"rep")||lp_is(cur,"tsx")||lp_is(cur,"tsc"))break;
+            operand=lp_operand(cur,&n);
+            if(lp_operand_has_s(operand,n)){
+                char *end;
+                long displacement=strtol(operand,&end,10);
+                if(n<3||end!=operand+n-2||end[0]!=','||end[1]!='s'||displacement<3||displacement>255)break;
+            }
+        }
+        if(pull<0)continue;
+        for(k=lp_next(u,i,1);k>=0&&k<pull;k=lp_next(u,(unsigned)k,1)){
+            LpLine *cur=&u->lines[k];
+            size_t n;const char *operand=lp_operand(cur,&n);
+            if(lp_operand_has_s(operand,n)){
+                long displacement=strtol(operand,NULL,10);
+                lp_set(cur,"    %.3s %ld,s",cur->op,displacement-2);
+            }
+        }
         push->deleted=u->lines[pull].deleted=1;
         changed=1;
     }
