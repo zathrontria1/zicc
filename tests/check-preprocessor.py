@@ -162,6 +162,39 @@ def main():
     tokens = body(result.stdout)
     assert 'uint16_t' in tokens and 'size_t' in tokens
     results['target_header'] = 'PASS'
+    # Check lone CR and mixed line endings using raw bytes
+    (OUT / 'cr_data.h').write_bytes(b'#if 1\r#define CR_VAL 99\r#endif\r')
+    cr_cases = {
+        'cr_conditional': (b'#if 1\rint g;\r#endif\r', ['int', 'g', ';']),
+        'cr_function_directive': (b'int f(void)\r{\r#if 1\r  return 2;\r#endif\r}\r',
+                                  ['int', 'f', '(', 'void', ')', '{', 'return', '2', ';', '}']),
+        'cr_continuation': (b'#define ADD(a,b) ((a)+\\\r(b))\rADD(1,2)\r',
+                            ['(', '(', '1', ')', '+', '(', '2', ')', ')']),
+        'cr_line_comment': (b'// comment\rint x;\r', ['int', 'x', ';']),
+        'cr_mixed_lines': (b'__LINE__\r__LINE__\r\n__LINE__\n\r__LINE__\r', ['1', '2', '3', '5']),
+        'cr_include': (b'#include "cr_data.h"\nCR_VAL\n', ['99']),
+        'cr_long_file': (b'int a0;\r' * 700, ['int', 'a0', ';'] * 700),
+    }
+    for name, (raw_bytes, expected_tokens) in cr_cases.items():
+        path = OUT / (name + '.c')
+        path.write_bytes(raw_bytes)
+        result = run([driver, path, ROOT / 'include'])
+        assert result.returncode == 0, (name, result.stderr)
+        assert body(result.stdout) == expected_tokens, (name, result.stdout, expected_tokens)
+        if name == 'cr_function_directive':
+            non_line = [ln for ln in result.stdout.splitlines() if ln.lstrip().startswith('#') and not ln.lstrip().startswith('#line')]
+            assert not non_line, non_line
+        results[name] = 'PASS'
+    cr_failures = {
+        'cr_unterminated_continuation': (b'int x;\\\r', 'unterminated line continuation'),
+        'cr_line_too_long': (b'//' + b'a' * 4094 + b'\r', 'source line exceeds 4095 bytes'),
+    }
+    for name, (raw_bytes, diagnostic) in cr_failures.items():
+        path = OUT / (name + '.c')
+        path.write_bytes(raw_bytes)
+        result = run([driver, path, ROOT / 'include'])
+        assert result.returncode != 0 and diagnostic in result.stderr, (name, result.stderr)
+        results[name] = 'rejected'
     (OUT / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
     print(f'PASS: {len(cases)} preprocessor cases; {len(failures)} diagnostics; standalone frontend driver')
 

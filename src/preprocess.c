@@ -745,6 +745,40 @@ static void embed(Preprocessor *pp, Tokens *line)
     clear_tokens(&args); free_embed(&e);
 }
 
+static int read_physical_line(FILE *input, char *buffer, size_t capacity,
+                              size_t *out_length, int *had_newline)
+{
+    size_t length = 0;
+    int c;
+    *had_newline = 0;
+    while ((c = fgetc(input)) != EOF) {
+        if (c == '\r') {
+            int next = fgetc(input);
+            if (next != '\n' && next != EOF) ungetc(next, input);
+            *had_newline = 1;
+            buffer[length] = 0;
+            *out_length = length;
+            return 1;
+        }
+        if (c == '\n') {
+            *had_newline = 1;
+            buffer[length] = 0;
+            *out_length = length;
+            return 1;
+        }
+        if (length + 1 >= capacity) {
+            buffer[length] = 0;
+            *out_length = length;
+            return 1;
+        }
+        buffer[length++] = (char)c;
+    }
+    if (!length) return 0;
+    buffer[length] = 0;
+    *out_length = length;
+    return 1;
+}
+
 static void file(Preprocessor *pp, const char *path, unsigned depth)
 {
     FILE *input;
@@ -755,6 +789,7 @@ static void file(Preprocessor *pp, const char *path, unsigned depth)
     int parent[32], taken[32], had_else[32];
     size_t total = 0;
     Tokens pending = {0}; char physical[4096];
+    size_t length = 0; int had_newline = 0;
     pp->path = path; pp->logical_file = NULL; pp->line = 1;
     if (depth > 16) fail(pp, "include nesting exceeds 16");
     input = fopen(path, "rb");
@@ -769,21 +804,20 @@ static void file(Preprocessor *pp, const char *path, unsigned depth)
         }
         if (ferror(input) || fseek(input, 0, SEEK_SET)) fail(pp, "source read failed");
     }
-    while (fgets(physical, sizeof physical, input)) {
+    while (read_physical_line(input, physical, sizeof physical, &length, &had_newline)) {
         Text logical = {0}; Tokens ts = {0}; int continued;
         int start;
         if (line == INT_MAX) fail(pp, "source line number overflows");
         start = line + 1;
         do {
-            size_t length = strlen(physical), end = length;
             if (line == INT_MAX) fail(pp, "source line number overflows");
             ++line; pp->line = line;
-            if (!strchr(physical, '\n') && !feof(input)) fail(pp, "source line exceeds 4095 bytes");
-            if (end && physical[end - 1] == '\n') --end;
-            if (end && physical[end - 1] == '\r') --end;
-            continued = end < length && end && physical[end - 1] == '\\';
-            append(&logical, physical, continued ? end - 1 : length);
-            if (continued && !fgets(physical, sizeof physical, input)) fail(pp, "unterminated line continuation");
+            if (ferror(input)) fail(pp, "source read failed");
+            if (!had_newline && !feof(input)) fail(pp, "source line exceeds 4095 bytes");
+            continued = had_newline && length && physical[length - 1] == '\\';
+            append(&logical, physical, continued ? length - 1 : length);
+            if (continued && !read_physical_line(input, physical, sizeof physical, &length, &had_newline))
+                fail(pp, ferror(input) ? "source read failed" : "unterminated line continuation");
         } while (continued);
         pp->line = start; lex(pp, &ts, logical.data, &comment); free(logical.data);
         if (ts.count && equal(&ts.items[0], "#")) {
