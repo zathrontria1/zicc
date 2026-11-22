@@ -495,6 +495,21 @@ static int lp_named_word_alias(const char *a,size_t na,const char *b,size_t nb)
     int first=lp_field_displacement(a+name,end_a);
     return first>=0&&lp_field_displacement(b+other,end_b)==first;
 }
+static int lp_frame_slot_escaped(const Function *f,int offset,int bytes)
+{
+    unsigned i;
+    if(!cg.lp_frame_address)return 0;
+    if(!f||f->uses_varargs||f->aggregate_abi)return 1;
+    for(i=0;i<cg.parser->symbol_count;++i){
+        const Symbol *v=&cg.parser->symbols[i];
+        if(v->owner!=f->id||!v->offset)continue;
+        if(!v->address_taken&&!v->type.array&&!structure_object(v->type)&&
+           !loop_escapes(f->body,(Symbol *)v))continue;
+        int start=(int)frame_offset(v->offset),end=start+(int)width(v->type);
+        if(offset<end&&offset+bytes>start)return 1;
+    }
+    return 0;
+}
 static int lp_may_write(const LpLine *l,const char *o,size_t n,int bytes)
 {
     size_t m;const char *p=lp_operand(l,&m);int word=lp_workspace_word(o,n);
@@ -3495,11 +3510,38 @@ static int lp_stack_sum_series(LpUnit *u,Function *f,size_t at)
 }
 /* Reuse word values in A/X within a basic block. Private operands retain their
  * identity only while writes, stack movement and calls cannot invalidate it. */
+static int lp_x_store_may_write_slot(const LpLine *l,const Function *f,const char *x,size_t xn,int y_is_frame)
+{
+    size_t m;const char *p=lp_operand(l,&m);
+    if(!lp_may_write(l,x,xn,2))return 0;
+    if(l->call||lp_is(l,"mvn")||lp_is(l,"mvp")||l->use==LP_ALL||!lp_store_op(l))return 1;
+    if(m<2||p[m-2]!=','||p[m-1]!='x')return 1;
+    if(y_is_frame&&xn==9&&!strncmp(x,"a:$",3)&&x[7]==','&&x[8]=='y')
+        return lp_frame_slot_escaped(f,(int)strtol(x+3,NULL,16),2);
+    if(xn>=3&&x[xn-2]==','&&x[xn-1]=='s'&&!cg.lp_frame_address&&f&&!f->uses_varargs&&!f->aggregate_abi)
+        return 0;
+    return 1;
+}
 static int lp_register_values(LpUnit *u,Function *f,size_t at)
 {
-    char a[128]="",x[128]="";unsigned i;int changed=0,known_targets;
+    char a[128]="",x[128]="",a8[128]="";unsigned i;int changed=0,known_targets;
     unsigned char *targets=lp_local_targets(u,&known_targets);
-    (void)f;(void)at;
+    int y_is_frame=f&&f->frame>0&&!body_asm_statements(f->body);
+    (void)at;
+    if(y_is_frame){
+        int seen_tay=0;
+        for(i=0;i<u->count;++i){
+            const LpLine *l=&u->lines[i];
+            if(!l->op||!(l->def&LP_Y)||lp_line_is(l,"ply"))continue;
+            if(!seen_tay&&lp_line_is(l,"tay")){
+                int prev=lp_next(u,i,-1);
+                if(prev>=0&&(lp_line_is(&u->lines[prev],"tsc")||lp_line_is(&u->lines[prev],"tcs"))){
+                    seen_tay=1;continue;
+                }
+            }
+            y_is_frame=0;break;
+        }
+    }
     for(i=0;i<u->count;++i)
         if(lp_line_is(&u->lines[i],"sep #$20")||lp_line_is(&u->lines[i],"rep #$20"))
             u->lines[i].use=0;
@@ -3511,20 +3553,27 @@ static int lp_register_values(LpUnit *u,Function *f,size_t at)
              * a predicate. Other labels may have an independent predecessor. */
             int fallthrough=known_targets&&!targets[i]&&lp_fallthrough_label(l);
             if((l->length==3&&!strncmp(l->text,".a8",3))||
-               (l->length==4&&!strncmp(l->text,".a16",4)))a[0]=0;
-            else if(!fallthrough&&l->length&&l->text[0]!=';'&&strncmp(l->text,".export",7))a[0]=x[0]=0;
+               (l->length==4&&!strncmp(l->text,".a16",4))){a[0]=0;a8[0]=0;}
+            else if(!fallthrough&&l->length&&l->text[0]!=';'&&strncmp(l->text,".export",7))a[0]=x[0]=a8[0]=0;
             continue;
         }
-        if(l->call||l->x8||l->use==LP_ALL){a[0]=x[0]=0;continue;}
+        if(l->call||l->x8||l->use==LP_ALL){a[0]=x[0]=a8[0]=0;continue;}
         if(l->m8||lp_line_is(l,"sep #$20")||lp_line_is(l,"rep #$20"))a[0]=0;
+        if(!l->m8||lp_line_is(l,"sep #$20")||lp_line_is(l,"rep #$20"))a8[0]=0;
         /* Y can become a promoted value/cursor. A frame operand's spelling
          * alone does not identify the same storage after its base changes. */
         if(l->def&LP_Y){
             if(a[0]&&a[strlen(a)-1]=='y')a[0]=0;
             if(x[0]&&x[strlen(x)-1]=='y')x[0]=0;
+            if(a8[0]&&a8[strlen(a8)-1]=='y')a8[0]=0;
         }
         if(a[0]&&(lp_may_write(l,a,strlen(a),2)||(a[strlen(a)-1]=='s'&&lp_stack_op(l))))a[0]=0;
-        if(x[0]&&(lp_may_write(l,x,strlen(x),2)||(x[strlen(x)-1]=='s'&&lp_stack_op(l))))x[0]=0;
+        if(x[0]&&(lp_x_store_may_write_slot(l,f,x,strlen(x),y_is_frame)||(x[strlen(x)-1]=='s'&&lp_stack_op(l))))x[0]=0;
+        if(a8[0]&&(lp_may_write(l,a8,strlen(a8),1)||(a8[strlen(a8)-1]=='s'&&lp_stack_op(l))))a8[0]=0;
+        if(load_a&&l->m8&&n<sizeof a8&&n&&(o[0]=='#'||lp_private(o,n))){
+            if(strlen(a8)==n&&!strncmp(a8,o,n)&&!(l->out&(LP_N|LP_Z))){l->deleted=1;++changed;continue;}
+            memcpy(a8,o,n);a8[n]=0;continue;
+        }
         if(((load_a&&!l->m8)||load_x)&&n<sizeof a&&n&&(o[0]=='#'||lp_private(o,n))){
             char *key=load_a?a:x;
             if(strlen(key)==n&&!strncmp(key,o,n)&&!(l->out&(LP_N|LP_Z))){l->deleted=1;++changed;continue;}
@@ -3538,10 +3587,13 @@ static int lp_register_values(LpUnit *u,Function *f,size_t at)
             }
             memcpy(key,o,n);key[n]=0;continue;
         }
+        if(lp_is(l,"sta")&&!l->m8&&n<sizeof a&&n&&lp_private(o,n)){memcpy(a,o,n);a[n]=0;continue;}
+        if(lp_is(l,"sta")&&l->m8&&n<sizeof a8&&n&&lp_private(o,n)){memcpy(a8,o,n);a8[n]=0;continue;}
+        if(lp_is(l,"stx")&&!l->x8&&n<sizeof x&&n&&lp_private(o,n)){memcpy(x,o,n);x[n]=0;continue;}
         if(lp_is(l,"tax")){memcpy(x,a,sizeof x);continue;}
         if(lp_is(l,"txa")){if(!l->m8)memcpy(a,x,sizeof a);continue;}
-        if(l->def&LP_A)a[0]=0;if(l->def&LP_X)x[0]=0;
-        if(l->ends)a[0]=x[0]=0;
+        if(l->def&(LP_A|LP_AL)){a[0]=0;a8[0]=0;}if(l->def&LP_X)x[0]=0;
+        if(l->ends)a[0]=x[0]=a8[0]=0;
     }
     free(targets);return changed;
 }
