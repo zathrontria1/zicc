@@ -18,6 +18,7 @@ static void region_home_liveness(Function *f,Statement *s,unsigned offset,int *i
  * region_loop: mapping (or, in the measuring trial, counting) is active only
  * there, after the copies in and before the copies out. */
 static Statement *region_loop;
+static Statement *region_initializers;
 static unsigned region_words[16],region_slots[16],region_count;
 static int region_in[16],region_out[16];
 static size_t region_begin,region_end;static int region_entered;
@@ -37,6 +38,12 @@ static void region_enter(Statement *s)
     if(region_count){
         code("; region direct-page homes: %u frame words\n",region_count);region_copy(1);
         cg.dp_homes=1;cg.dp_frameless=0;cg.dp_failed=0;
+        if(region_initializers){
+            Statement *previous=loop_previous,*current=loop_current;
+            code("; initialize promoted loop homes directly\n");
+            emit_statements(region_initializers);
+            loop_previous=previous;loop_current=current;
+        }
     }else cg.dp_trial=1;
 }
 static void region_exit(Statement *s)
@@ -220,12 +227,13 @@ static Symbol *loop_divmod_version(Statement *s)
        scalar_writes(s->body,plan.divisor)||scalar_writes_expr(s->expression,plan.divisor))return NULL;
     return plan.divisor;
 }
-static int emit_loop_statement(Statement *s)
+static int emit_region_loop(Statement *s,Statement *initializers)
 {
     Codegen *saved;size_t start=cg.length;unsigned taken=0,mapped=0,i,j,count=0,free_words[16],free_count=0,words,trips;
     static unsigned weight[384],order[384];int result;
     Function *f=cg.function;
     Symbol *divisor=loop_divmod_version(s);
+    if(initializers&&(divisor||cg.dot_count))return -1;
     if(divisor){
         unsigned wide=++cg.label,done=++cg.label;
         code("; loop version for invariant divmod divisor\n");
@@ -240,22 +248,22 @@ static int emit_loop_statement(Statement *s)
         cg.divmod_available=0;cg.divmod_version=NULL;cg.divmod_wide_version=0;
         label(done);return 1;
     }
-    if(far_sentinel_word_loop(s))return 1;
+    if(!initializers&&far_sentinel_word_loop(s))return 1;
     if(cg.parser->no_region_homes||cg.parser->no_dp_homes||region_loop||cg.dp_homes||cg.dp_trial||cg.stack_leaf||cg.scalar_leaf||
        cg.scalar_first||cg.leaf_count||cg.switch_depth||!f||f->symbol->interrupt||!f->slots||volatile_statement(s))
-        return bound_loop_statement(s);
+        return initializers?-1:bound_loop_statement(s);
     trips=region_trips(s); /* before any emission moves loop_current */
     saved=malloc(sizeof *saved);
     if(!saved){fputs("out of memory emitting assembly\n",stderr);exit(EXIT_FAILURE);}
     words=(f->slots+1)/2;if(words>384)words=384;
-    *saved=cg;region_loop=s;region_count=0;region_entered=0;
+    *saved=cg;region_loop=s;region_initializers=NULL;region_count=0;region_entered=0;
     memset(cg.dp_weight,0,sizeof cg.dp_weight);
     bound_loop_statement(s);cg.dp_trial=0;
     i=region_entered&&dp_scan_range(region_begin,region_end,&taken);memcpy(weight,cg.dp_weight,sizeof weight);
     {char *assembly=cg.assembly;size_t capacity=cg.capacity;
      cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=start;cg.assembly[start]=0;}
     region_loop=NULL;
-    if(!i){free(saved);return bound_loop_statement(s);}
+    if(!i){free(saved);return initializers?-1:bound_loop_statement(s);}
     for(i=0;i<16;++i)if(!(taken&(1u<<i)))free_words[free_count++]=i;
     /* A frame access inside a loop weighs 8 per nesting level, so weight/8
      * times the trip count estimates accesses per region entry. Each saves 12
@@ -264,25 +272,76 @@ static int emit_loop_statement(Statement *s)
         for(j=count;j&&weight[order[j-1]]<weight[i];--j)order[j]=order[j-1];
         order[j]=i;++count;
     }
-    if(!count||!free_count){free(saved);return bound_loop_statement(s);}
+    if(!count||!free_count){free(saved);return initializers?-1:bound_loop_statement(s);}
+    if(initializers)s->initial=initializers;
     memset(cg.dp_map,0,sizeof cg.dp_map);
     for(i=0;i<count&&i<free_count;++i){
         cg.dp_map[order[i]]=(unsigned char)(free_words[i]+1);mapped|=1u<<free_words[i];
         region_slots[i]=order[i];region_words[i]=free_words[i];
         region_home_liveness(f,s,order[i]*2+1,&region_in[i],&region_out[i]);
     }
+    if(initializers)s->initial=NULL;
+    if(initializers){
+        Statement *init;
+        for(init=initializers;init;init=init->next){
+            unsigned offset=init->expression->left->symbol->offset;
+            if(offset&&(offset&1)&&(offset-1)/2<words&&cg.dp_map[(offset-1)/2])break;
+        }
+        if(!init){
+            memcpy(cg.dp_map,saved->dp_map,sizeof cg.dp_map);
+            free(saved);
+            return -1;
+        }
+    }
     region_count=i;region_loop=s;region_entered=0;
+    region_initializers=initializers;
     cg.dp_words=words;cg.dp_failed=0;
     result=bound_loop_statement(s);
     i=region_entered&&!cg.dp_failed&&dp_scan_range(region_begin,region_end,&taken)&&!(taken&mapped);
-    cg.dp_homes=0;region_loop=NULL;
+    cg.dp_homes=0;region_loop=NULL;region_initializers=NULL;
 #ifdef REGION_DRYRUN
     i=0;
 #endif
     if(!i){
         {char *assembly=cg.assembly;size_t capacity=cg.capacity;
          cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=start;cg.assembly[start]=0;}
-        free(saved);region_count=0;return bound_loop_statement(s);
+        free(saved);region_count=0;return initializers?-1:bound_loop_statement(s);
     }
     region_count=0;free(saved);dp_resolve(region_begin);return result;
+}
+
+static int emit_loop_statement(Statement *s)
+{
+    return emit_region_loop(s,NULL);
+}
+
+/* A straight-line suffix of existing word initializers can write the
+ * promoted home on entry. If the region trial fails, emit the original
+ * statements with their ordinary frame homes */
+static int emit_region_initializers(Statement *first,Statement **loop)
+{
+    Statement copies[4],*s=first,*previous=loop_previous,*current=loop_current;
+    unsigned count=0;
+    int result;
+    if(region_loop||cg.dp_homes||cg.dp_trial||cg.parser->no_region_homes||
+       cg.parser->no_dp_homes||cg.parser->no_body_optimizations||
+       cg.parser->no_private_regions||cg.function->jump_label_count)return -1;
+    for(;s&&count<4;s=s->next){
+        Expr *set=plain_assignment(s),*target,*value;
+        if(!set||s->inline_callee)break;
+        target=set->left;value=set->right;
+        if(!body_private(target->symbol)||!word_integer(target->type)||
+           !word_integer(value->type)||(value->kind!=EX_INT&&value->kind!=EX_OBJECT)||
+           volatile_expression(set))break;
+        copies[count]=*s;
+        if(count)copies[count-1].next=&copies[count];
+        ++count;
+    }
+    if(!count||!s||s->kind!=ST_DO||s->initial||body_asm_statements(cg.function->body))return -1;
+    copies[count-1].next=NULL;
+    loop_current=s;
+    result=emit_region_loop(s,copies);
+    loop_previous=previous;loop_current=current;
+    if(result>=0)*loop=s;
+    return result;
 }

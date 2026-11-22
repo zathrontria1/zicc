@@ -139,6 +139,13 @@ static int indexed_available(IndexedOperand *operand)
 }
 static void indexed_index_mode(IndexedOperand *operand,int allow_y)
 {
+    if(allow_y&&!operand->reg&&cg.scaled_ring_head&&cg.loop_y_borrowed&&
+       operand->scale==1&&operand->index->kind==EX_OBJECT&&
+       operand->index->symbol==cg.scaled_ring_head){
+        code("    ldy %s\n",frame_operand(cg.scaled_ring_head->offset));
+        operand->reg='y';
+        return;
+    }
     if(operand->reg||indexed_retained(operand,allow_y)){
         code("; direct indexed operand: retained %c\n",operand->reg);return;
     }

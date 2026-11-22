@@ -56,6 +56,8 @@ typedef struct {
     BankVariant *banks[256];unsigned bank_count;
     int arithmetic,require_float_format,require_int64_format;
     Symbol *retained_index,*retained_second,*retained_ptr;unsigned retained_scale,retained_limit,retained_second_scale,retained_bias,retained_unroll;int retained_y,retained_scratch,retained_failed;
+    Symbol *scaled_ring_head,*scaled_ring_tail;
+    unsigned scaled_ring_x_guards,scaled_ring_x_tests;
     RetainedCursor retained_cursors[MAX_RETAINED_CURSORS];unsigned retained_cursor_count,retained_cursor_mask;
     Symbol *numeric_index,*numeric_recurrence;unsigned numeric_limit,numeric_scale,numeric_offset;
     unsigned interrupt_scratch;
@@ -2764,6 +2766,16 @@ static int word_compare_branch(Expr *e,unsigned yes,unsigned no,unsigned fallthr
     Type t=common_type(left->type,right->type);
     uint32_t mask,value;
     int sign=0;
+    if(cg.scaled_ring_tail&&(e->op==TOK_EQ||e->op==TOK_NE)&&
+       left->kind==EX_OBJECT&&right->kind==EX_OBJECT&&
+       ((left->symbol==cg.scaled_ring_head&&right->symbol==cg.scaled_ring_tail)||
+        (right->symbol==cg.scaled_ring_head&&left->symbol==cg.scaled_ring_tail))){
+        code("; retained scratch begin\n    cpx %s\n; retained scratch end\n",
+             frame_operand(cg.scaled_ring_head->offset));
+        ++cg.scaled_ring_x_tests;
+        flag_branch(e->op==TOK_EQ?"beq":"bne",e->op==TOK_EQ?"bne":"beq",yes,no,fallthrough);
+        return 1;
+    }
     if((e->op==TOK_EQ||e->op==TOK_NE)&&t.pointers&&!far_pointer(t)&&
        (compare_frame_pointer_offset(left,right)||compare_frame_pointer_offset(right,left))){
         flag_branch(e->op==TOK_EQ?"beq":"bne",e->op==TOK_EQ?"bne":"beq",yes,no,fallthrough);return 1;
@@ -6304,6 +6316,7 @@ static Statement *body_single(Statement *s);
 #include "switch.inc"
 #include "entry_cursors.inc"
 static int emit_loop_statement(Statement *s);
+static int emit_region_initializers(Statement *first,Statement **loop);
 static void bound_enter(void);
 static void bound_exit(void);
 static void region_enter(Statement *s);
@@ -6885,16 +6898,24 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
     unsigned reject=step?++cg.label:0,boundary=(unsigned)(65536-(g->max-g->min));
     GuardRingTail ring={0};
     int keep_x=guard_ring_tail(g,&ring);
+    int carried=keep_x&&ring.index==cg.scaled_ring_tail;
+    unsigned cold_done=carried?++cg.label:done;
+    unsigned cold_reject=carried&&step?++cg.label:reject;
     unsigned char copied[8];
     for(i=0;i<g->count;++i){
         fast[i]=++cg.label;cold[i]=++cg.label;tail[i]=++cg.label;
         copied[i]=(unsigned char)(keep_x||(i+1<g->count&&copy_cold_guard_tail(g->guards[i].tail)));
     }
+    if(carried){
+        ++cg.scaled_ring_x_guards;
+        code("; retained scratch begin\n");
+    }
     code("    tay\n    cmp #$%04X\n    bcc :+\n",boundary);
     jump(cold[0]);code(":\n");
     if(keep_x){
-        code("; keep scaled ring tail in X across guards\n    ldx %s\n    cpx #$%04X\n    bcs cg_%s_%u\n",
-             frame_operand(ring.index->offset),ring.limit,cg.parser->unit,cold[0]);
+        code("; keep scaled ring tail in X across guards\n");
+        if(!carried)code("    ldx %s\n",frame_operand(ring.index->offset));
+        code("    cpx #$%04X\n    bcs cg_%s_%u\n",ring.limit,cg.parser->unit,cold[0]);
     }
     code("    sep #$20\n.a8\n");
     if(step)emit_guard_increment(step,reject,(unsigned)-g->min,0);
@@ -6921,9 +6942,9 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
             }
             code("    sep #$20\n.a8\n");
         }else{
-            if(keep_x)code("    stx %s\n",frame_operand(ring.index->offset));
+            if(keep_x&&!carried)code("    stx %s\n",frame_operand(ring.index->offset));
             jump(done);label(skip);code(".a8\n    rep #$20\n.a16\n");
-            if(keep_x)code("    stx %s\n",frame_operand(ring.index->offset));
+            if(keep_x&&!carried)code("    stx %s\n",frame_operand(ring.index->offset));
             jump(done);
         }
     }
@@ -6931,7 +6952,8 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
         ByteGuard *guard=&g->guards[i];
         unsigned skip=++cg.label,offset=(unsigned)(g->delta[i]-g->min);
         label(cold[i]);
-        if(step&&!i){emit_guard_increment(step,reject,(unsigned)-g->min,1);code("    rep #$20\n.a16\n");}
+        if(carried&&!i)code("    stx %s\n",frame_operand(ring.index->offset));
+        if(step&&!i){emit_guard_increment(step,cold_reject,(unsigned)-g->min,1);code("    rep #$20\n.a16\n");}
         code("    tya\n");
         if(offset)code("    clc\n    adc #$%04X\n",offset);
         code("    tax\n    sep #$20\n.a8\n    lda a:0,x\n"
@@ -6941,15 +6963,30 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
         if(copied[i]){
             cg.divmod_available=0;
             if(guard->tail)emit_statements(guard->tail);
-            jump(i+1<g->count?cold[i+1]:done);
+            jump(i+1<g->count?cold[i+1]:cold_done);
         }else jump(tail[i]);
         label(skip);code(".a8\n    rep #$20\n.a16\n");
     }
-    if(step){
+    if(carried){
+        label(cold_done);
+        code("    ldx %s\n",frame_operand(ring.index->offset));
+        jump(done);
+    }
+    if(carried&&step){
+        unsigned resume=++cg.label;
+        label(cold_reject);
+        code(".a8\n    rep #$20\n.a16\n    ldx %s\n",frame_operand(ring.index->offset));
+        jump(resume);
+        label(reject);
+        code(".a8\n    rep #$20\n.a16\n");
+        label(resume);
+        emit_statements(step->test->body);
+    }else if(step){
         jump(done);label(reject);code(".a8\n    rep #$20\n.a16\n");
         emit_statements(step->test->body);
     }
     label(done);
+    if(carried)code("; retained scratch end\n");
 }
 
 static Statement *byte_guard_group(Statement *s)
@@ -8831,6 +8868,15 @@ static int emit_statements(Statement *s)
             if((byte_end=adjacent_bitfield_stores(s))!=NULL){s=byte_end;break;}
             if(!emit_statements(s->body))return 0;break;
         case ST_EXPR:
+            if(!cg.function->uses_wide){
+                Statement *loop;
+                int falls=emit_region_initializers(s,&loop);
+                if(falls>=0){
+                    if(!falls)return 0;
+                    s=loop;
+                    break;
+                }
+            }
             if(adjacent_widened_store(s)){s=s->next;break;}
             if(discarded_near_double(s->expression))break;
             if(wide_assignment_supported(s->expression)){emit_wide_assignment(s->expression,1);break;}
@@ -9308,6 +9354,77 @@ static int emit_guard_y_loop(Statement *s,int *result)
     return 1;
 }
 
+static Symbol *find_guard_ring_tail(Statement *s)
+{
+    for(;s;s=s->next){
+        ByteGuardGroup group;
+        GuardRingTail tail={0};
+        if(s->kind==ST_IF&&plan_byte_guard_group(s,&group)&&
+           fixed_guard_displacements(&group)&&guard_ring_tail(&group,&tail))return tail.index;
+        if(s->kind==ST_BLOCK){
+            Symbol *nested=find_guard_ring_tail(s->body);
+            if(nested)return nested;
+        }
+    }
+    return NULL;
+}
+
+static int carried_ring_home_unused(size_t start,const char *home)
+{
+    const char *line=cg.assembly+start;
+    int owned=0;
+    while(*line){
+        const char *end=strchr(line,'\n'),*use;
+        if(!end)end=line+strlen(line);
+        if(!strncmp(line,"; retained scratch begin\n",25))owned=1;
+        else if(!strncmp(line,"; retained scratch end\n",23))owned=0;
+        else if(!owned&&*line==' '&&(use=strstr(line,home))!=NULL&&use<end)return 0;
+        line=*end?end+1:end;
+    }
+    return 1;
+}
+
+/* Y addresses the popped element and its byte guards. X holds the tail
+ * until a wrapping path needs both registers. Validate the remaining loop
+ * before committing the binding, including all exits and continue edges */
+static int emit_carried_ring_loop(Statement *s,RingLoop *rings,int *result)
+{
+    Symbol *tail,*head;
+    Codegen *saved;
+    Statement *previous=loop_previous,*current=loop_current;
+    size_t start=cg.length,body;
+    unsigned slot,home;
+    char operand[32];
+    int kept;
+    if(rings->count!=2||cg.scaled_ring_tail||body_asm_statements(s->body)||
+       !(tail=find_guard_ring_tail(s->body)))return 0;
+    head=rings->rings[rings->rings[0].index==tail?1:0].index;
+    slot=(tail->offset-1)/2;
+    home=cg.dp_map[slot];
+    for(unsigned i=0;i<cg.dp_words;++i)if(i!=slot&&cg.dp_map[i]==home)return 0;
+    snprintf(operand,sizeof operand,"%s",frame_operand(tail->offset));
+    saved=allocate(sizeof *saved);
+    *saved=cg;
+    cg.scaled_ring_head=head;cg.scaled_ring_tail=tail;
+    cg.scaled_ring_x_guards=cg.scaled_ring_x_tests=0;
+    code("; keep scaled ring tail in X across loop\n    ldx %s\n",operand);
+    body=cg.length;
+    kept=emit_guard_y_loop(s,result)&&cg.scaled_ring_x_guards==1&&cg.scaled_ring_x_tests&&
+         retained_scan(body,cg.length,0,0)&&carried_ring_home_unused(body,operand);
+    loop_previous=previous;loop_current=current;
+    if(kept){
+        code("    stx %s\n",operand);
+        cg.scaled_ring_head=cg.scaled_ring_tail=NULL;
+        cg.scaled_ring_x_guards=cg.scaled_ring_x_tests=0;
+    }else{
+        char *assembly=cg.assembly;
+        size_t capacity=cg.capacity;
+        cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=start;cg.assembly[start]=0;
+    }
+    free(saved);
+    return kept;
+}
+
 static int emit_scaled_ring_loop(Statement *s,int *result)
 {
     RingLoop p={0};unsigned i;
@@ -9329,7 +9446,7 @@ static int emit_scaled_ring_loop(Statement *s,int *result)
         store_symbol(p.rings[i].index);
     }
     for(i=0;i<p.count;++i)cg.scaled_ring_indices[i]=p.rings[i].index;
-    if(!emit_guard_y_loop(s,result))*result=emit_loop_body(s,1);
+    if(!emit_carried_ring_loop(s,&p,result)&&!emit_guard_y_loop(s,result))*result=emit_loop_body(s,1);
     memset(cg.scaled_ring_indices,0,sizeof cg.scaled_ring_indices);
     for(i=0;i<p.count;++i){
         load_symbol(p.rings[i].index);

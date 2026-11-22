@@ -583,6 +583,9 @@ int main(void){
  ring_walk(6,7);
  if(ring_out_head!=1||ring_out_tail!=1||ring_sum!=13||
     ring_words[7]!=3||ring_words[0]!=6||ring_bytes[7]!=129||ring_bytes[10]!=129)return 128;
+ ring_bytes[7]=0;ring_bytes[8]=254;
+ ring_walk(6,7);
+ if(ring_out_head!=7||ring_out_tail!=7||ring_sum||ring_bytes[7]!=0)return 139;
 
  cursor_a[1]=10;cursor_a[2]=4;cursor_a[4]=9;cursor_a[5]=12;
  for(unsigned i=0;i<8;i++){cursor_b[i]=20+i;cursor_out[i]=0x8675;}
@@ -1004,6 +1007,7 @@ def main():
             assert 'borrow Y across near byte guard loop' in ring
             assert 'retained byte step and biased guard cursor' in ring and 'cmp #$FFF7' in ring
             assert 'keep scaled ring tail in X across guards' in ring
+            assert 'keep scaled ring tail in X across loop' in ring
             assert ring.count('    inx')>=8
             assert 'cpy #$FFF7' not in ring
             cursors=assemblies.split('_branched_cursors:',1)[1].split('__size_branched_cursors',1)[0]
