@@ -9083,6 +9083,7 @@ static void line_passes(Function *f,size_t at)
     while(lp_run(&runner,f,at,lp_reuse_frame_copies)){}
     lp_run(&runner,f,at,lp_schedule_entry_words);
     lp_run(&runner,f,at,lp_delay_guard_frame);
+    lp_run(&runner,f,at,lp_remove_stack_guard_frame);
     /* Arithmetic peepholes still need the original carry setup */
     while(lp_run(&runner,f,at,lp_carry_on_fallthrough)){}
 done:

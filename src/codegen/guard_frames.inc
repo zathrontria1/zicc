@@ -246,3 +246,115 @@ static int lp_delay_guard_frame(LpUnit *u,Function *f,size_t at)
     }
     return 0;
 }
+
+static int lp_stack_guard_operand(const LpLine *line)
+{
+    size_t n;
+    const char *p=lp_operand(line,&n);
+    char *end;
+    long value;
+    if(n>=5&&!memcmp(p+n-5,",s),y",5))return -1;
+    if(n<3||p[n-2]!=','||p[n-1]!='s')return 0;
+    value=strtol(p,&end,10);
+    return end==p+n-2&&value>0&&value<=255?(int)value:-1;
+}
+
+static int lp_stack_guard_epilogue(const LpUnit *u,int start,int frame)
+{
+    static const char *const ops[]={"tax","tsc","clc",NULL,"tcs","txa"};
+    int i=start;
+    for(unsigned j=0;j<sizeof ops/sizeof *ops;++j){
+        if(i<0||u->lines[i].m8||u->lines[i].x8)return -1;
+        if(ops[j]){
+            if(!lp_line_is(&u->lines[i],ops[j]))return -1;
+        }else if(!lp_is(&u->lines[i],"adc")||lp_immediate(&u->lines[i])!=frame)return -1;
+        i=lp_next(u,(unsigned)i,1);
+    }
+    if(i<0||!lp_line_is(&u->lines[i],cg.parser->long_return?"rtl":"rts"))return -1;
+    return i;
+}
+
+/* A word-returning guard can use direct-page homes until its first call.
+ * The slow call already has every argument in a register or on the stack.
+ * When the frame has no remaining users, it can be omitted on both paths */
+static int lp_remove_stack_guard_frame(LpUnit *u,Function *f,size_t at)
+{
+    int start=0,carry,sub,ready,frame,body,epilogue=-1,ret=-1;
+    int first_call=-1,rejects=0,slot=-1,changed=0;
+    int *depth;
+    unsigned occupied;
+    (void)at;
+    if(!cg.lp_word_result||!u->calls||u->indirect||cg.lp_volatile||cg.lp_frame_address||
+       cg.parser->no_private_regions||cg.parser->no_stack_frames||cg.parser->no_direct_dpage||
+       f->aggregate_abi||f->uses_varargs||f->symbol->interrupt||f->symbol->variadic||
+       f->jump_label_count||body_asm_statements(f->body)||!lp_fixed_workspace(u))return 0;
+    for(;start<(int)u->count;++start){
+        const LpLine *l=&u->lines[start];
+        size_t n;
+        const char *operand=lp_operand(l,&n);
+        if(l->op&&(!lp_is(l,"sta")||l->m8||lp_workspace_word(operand,n)<0))break;
+    }
+    if(start>=(int)u->count||!lp_line_is(&u->lines[start],"tsc"))return 0;
+    carry=lp_next(u,(unsigned)start,1);
+    sub=carry<0?-1:lp_next(u,(unsigned)carry,1);
+    ready=sub<0?-1:lp_next(u,(unsigned)sub,1);
+    if(ready<0||!lp_line_is(&u->lines[carry],"sec")||!lp_is(&u->lines[sub],"sbc")||
+       (frame=(int)lp_immediate(&u->lines[sub]))<2||frame>16||
+       u->lines[sub].m8||u->lines[sub].x8||!lp_line_is(&u->lines[ready],"tcs"))return 0;
+    body=ready+1;
+    for(int i=body;i<(int)u->count;++i){
+        const LpLine *l=&u->lines[i];
+        if(l->target>=0&&l->target<=i)return 0;
+        if(l->call&&first_call<0)first_call=i;
+        if(!l->label||strncmp(l->text,"return_",7))continue;
+        int op=i;
+        while(++op<(int)u->count&&!u->lines[op].op){}
+        if((ret=lp_stack_guard_epilogue(u,op,frame))<0)return 0;
+        epilogue=i;
+        break;
+    }
+    if(first_call<0||epilogue<=first_call)return 0;
+    for(int pred=u->lines[epilogue].first_incoming;pred>=0;pred=u->lines[pred].next_incoming)
+        if(pred>=body&&pred<first_call)++rejects;
+    if(!rejects)return 0;
+
+    lp_liveness(u);
+    if(u->lines[ready].out&(LP_A|LP_FLAGS))return 0;
+    occupied=lp_text_words(u->text,u->lines[u->count-1].text+u->lines[u->count-1].length);
+    unsigned words=(unsigned)(frame+1)/2;
+    for(unsigned i=0;i+words<=16;++i){
+        if(!(occupied&(((1u<<words)-1)<<i))){slot=(int)i*2;break;}
+    }
+    if(slot<0)return 0;
+    depth=allocate(u->count*sizeof *depth);
+    if(!lp_stack_depths_from(u,(unsigned)body,frame,depth))goto done;
+    for(int i=body;i<epilogue;++i){
+        const LpLine *l=&u->lines[i];
+        if(!l->op)continue;
+        if(depth[i]<frame||l->use==LP_ALL||l->x8||
+           lp_is(l,"tsc")||lp_is(l,"tsx")||lp_is(l,"tcs")||
+           (l->ends&&l->target<0)||l->target>epilogue)goto done;
+        int offset=lp_stack_guard_operand(l);
+        if(!offset)continue;
+        int local=offset-(depth[i]-frame),width=lp_width(l);
+        int return_bytes=cg.parser->long_return?3:2;
+        if(offset<0||
+           (local<=0&&local+width>1)||
+           (local>0&&local<=frame&&(i>=first_call||local+width-1>frame))||
+           (local>frame&&local<=frame+return_bytes))goto done;
+    }
+    lp_insert(&u->lines[body],"; direct-page homes for early return guards\n");
+    for(int i=start;i<=ready;++i)if(u->lines[i].op)u->lines[i].deleted=1;
+    for(int i=body;i<epilogue;++i){
+        LpLine *l=&u->lines[i];
+        int offset=lp_stack_guard_operand(l),local=offset-(depth[i]-frame);
+        if(offset<=0||local<=0)continue;
+        if(local<=frame)lp_set(l,"    %.3s z:__arith_lhs+%d",l->op,slot+local-1);
+        else lp_set(l,"    %.3s %d,s",l->op,offset-frame);
+    }
+    for(int i=epilogue+1;i<ret;++i)if(u->lines[i].op)u->lines[i].deleted=1;
+    changed=1;
+done:
+    free(depth);
+    return changed;
+}

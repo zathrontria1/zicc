@@ -369,6 +369,16 @@ __noinline unsigned far_pair(const struct FarPair * __far entries,unsigned index
  if(read_left)left=entries[index].left;
  return left+entries[index].right;
 }
+static unsigned gate_x,gate_y,gate_span_x,gate_span_y;
+extern unsigned gate_calls;
+_Bool gate_probe(unsigned,unsigned,unsigned,unsigned);
+__noinline _Bool guarded_word_result(unsigned x,unsigned y,unsigned w,unsigned h) {
+ unsigned last_x=w-1,last_y=h-1,span_x=gate_span_x,span_y=gate_span_y;
+ if(span_x<=(unsigned)(65535U-last_x)&&(unsigned)(x+last_x-gate_x)>(unsigned)(span_x+last_x))return 0;
+ if(span_y<=(unsigned)(65535U-last_y)&&(unsigned)(y+last_y-gate_y)>(unsigned)(span_y+last_y))return 0;
+ return gate_probe(x,y,w,h);
+}
+
 struct SpriteStyle { unsigned offset, reverse_offset, top, attr; };
 struct SpriteItem {
  unsigned x,y,index,direction,out,attr;
@@ -598,6 +608,12 @@ int main(void){
  if(!near_origin_copy(copy_target,0xfff7))return 136;
  for(unsigned i=0;i<16;i++)if(copy_target[i]!=i+77)return 137;
 
+ gate_x=100;gate_y=200;gate_span_x=5;gate_span_y=6;
+ if(guarded_word_result(128,204,8,10)||guarded_word_result(104,228,8,10)||gate_calls)return 131;
+ if(!guarded_word_result(104,204,8,10)||gate_calls!=1)return 132;
+ gate_span_x=65535U;
+ if(guarded_word_result(60000,204,8,10)||gate_calls!=2)return 133;
+
  sprite_origin_x=4;sprite_origin_y=7;
  sprite_item.x=160;sprite_item.y=240;sprite_item.index=4;
  sprite_item.style=styles;sprite_item.direction=2;
@@ -653,6 +669,11 @@ struct SpriteItem {
 };
 void hide_sprite(struct SpriteItem *p) { p->out=0xffff; }
 void clear_style(struct SpriteItem *p) { p->attr=0; }
+unsigned gate_calls;
+_Bool gate_probe(unsigned x,unsigned y,unsigned w,unsigned h) {
+ gate_calls++;
+ return x==104&&y==204&&w==8&&h==10;
+}
 unsigned frame_calls;
 unsigned frame_probe(unsigned x,unsigned y,unsigned w,unsigned h) {
  frame_calls++;
@@ -991,6 +1012,9 @@ def main():
             far=assemblies.split('_far_pair:',1)[1].split('__size_far_pair',1)[0]
             assert far.count('    rol z:')==2
             assert re.search(r'lda \[([^\]]+)\]\n.*\n(?:.*\n)*?    lda \[\1\],y',far)
+            guarded_result=assemblies.split('_guarded_word_result:',1)[1].split('__size_guarded_word_result',1)[0]
+            assert 'direct-page homes for early return guards' in guarded_result
+            assert '    tcs' not in guarded_result and 'jsr .loword(_gate_probe)' in guarded_result
             near_copy=assemblies.split('_near_origin_copy:',1)[1].split('__size_near_origin_copy',1)[0]
             assert 'mvn #$7E, #$7E' in near_copy and 'jsr .loword(_memcpy)' in near_copy
             draw=assemblies.split('_place_sprite:',1)[1].split('__size_place_sprite',1)[0]
