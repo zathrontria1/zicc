@@ -69,11 +69,13 @@ static int selection_bit(Expr *e)
     if(!yes)code("    eor #1\n");
     return 1;
 }
+static int selection_saturating_sub(Expr *e,int byte_target);
 static int selection_value(Expr *e)
 {
     int a,b;
     if(cg.parser->no_body_optimizations)return 0;
     if(!cg.parser->no_strength_reduction&&selection_bit(e))return 1;
+    if(selection_saturating_sub(e,0))return 1;
     if(selection_minmax(e,&a)){selection_emit(e,a);return 1;}
     if(e->kind!=EX_BINARY||e->op!='-'||!word_integer(e->type)||
        !selection_minmax(e->left,&a)||!selection_minmax(e->right,&b))return 0;
