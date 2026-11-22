@@ -6852,6 +6852,53 @@ static int lp_fixed_workspace(const LpUnit *u)
 
 /* A register argument already spilled in the opposite operand order can feed
  * a commutative add directly. Later DSE removes the unused A spill. */
+static int lp_direct_rhs_operand(LpUnit *u,Function *f,size_t at)
+{
+    (void)f;(void)at;
+    if(u->indirect||cg.parser->no_value_reuse||!lp_fixed_workspace(u))return 0;
+    for(unsigned i=0;i<u->count;++i){
+        LpLine *load=&u->lines[i];
+        int save,lhs,alu,next;
+        size_t n,m;
+        const char *src,*lhs_op;
+        if(load->deleted||load->replace||!lp_is(load,"lda")||load->m8)continue;
+        src=lp_operand(load,&n);
+        if(!n||memchr(src,'(',n)||memchr(src,'[',n)||(n>=2&&src[n-2]==','&&src[n-1]=='x'))continue;
+        if(!lp_private(src,n)&&(cg.lp_volatile||n<13||strncmp(src,"a:.loword(_",11)||!pr_named(src,n)))continue;
+        if(lp_workspace_word(src,n)==16)continue; /* z:__arith_rhs */
+        save=lp_next(u,i,1);
+        if(save<0||!lp_line_is(&u->lines[save],"sta z:__arith_rhs")||u->lines[save].m8)continue;
+        lhs=lp_next(u,(unsigned)save,1);
+        if(lhs<0||!lp_is(&u->lines[lhs],"lda")||u->lines[lhs].m8)continue;
+        lhs_op=lp_operand(&u->lines[lhs],&m);
+        if(lp_workspace_word(lhs_op,m)==16)continue;
+        next=lp_next(u,(unsigned)lhs,1);
+        if(next>=0&&(lp_line_is(&u->lines[next],"clc")||lp_line_is(&u->lines[next],"sec")))
+            alu=lp_next(u,(unsigned)next,1);
+        else alu=next;
+        if(alu<0||u->lines[alu].m8||!lp_line_is(&u->lines[alu],"adc z:__arith_rhs")&&
+           !lp_line_is(&u->lines[alu],"sbc z:__arith_rhs")&&!lp_line_is(&u->lines[alu],"and z:__arith_rhs")&&
+           !lp_line_is(&u->lines[alu],"ora z:__arith_rhs")&&!lp_line_is(&u->lines[alu],"eor z:__arith_rhs")&&
+           !lp_line_is(&u->lines[alu],"cmp z:__arith_rhs"))continue;
+        /* Ensure z:__arith_rhs is not read after alu before being overwritten */
+        int k=lp_next(u,(unsigned)alu,1),dead_rhs=0;
+        for(;k>=0;k=lp_next(u,(unsigned)k,1)){
+            LpLine *cur=&u->lines[k];
+            size_t cn;const char *co=lp_operand(cur,&cn);
+            if(lp_workspace_word(co,cn)==16){
+                if(lp_is(cur,"sta")||lp_is(cur,"stx")||lp_is(cur,"sty")||lp_is(cur,"stz"))dead_rhs=1;
+                break;
+            }
+            if(cur->ends||lp_branch(cur)||cur->call||cur->use==LP_ALL)break;
+        }
+        if(k<0||lp_line_is(&u->lines[k],"rts")||lp_line_is(&u->lines[k],"rtl"))dead_rhs=1;
+        if(!dead_rhs)continue;
+        lp_set(&u->lines[alu],"    %.3s %.*s",u->lines[alu].op,(int)n,src);
+        load->deleted=u->lines[save].deleted=1;
+        return 1;
+    }
+    return 0;
+}
 static int lp_commute_spilled_add(LpUnit *u,Function *f,size_t at)
 {
     (void)f;(void)at;
@@ -8702,6 +8749,7 @@ static void line_passes(Function *f,size_t at)
     lp_run(&runner,f,at,lp_reuse_clear_carry);
     while(lp_run(&runner,f,at,lp_redundant_y_offset)){}
     lp_run(&runner,f,at,lp_commute_spilled_add);
+    while(lp_run(&runner,f,at,lp_direct_rhs_operand)){}
     lp_run(&runner,f,at,lp_drop_dead_workspace_stores);
     lp_run(&runner,f,at,lp_scaled_word_latch);
     while(lp_run(&runner,f,at,lp_rmw_reload)){}
