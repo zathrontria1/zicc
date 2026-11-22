@@ -69,6 +69,14 @@ static int shared_adjusted_members(Expr *e)
          step->op=='+'?"inc":"dec",e->op=='+'?"clc":"sec",e->op=='+'?"adc":"sbc",ro);
     return 1;
 }
+static int shared_word_member(Expr *e,Expr *member)
+{
+    while(e!=member){
+        if(!e||e->kind!=EX_CAST||!word_integer(e->type))return 0;
+        e=e->left;
+    }
+    return word_integer(member->type);
+}
 static int shared_element_binary(Expr *e)
 {
     Expr *left,*right,*a,*b;Type t;unsigned lo,ro,unused;int word_left,word_right,swap;
@@ -79,6 +87,16 @@ static int shared_element_binary(Expr *e)
     if(fixed_memory_object(left,&unused)&&fixed_memory_object(right,&unused))return 0;
     t=binary_operands(e->left,e->right,e->op);
     if(t.pointers||t.base==TY_FLOAT)return 0;
+    if(!far_pointer(value_type(a->type))&&!volatile_expression(e)&&reg_width(t)==2&&!t.pointers&&
+       t.base==TY_INT&&(e->op=='+'||e->op=='-'||e->op=='&'||e->op=='|'||e->op=='^')&&
+       lo<=65534&&ro<=65534&&shared_word_member(e->left,left)&&shared_word_member(e->right,right)){
+        const char *op=e->op=='+'?"adc":e->op=='-'?"sbc":e->op=='&'?"and":e->op=='|'?"ora":"eor";
+        code("; shared element address\n");emit_value_x(a);
+        code("    lda a:$%04X,x\n",lo);
+        if(e->op=='+')code("    clc\n");else if(e->op=='-')code("    sec\n");
+        code("    %s a:$%04X,x\n",op,ro);
+        return 1;
+    }
     word_left=e->op=='*'&&t.base==TY_LONG&&widened_word(e->left)!=NULL;
     word_right=e->op=='*'&&t.base==TY_LONG&&widened_word(e->right)!=NULL;
     swap=word_right&&!word_left;
