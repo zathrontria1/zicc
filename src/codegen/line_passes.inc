@@ -4829,6 +4829,14 @@ static int lp_first_parameter_in_x(LpUnit *u,unsigned call)
 }
 /* A void wrapper can restore a short push-only frame before transferring
  * to a register-argument callee. Pull through Y so X and A still hold args. */
+static int lp_tail_return_compatible(Type caller,Type callee)
+{
+    if(caller.base==TY_VOID&&!caller.pointers)return !structure_object(callee);
+    return !structure_object(caller)&&!structure_object(callee)&&
+        (callee.base!=TY_VOID||callee.pointers)&&reg_width(caller)==reg_width(callee)&&
+        reg_width(caller)<=4&&width(caller)==width(callee)&&caller.is_bool==callee.is_bool&&
+        (width(caller)!=1||caller.is_bool||caller.is_unsigned==callee.is_unsigned);
+}
 static int lp_tail_wrapper(LpUnit *u,Function *f,size_t at)
 {
     unsigned first=0,i;
@@ -4837,7 +4845,7 @@ static int lp_tail_wrapper(LpUnit *u,Function *f,size_t at)
     int changed=0,*depths,saved_y,known_depths;
     (void)at;
     if(u->indirect||f->symbol->interrupt||frame_address_visible(f->body)||
-       f->symbol->type.base!=TY_VOID||f->symbol->type.pointers)return 0;
+       f->aggregate_abi||structure_object(f->symbol->type)||reg_width(f->symbol->type)>4)return 0;
     while(first<u->count&&!u->lines[first].op)++first;
     if(first==u->count||u->lines[first].x8)return 0;
     saved_y=lp_line_is(&u->lines[first],"phy");
@@ -4858,7 +4866,8 @@ static int lp_tail_wrapper(LpUnit *u,Function *f,size_t at)
         name=lp_operand(call,&length);
         if(!long_return&&(length<=9||strncmp(name,".loword(",8)||name[length-1]!=')'))continue;
         callee=lp_callee(call);
-        if(!callee||callee->variadic||callee->param_count<0)continue;
+        if(!callee||callee->variadic||callee->param_count<0||
+           !lp_tail_return_compatible(f->symbol->type,callee->type))continue;
         for(j=0;j<(unsigned)callee->param_count&&register_parameter(j,callee->params[j]);++j){}
         if(j!=(unsigned)callee->param_count)continue;
         k=(int)i+1;

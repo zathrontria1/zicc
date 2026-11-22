@@ -503,7 +503,7 @@ def main():
             assert 'lda a:.loword(_volatile_guard)' in discarded
             literal=body('conditional_literal_guard')
             assert ('inlined call: conditional_literal_guard literal_guard' in literal)==(mode=='automatic'),literal
-            assert ('jsr .loword(_literal_guard)' in literal)==(mode=='disabled'),literal
+            assert (('jsr .loword(_literal_guard)' in literal) or ('jmp .loword(_literal_guard)' in literal))==(mode=='disabled'),literal
             assert '.export _literal_guard' in assembly
             assert 'jsr .loword(_forced_attribute)' not in body('test_suite')
             assert 'jsr .loword(_blocked_alias)' in body('test_suite')

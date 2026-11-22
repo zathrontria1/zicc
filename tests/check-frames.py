@@ -284,7 +284,7 @@ def worker(args):
             assert 'lda a:$0003,y' in body(name), body(name)
         # The result remains in A; its private store may be dead. A retained
         # reload must use that same home before the return
-        assert re.search(r'jsr \.loword\(_identity\)\s+(?:sta a:\$0003,y\s+(?:lda a:\$0003,y\s+)?)?(?:;[^\n]*\s+)*return_call_result',
+        assert re.search(r'(?:jsr|jmp) \.loword\(_identity\)\s+(?:sta a:\$0003,y\s+(?:lda a:\$0003,y\s+)?)?(?:;[^\n]*\s+)*return_call_result',
                          body('call_result')),body('call_result')
         # The copy in after_call may disappear, but clobber() still invalidates
         # A. Require an actual reload/restore afterward, from the copy, input home, or stack save
