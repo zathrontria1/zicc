@@ -30,25 +30,34 @@ static int fr_release(LpUnit *u, FrHome *homes, unsigned i, unsigned size)
         !lp_is(&u->lines[add], "adc") || lp_immediate(&u->lines[add]) != (long)size ||
         !lp_line_is(&u->lines[tcs], "tcs"))
         return 0;
+
     ret = after;
     save = -1;
+
     if (lp_line_is(&u->lines[after], "txa")) {
         save = lp_next(u, i, -1);
+
         if (save < 0 || !lp_line_is(&u->lines[save], "tax") || u->lines[save].m8)
             return 0;
+
         ret = lp_next(u, (unsigned)after, 1);
     }
+
     if (ret < 0 || !lp_line_is(&u->lines[ret], "ply") || (lp_state.value_result && save < 0))
         return 0;
+
     {
         int end = lp_next(u, (unsigned)ret, 1);
+
         if (end < 0 || (!lp_line_is(&u->lines[end], "rts") && !lp_line_is(&u->lines[end], "rtl")))
             return 0;
     }
     homes[i].erase = homes[clc].erase = homes[add].erase = homes[tcs].erase = 1;
     homes[ret].erase = 2;
+
     if (save >= 0)
         homes[save].erase = homes[after].erase = 1;
+
     return 1;
 }
 
@@ -59,9 +68,12 @@ static int lp_call_frame_homes(LpUnit *u, Function *f, size_t at)
     LpUnit virtual_unit = *u;
     int phy = -1, setup[5], *depth, keep = -1, ok = 0, again, releases = 0;
     long size;
+
     unsigned i, j, used, mapped[12], references = 0;
     uint32_t across = 0;
+
     (void)at;
+
     if (lp_state.parser->no_dp_homes || lp_state.parser->no_stack_frames ||
         lp_state.parser->no_private_regions || lp_state.is_volatile || u->indirect || !u->calls ||
         reg_width(f->symbol->type) > 2 || !strcmp(f->symbol->name, "main"))
@@ -69,12 +81,14 @@ static int lp_call_frame_homes(LpUnit *u, Function *f, size_t at)
 
     for (i = 0; i < lp_state.parser->symbol_count; ++i) {
         Symbol *v = &lp_state.parser->symbols[i];
+
         if (v->owner == f->id && v->offset && loop_escapes(f->body, v))
             return 0;
     }
 
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (lp_line_is(l, "phy")) {
             phy = (int)i;
             break;
@@ -82,16 +96,21 @@ static int lp_call_frame_homes(LpUnit *u, Function *f, size_t at)
         if (l->call || lp_branch(l) || l->ends || lp_stack_op(l) || (l->use | l->def) & LP_Y)
             return 0;
     }
+
     if (phy < 0 || u->lines[phy].x8 || u->lines[phy].m8)
         return 0;
+
     setup[0] = lp_next(u, (unsigned)phy, 1);
 
-    for (i = 1; i < 5 && setup[i - 1] >= 0; ++i)
+    for (i = 1; i < 5 && setup[i - 1] >= 0; ++i) {
         setup[i] = lp_next(u, (unsigned)setup[i - 1], 1);
+    }
 
-    for (i = 0; i < 5; ++i)
+    for (i = 0; i < 5; ++i) {
         if (setup[i] < 0)
             return 0;
+    }
+
     if (!lp_line_is(&u->lines[setup[0]], "tsc") || !lp_line_is(&u->lines[setup[1]], "sec") ||
         !lp_is(&u->lines[setup[2]], "sbc") || (size = lp_immediate(&u->lines[setup[2]])) <= 0 ||
         size > 24 || (size & 1) || !lp_line_is(&u->lines[setup[3]], "tcs") ||
@@ -100,73 +119,94 @@ static int lp_call_frame_homes(LpUnit *u, Function *f, size_t at)
 
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (lp_line_is(l, "sep #$20") || lp_line_is(l, "rep #$20"))
             l->use = 0;
         if (l->target >= 0 && l->target <= setup[4])
             return 0;
     }
+
     lp_liveness(u);
+
     if (u->lines[setup[4]].out & (LP_A | LP_FLAGS))
         return 0;
+
     homes = allocate(u->count * sizeof *homes);
     depth = allocate(u->count * sizeof *depth);
     copy = allocate(u->count * sizeof *copy);
 
-    for (i = 0; i < 5; ++i)
+    for (i = 0; i < 5; ++i) {
         homes[setup[i]].erase = 1;
+    }
 
     for (i = (unsigned)setup[4] + 1; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (!l->op || homes[i].erase)
             continue;
         if (lp_line_is(l, "tya")) {
             if (!fr_release(u, homes, i, (unsigned)size))
                 goto done;
+
             ++releases;
             continue;
         }
         if (lp_is(l, "rts") || lp_is(l, "rtl")) {
             int prev = lp_next(u, i, -1);
+
             if (prev < 0 || homes[prev].erase != 2)
                 goto done;
+
             continue;
         }
         if (l->call) {
             Symbol *callee = lp_callee(l);
+
             if (l->ends || l->x8 || l->m8 || !callee || callee->interrupt)
                 goto done;
+
             continue;
         }
         if (l->x8 || l->use == LP_ALL || lp_is(l, "tsc") || lp_is(l, "tsx") || lp_is(l, "phy") ||
             lp_is(l, "ply") || lp_is(l, "tcd") || lp_is(l, "pld") || lp_is(l, "plb") ||
             (n >= 2 && p[n - 2] == ',' && p[n - 1] == 's'))
             goto done;
+
         if (n == 9 && !strncmp(p, "a:$", 3) && p[7] == ',' && p[8] == 'y') {
             char *end;
+
             unsigned off = (unsigned)strtoul(p + 3, &end, 16), width = (unsigned)lp_width(l);
             uint32_t mask;
+
             if (end != p + 7 || !off || !fr_dp_operand(l) || width > 2)
                 goto done;
+
             homes[i].offset = (int)off;
+
             if (off > (unsigned)size) {
                 if (off < (unsigned)size + 5u + (unsigned)lp_state.parser->long_return ||
                     !lp_accumulator_memory(l))
                     goto done;
+
                 continue;
             }
             if (off + width - 1 > (unsigned)size || ((off - 1) & 1) + width > 2)
                 goto done;
+
             mask = ((1u << width) - 1) << (off - 1);
+
             if (lp_store_op(l))
                 homes[i].def = mask;
             if (!fr_store(l))
                 homes[i].use = mask;
+
             references |= 1u << ((off - 1) / 2);
         } else if ((l->use | l->def) & LP_Y)
             goto done;
     }
+
     if (!references || !releases)
         goto done;
 
@@ -174,61 +214,80 @@ static int lp_call_frame_homes(LpUnit *u, Function *f, size_t at)
      * their next write on some successor path must stay in a saved home. */
     do {
         again = 0;
+
         for (i = u->count; i-- > 0;) {
             LpLine *l = &u->lines[i];
             uint32_t out = i + 1 < u->count && !l->ends ? homes[i + 1].live : 0, live;
+
             if (l->target >= 0)
                 out |= homes[l->target].live;
+
             live = homes[i].use | (out & ~homes[i].def);
+
             if (live != homes[i].live || out != homes[i].out)
                 again = 1;
+
             homes[i].live = live;
             homes[i].out = out;
         }
     } while (again);
+
     if (homes[0].live)
         goto done;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (u->lines[i].call)
             across |= homes[i].out;
+    }
 
-    for (i = 0; i < (unsigned)size / 2; ++i)
+    for (i = 0; i < (unsigned)size / 2; ++i) {
         if (across & (3u << (2 * i))) {
             if (keep >= 0)
                 goto done;
+
             keep = (int)i;
         }
+    }
+
     used = lp_text_words(u->text, u->text + strlen(u->text));
 
-    for (i = 0, j = 0; i < (unsigned)size / 2; ++i)
+    for (i = 0, j = 0; i < (unsigned)size / 2; ++i) {
         if ((references & (1u << i)) && (int)i != keep) {
-            while (j < 16 && (used & (1u << j)))
+            while (j < 16 && (used & (1u << j))) {
                 ++j;
+            }
+
             if (j == 16)
                 goto done;
+
             mapped[i] = 2 * j++;
         }
+    }
 
     /* Recompute stack depths without frame allocation. Argument pushes and
      * their cleanup remain, as does the saved Y when it holds a live word. */
     memcpy(copy, u->lines, u->count * sizeof *copy);
     virtual_unit.lines = copy;
+
     if (keep < 0)
         homes[phy].erase = 2;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (homes[i].erase == 1 || (homes[i].erase == 2 && keep < 0))
             copy[i].op = NULL;
+    }
+
     if (!lp_stack_depths(&virtual_unit, 0, depth))
         goto done;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (homes[i].offset) {
             int offset = homes[i].offset;
             LpLine *l = &u->lines[i];
+
             if (offset > size) {
                 int incoming = offset - (int)size - 2 + depth[i];
+
                 if (depth[i] < 0 || incoming < 1 || incoming > 255)
                     goto done;
             } else if ((offset - 1) / 2 == keep) {
@@ -239,14 +298,17 @@ static int lp_call_frame_homes(LpUnit *u, Function *f, size_t at)
                     goto done;
             }
         }
+    }
 
     for (i = 0; i < u->count; ++i) {
         int offset = homes[i].offset;
         LpLine *l = &u->lines[i];
+
         if (homes[i].erase == 1 || (homes[i].erase == 2 && keep < 0))
             l->deleted = 1;
         if (!offset)
             continue;
+
         if (offset > size)
             lp_set(l, "    %.3s %d,s", l->op, offset - (int)size - 2 + depth[i]);
         else if ((offset - 1) / 2 == keep)
@@ -259,6 +321,7 @@ static int lp_call_frame_homes(LpUnit *u, Function *f, size_t at)
             lp_set(l, "    %.3s z:__arith_lhs+%u", l->op,
                    mapped[(offset - 1) / 2] + ((offset - 1) & 1));
     }
+
     lp_mark_arithmetic();
     ok = 1;
 done:
@@ -274,6 +337,7 @@ done:
 static int lp_late_call_save(LpUnit *u, Function *f, size_t at)
 {
     int save = -1, transfer = -1, call = -1, push = -1, restore = -1, last = -1, *depth;
+
     unsigned i;
     (void)f;
     (void)at;
@@ -283,6 +347,7 @@ static int lp_late_call_save(LpUnit *u, Function *f, size_t at)
 
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (!l->op)
             continue;
         if (l->x8 || lp_is(l, "tsc") || lp_is(l, "tsx"))
@@ -291,61 +356,80 @@ static int lp_late_call_save(LpUnit *u, Function *f, size_t at)
             l->use = 0;
         if (l->use == LP_ALL)
             return 0;
+
         if (lp_line_is(l, "phy")) {
             if (save >= 0)
                 return 0;
+
             save = (int)i;
             transfer = lp_next(u, i, 1);
+
             if (transfer < 0 || !lp_line_is(&u->lines[transfer], "txy"))
                 return 0;
         } else if ((int)i == transfer)
             continue;
         else if (l->call) {
             Symbol *callee = lp_callee(l);
+
             if (save < 0 || l->ends || !callee || callee->interrupt)
                 return 0;
+
             call = (int)i;
         } else if (lp_line_is(l, "tyx")) {
             if (call < 0)
                 return 0;
+
             last = (int)i;
         } else if (lp_line_is(l, "ply")) {
             int ret = lp_next(u, i, 1);
+
             if (save < 0 || ret < 0 ||
                 (!lp_is(&u->lines[ret], "rts") && !lp_is(&u->lines[ret], "rtl")))
                 return 0;
         } else if (lp_is(l, "rts") || lp_is(l, "rtl")) {
             int prev = lp_next(u, i, -1);
+
             if (prev < 0 || !lp_line_is(&u->lines[prev], "ply"))
                 return 0;
         } else if ((l->use | l->def) & LP_Y)
             return 0;
     }
+
     if (last < 0)
         return 0;
 
     for (i = (unsigned)transfer + 1; i <= (unsigned)call; ++i) {
         LpLine *l = &u->lines[i];
+
         if (lp_stack_op(l)) {
             if ((int)i != call && !lp_is(l, "pha") && !lp_is(l, "phx") && !lp_is(l, "pea") &&
                 !lp_is(l, "pei"))
                 return 0;
+
             push = (int)i;
             break;
         }
+
         if (l->def & LP_X)
             return 0;
     }
+
     depth = allocate(u->count * sizeof *depth);
+
     if (!lp_stack_depths(u, 0, depth) || depth[push] != 2 || depth[call] < 2)
         goto fail;
+
     restore = lp_next(u, (unsigned)call, 1);
 
-    while (restore >= 0 && depth[restore] > 2)
+    while (restore >= 0 && depth[restore] > 2) {
         restore = lp_next(u, (unsigned)restore, 1);
+    }
+
     if (restore < 0 || restore > last || depth[restore] != 2)
         goto fail;
+
     lp_liveness(u);
+
     if (u->lines[restore].live & (LP_X | LP_N | LP_Z))
         goto fail;
 
@@ -353,6 +437,7 @@ static int lp_late_call_save(LpUnit *u, Function *f, size_t at)
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (l->target >= 0 &&
             (l->target <= transfer || ((int)i >= push && l->target <= push) ||
              (l->target >= push && l->target < restore) ||
@@ -360,6 +445,7 @@ static int lp_late_call_save(LpUnit *u, Function *f, size_t at)
             goto fail;
         if ((int)i >= push && (int)i < restore && (lp_branch(l) || l->ends || l->label))
             goto fail;
+
         if ((int)i >= restore && (int)i <= last) {
             if (lp_is(l, "tyx")) {
                 if (l->out & (LP_N | LP_Z))
@@ -367,9 +453,11 @@ static int lp_late_call_save(LpUnit *u, Function *f, size_t at)
             } else if (l->def & LP_X)
                 goto fail;
         }
+
         if (n >= 2 && p[n - 2] == ',' && p[n - 1] == 's') {
             char *end;
             long offset = strtol(p, &end, 10);
+
             if (end != p + n - 2 || !lp_accumulator_memory(l) || depth[i] < 2 || offset <= depth[i])
                 goto fail;
         }
@@ -379,11 +467,13 @@ static int lp_late_call_save(LpUnit *u, Function *f, size_t at)
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if ((int)i == save || (int)i == transfer || lp_is(l, "ply") || lp_is(l, "tyx"))
             l->deleted = 1;
         if (((int)i < push || (int)i >= restore) && n >= 2 && p[n - 2] == ',' && p[n - 1] == 's')
             lp_set(l, "    %.3s %ld,s", l->op, strtol(p, NULL, 10) - 2);
     }
+
     lp_insert(&u->lines[push], "    phx\n");
     lp_insert(&u->lines[restore], "    plx\n");
     free(depth);
@@ -409,27 +499,36 @@ static int lp_commute_saved_word(LpUnit *u, Function *f, size_t at)
         int j, k;
         size_t n, m;
         const char *slot = lp_operand(s, &n), *source;
+
         if (!lp_is(s, "sta") || s->m8 || lp_workspace_word(slot, n) < 0 ||
             (j = lp_next(u, i, 1)) < 0)
             continue;
+
         load = &u->lines[j];
         source = lp_operand(load, &m);
+
         if (!lp_is(load, "lda") || load->m8 || !m || (k = lp_next(u, (unsigned)j, 1)) < 0)
             continue;
+
         if (lp_line_is(&u->lines[k], "clc")) {
             k = lp_next(u, (unsigned)k, 1);
+
             if (k < 0 || !lp_is(&u->lines[k], "adc"))
                 continue;
         } else if (!lp_is(&u->lines[k], "and") && !lp_is(&u->lines[k], "ora") &&
                    !lp_is(&u->lines[k], "eor"))
             continue;
+
         op = &u->lines[k];
+
         if (op->m8 || !lp_operand_is(op, slot, n))
             continue;
+
         lp_set(op, "    %.3s %.*s", op->op, (int)m, source);
         load->deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -443,20 +542,25 @@ static int lp_forward_named_word(LpUnit *u, Function *f, size_t at)
 
     if (lp_state.parser->no_private_regions || lp_state.is_volatile || u->helpers || u->indirect)
         return 0;
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
         LpLine *load = &u->lines[i];
         int store, word, refs[2], count = 0, valid = 1;
+
         unsigned j, limit;
         size_t n, m;
         const char *name = lp_operand(load, &n), *slot;
+
         if (!lp_is(load, "lda") || load->m8 || !pr_named(name, n) || memchr(name, ',', n) ||
             (store = lp_next(u, i, 1)) < 0 || !lp_is(&u->lines[store], "sta") ||
             u->lines[store].m8 || (u->lines[store].out & (LP_A | LP_N | LP_Z)))
             continue;
+
         slot = lp_operand(&u->lines[store], &m);
         word = lp_workspace_word(slot, m);
+
         if (word < 0 || (word & 1))
             continue;
 
@@ -466,6 +570,7 @@ static int lp_forward_named_word(LpUnit *u, Function *f, size_t at)
             LpLine *l = &u->lines[limit];
             size_t len;
             const char *operand = lp_operand(l, &len);
+
             if (l->label && !lp_inner_label(u, limit, i, limit))
                 break;
             if (!l->op)
@@ -475,20 +580,25 @@ static int lp_forward_named_word(LpUnit *u, Function *f, size_t at)
                 (lp_store_op(l) && lp_workspace_word(operand, len) < 0))
                 break;
         }
+
         for (j = 0; j < u->count; ++j) {
             LpLine *l = &u->lines[j];
             size_t len;
             const char *operand = lp_operand(l, &len);
             int offset = lp_workspace_word(operand, len);
+
             if (!l->op || j == (unsigned)store)
                 continue;
+
             if (offset < 0) {
                 if (lp_text_words(operand, operand + len) & (1u << (word / 2))) {
                     valid = 0;
                     break;
                 }
+
                 continue;
             }
+
             if (!lp_overlaps(l, offset, word))
                 continue;
             if (j <= (unsigned)store || j >= limit || offset != word || l->m8 ||
@@ -496,17 +606,23 @@ static int lp_forward_named_word(LpUnit *u, Function *f, size_t at)
                 valid = 0;
                 break;
             }
+
             refs[count++] = (int)j;
         }
+
         if (!valid || !count)
             continue;
+
         for (j = 0; j < (unsigned)count; ++j) {
             LpLine *l = &u->lines[refs[j]];
+
             lp_set(l, "    %.3s %.*s", l->op, (int)n, name);
         }
+
         load->deleted = u->lines[store].deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -523,16 +639,21 @@ static int lp_relocated_word_steps(LpUnit *u, Function *f, size_t at)
     for (i = 0; i < u->count; ++i) {
         LpLine *carry = &u->lines[i], *step;
         int next, add = lp_line_is(carry, "clc");
+
         if ((!add && !lp_line_is(carry, "sec")) || (next = lp_next(u, i, 1)) < 0)
             continue;
+
         step = &u->lines[next];
+
         if (step->m8 || !lp_is(step, add ? "adc" : "sbc") || lp_immediate(step) != 1 ||
             (step->out & (LP_C | LP_V)))
             continue;
+
         lp_set(step, add ? "    inc a" : "    dec a");
         carry->deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -547,9 +668,11 @@ static int lp_test_saved_byte(LpUnit *u, Function *f, size_t at)
     if (lp_state.parser->no_private_regions || lp_state.is_volatile || u->indirect)
         return 0;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (lp_line_is(&u->lines[i], "sep #$20") || lp_line_is(&u->lines[i], "rep #$20"))
             u->lines[i].use = 0;
+    }
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
@@ -557,23 +680,28 @@ static int lp_test_saved_byte(LpUnit *u, Function *f, size_t at)
         int sep, load, rep;
         size_t n;
         const char *slot = lp_operand(s, &n);
+
         if (!lp_is(s, "sta") || s->m8 || lp_workspace_word(slot, n) < 0 ||
             (sep = lp_next(u, i, 1)) < 0 || !lp_line_is(&u->lines[sep], "sep #$20") ||
             (unsigned)sep + 1 >= u->count || u->lines[sep + 1].length != 3 ||
             strncmp(u->lines[sep + 1].text, ".a8", 3))
             continue;
+
         load = lp_next(u, (unsigned)sep + 1, 1);
+
         if (load < 0 || !lp_is(&u->lines[load], "lda") ||
             !lp_operand_is(&u->lines[load], slot, n) || (rep = lp_next(u, (unsigned)load, 1)) < 0 ||
             !lp_line_is(&u->lines[rep], "rep #$20") || (unsigned)rep + 1 >= u->count ||
             u->lines[rep + 1].length != 4 || strncmp(u->lines[rep + 1].text, ".a16", 4) ||
             (u->lines[rep].out & (LP_A | LP_N)))
             continue;
+
         lp_set(&u->lines[sep], "    and #$00FF");
         u->lines[sep + 1].deleted = u->lines[load].deleted = u->lines[rep].deleted =
             u->lines[rep + 1].deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -588,15 +716,18 @@ static int lp_sink_word_step(LpUnit *u, Function *f, size_t at)
 
     if (lp_state.is_volatile || u->helpers || u->indirect)
         return 0;
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
         LpLine *load = &u->lines[i];
         int step, store, first = -1, last = -1, word, base, carry, valid = 1;
+
         unsigned j;
         size_t n, m, b;
         const char *source = lp_operand(load, &n), *slot, *operand;
         char *end;
+
         if (!lp_is(load, "lda") || load->m8 || n < 3 || source[n - 2] != ',' ||
             source[n - 1] != 's' || (step = lp_next(u, i, 1)) < 0 || u->lines[step].m8 ||
             (!lp_line_is(&u->lines[step], "inc a") && !lp_line_is(&u->lines[step], "dec a")) ||
@@ -605,24 +736,31 @@ static int lp_sink_word_step(LpUnit *u, Function *f, size_t at)
             continue;
         if (strtol(source, &end, 10) < 1 || end != source + n - 2)
             continue;
+
         slot = lp_operand(&u->lines[store], &m);
         word = lp_workspace_word(slot, m);
+
         if (word < 0 || (word & 1))
             continue;
+
         for (j = 0; j < u->count; ++j) {
             LpLine *l = &u->lines[j];
             size_t len;
             const char *p = lp_operand(l, &len);
             int offset = lp_workspace_word(p, len);
+
             if (!l->op || j == (unsigned)store)
                 continue;
+
             if (offset < 0) {
                 if (lp_text_words(p, p + len) & (1u << (word / 2))) {
                     valid = 0;
                     break;
                 }
+
                 continue;
             }
+
             if (!lp_overlaps(l, offset, word))
                 continue;
             if (j <= (unsigned)store || lp_store_op(l)) {
@@ -631,23 +769,31 @@ static int lp_sink_word_step(LpUnit *u, Function *f, size_t at)
             }
             if (first < 0)
                 first = (int)j;
+
             last = (int)j;
         }
+
         if (!valid || first < 0 || !lp_is(&u->lines[first], "adc") || u->lines[first].m8 ||
             !lp_operand_is(&u->lines[first], slot, m))
             continue;
+
         carry = lp_next(u, (unsigned)first, -1);
         base = carry < 0 ? -1 : lp_next(u, (unsigned)carry, -1);
+
         if (base <= store || !lp_line_is(&u->lines[carry], "clc") ||
             !lp_is(&u->lines[base], "lda") || u->lines[base].m8)
             continue;
+
         operand = lp_operand(&u->lines[base], &b);
+
         if (!pr_named(operand, b) || memchr(operand, ',', b))
             continue;
+
         for (j = (unsigned)store + 1; j <= (unsigned)last; ++j) {
             LpLine *l = &u->lines[j];
             size_t len;
             const char *p = lp_operand(l, &len);
+
             if (l->label &&
                 !lp_inner_label(u, j, (int)j < base ? (unsigned)store + 1 : (unsigned)base, j)) {
                 valid = 0;
@@ -662,14 +808,17 @@ static int lp_sink_word_step(LpUnit *u, Function *f, size_t at)
                 break;
             }
         }
+
         if (!valid)
             continue;
+
         lp_set(&u->lines[base], "    lda %.*s\n    %.5s\n    sta %.*s", (int)n, source,
                u->lines[step].op, (int)m, slot);
         lp_set(&u->lines[first], "    adc %.*s", (int)b, operand);
         load->deleted = u->lines[step].deleted = u->lines[store].deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -684,39 +833,51 @@ static int lp_bool_return_epilogue(const LpUnit *u, int test, int *entry)
         /* Early fallthrough-jump cleanup can leave just the return label */
         for (p = test + 1; (unsigned)p < u->count && !u->lines[p].op; ++p) {
             const LpLine *line = &u->lines[p];
+
             if (line->text[0] != ';' && (!line->label || strncmp(line->text, "return_", 7)))
                 return 0;
         }
+
         if ((unsigned)p >= u->count)
             return 0;
     }
+
     *entry = p;
     if (p >= 0 && !u->lines[p].m8 && (lp_is(&u->lines[p], "jmp") || lp_is(&u->lines[p], "bra")) &&
         u->lines[p].target >= 0) {
         p = u->lines[p].target;
-        while ((unsigned)p < u->count && (u->lines[p].deleted || !u->lines[p].op))
+
+        while ((unsigned)p < u->count && (u->lines[p].deleted || !u->lines[p].op)) {
             ++p;
+        }
+
         if ((unsigned)p >= u->count)
             return 0;
     }
+
     if (p < 0 || u->lines[p].m8)
         return 0;
     if (lp_line_is(&u->lines[p], "rts") || lp_line_is(&u->lines[p], "rtl"))
         return 1;
+
     if (lp_line_is(&u->lines[p], "ply")) {
         p = lp_next(u, (unsigned)p, 1);
         return p >= 0 && !u->lines[p].m8 &&
                (lp_line_is(&u->lines[p], "rts") || lp_line_is(&u->lines[p], "rtl"));
     }
+
     if (lp_line_is(&u->lines[p], "plx")) {
         p = lp_next(u, (unsigned)p, 1);
+
         if (p >= 0 && lp_line_is(&u->lines[p], "plx"))
             p = lp_next(u, (unsigned)p, 1);
         if (p >= 0 && lp_line_is(&u->lines[p], "ply"))
             p = lp_next(u, (unsigned)p, 1);
+
         return p >= 0 && !u->lines[p].m8 &&
                (lp_line_is(&u->lines[p], "rts") || lp_line_is(&u->lines[p], "rtl"));
     }
+
     if (lp_line_is(&u->lines[p], "tax")) {
         int a = lp_next(u, (unsigned)p, 1), b = a < 0 ? -1 : lp_next(u, (unsigned)a, 1),
             c = b < 0 ? -1 : lp_next(u, (unsigned)b, 1),
@@ -730,6 +891,7 @@ static int lp_bool_return_epilogue(const LpUnit *u, int test, int *entry)
                lp_line_is(&u->lines[e], "txa") && lp_line_is(&u->lines[f], "ply") &&
                (lp_line_is(&u->lines[g], "rts") || lp_line_is(&u->lines[g], "rtl"));
     }
+
     return 0;
 }
 
@@ -749,30 +911,41 @@ static int lp_boolean_join(LpUnit *u, Function *f, size_t at)
         unsigned j, skip_label, done_label;
         size_t n;
         const char *slot = lp_operand(save, &n);
+
         if (!lp_is(save, "sta") || save->m8 || lp_workspace_word(slot, n) < 0 ||
             (mask = lp_next(u, i, 1)) < 0 || u->lines[mask].m8 ||
             !lp_line_is(&u->lines[mask], "and #$00FF") ||
             (gate = lp_next(u, (unsigned)mask, 1)) < 0)
             continue;
+
         transfer = gate;
+
         if (lp_is(&u->lines[gate], "bne")) {
             transfer = lp_next(u, (unsigned)gate, 1);
+
             if (transfer < 0 || !lp_is(&u->lines[transfer], "jmp") ||
                 u->lines[gate].target != transfer + 1)
                 continue;
         } else if (!lp_is(&u->lines[gate], "beq"))
             continue;
+
         join = u->lines[transfer].target;
+
         if (join <= transfer)
             continue;
+
         load = join;
+
         do {
             ++load;
         } while ((unsigned)load < u->count && !u->lines[load].op);
+
         if ((unsigned)load >= u->count || !lp_is(&u->lines[load], "lda") || u->lines[load].m8 ||
             !lp_operand_is(&u->lines[load], slot, n))
             continue;
+
         test = lp_next(u, (unsigned)load, 1);
+
         if (test >= 0 && !u->lines[test].m8 && lp_line_is(&u->lines[test], "and #$00FF")) {
             if ((branch = lp_next(u, (unsigned)test, 1)) >= 0 && lp_is(&u->lines[branch], "beq") &&
                 (one = lp_next(u, (unsigned)branch, 1)) >= 0 && !u->lines[one].m8 &&
@@ -782,6 +955,7 @@ static int lp_boolean_join(LpUnit *u, Function *f, size_t at)
                 /* Both original outcomes meet at the next instruction after LDA #1 */
                 for (j = (unsigned)one + 1; j < (unsigned)done && !u->lines[j].op; ++j) {
                 }
+
                 if (j != (unsigned)done)
                     continue;
             } else if (f->symbol->type.is_bool && !f->symbol->type.pointers &&
@@ -797,9 +971,12 @@ static int lp_boolean_join(LpUnit *u, Function *f, size_t at)
             direct_bool = 1;
         } else
             continue;
+
         for (j = (unsigned)transfer + 1; j <= (unsigned)one; ++j) {
             LpLine *l = &u->lines[j];
+
             unsigned k;
+
             if (l->op &&
                 ((l->target >= 0 && l->target <= (int)j) || l->call || lp_is(l, "pld") ||
                  lp_is(l, "tcd") ||
@@ -808,9 +985,11 @@ static int lp_boolean_join(LpUnit *u, Function *f, size_t at)
                 valid = 0;
                 break;
             }
+
             if (!l->label)
                 continue;
-            for (k = 0; k < u->count; ++k)
+
+            for (k = 0; k < u->count; ++k) {
                 if (u->lines[k].target == (int)j &&
                     (k <= (unsigned)transfer || k > (unsigned)one) &&
                     !(k == (unsigned)transfer && j == (unsigned)join) &&
@@ -818,12 +997,17 @@ static int lp_boolean_join(LpUnit *u, Function *f, size_t at)
                     valid = 0;
                     break;
                 }
+            }
+
             if (!valid)
                 break;
         }
+
         if (!valid)
             continue;
+
         done_label = lp_next_label();
+
         if (transfer != gate)
             lp_set(&u->lines[transfer], "    jmp .loword(cg_%s_%u)", lp_state.parser->unit,
                    done_label);
@@ -833,20 +1017,25 @@ static int lp_boolean_join(LpUnit *u, Function *f, size_t at)
                    lp_state.parser->unit, skip_label, lp_state.parser->unit, done_label,
                    lp_state.parser->unit, skip_label);
         }
+
         if (direct_bool) {
             if (test != load)
                 u->lines[load].deleted = 1;
+
             lp_set(&u->lines[test], "    lda #1");
         } else
             u->lines[load].deleted = u->lines[test].deleted = u->lines[branch].deleted = 1;
+
         {
             char label_text[192];
+
             snprintf(label_text, sizeof label_text, "cg_%s_%u = *\n", lp_state.parser->unit,
                      done_label);
             lp_insert(&u->lines[done], label_text);
         }
         return 1;
     }
+
     return 0;
 }
 
@@ -858,6 +1047,7 @@ static int lp_leaf_stack_arguments(LpUnit *u, Function *f, size_t at)
     unsigned entry = 0, i;
     int base, ready, *depth, ok = 0;
     PrState *states;
+
     (void)f;
     (void)at;
 
@@ -866,25 +1056,35 @@ static int lp_leaf_stack_arguments(LpUnit *u, Function *f, size_t at)
 
     while (entry < u->count && !lp_line_is(&u->lines[entry], "phy")) {
         LpLine *l = &u->lines[entry];
+
         if (lp_stack_op(l) || lp_branch(l) || l->ends || (l->use | l->def) & LP_Y)
             return 0;
+
         ++entry;
     }
+
     if (entry == u->count || !lp_line_is(&u->lines[entry], "phy") || u->lines[entry].x8)
         return 0;
+
     base = lp_next(u, entry, 1);
     ready = base < 0 ? -1 : lp_next(u, (unsigned)base, 1);
+
     if (ready < 0 || !lp_line_is(&u->lines[base], "tsc") || !lp_line_is(&u->lines[ready], "tay"))
         return 0;
+
     depth = allocate(u->count * sizeof *depth);
     states = pr_states(u);
+
     if (!lp_stack_depths(u, entry, depth))
         goto done;
 
-    for (i = (unsigned)ready + 1; i < u->count; ++i)
+    for (i = (unsigned)ready + 1; i < u->count; ++i) {
         if (lp_line_is(&u->lines[i], "sep #$20") || lp_line_is(&u->lines[i], "rep #$20"))
             u->lines[i].use = 0;
+    }
+
     lp_liveness(u);
+
     if (u->lines[ready].out & (LP_A | LP_N | LP_Z))
         goto done;
 
@@ -892,6 +1092,7 @@ static int lp_leaf_stack_arguments(LpUnit *u, Function *f, size_t at)
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (!l->op || depth[i] < 0)
             continue;
         if (l->use == LP_ALL || l->x8 || lp_is(l, "tsc") || lp_is(l, "tsx") ||
@@ -905,14 +1106,18 @@ static int lp_leaf_stack_arguments(LpUnit *u, Function *f, size_t at)
             continue;
         if (n != 9 || strncmp(p, "a:$", 3) || strncmp(p + 7, ",y", 2) || !lp_accumulator_memory(l))
             goto done;
+
         {
             char *end;
             long off = strtol(p + 3, &end, 16);
+
             if (end != p + 7 || off < 5 + lp_state.parser->long_return || off + depth[i] - 2 > 255)
                 goto done;
+
             lp_set(l, "    %.3s %ld,s", l->op, off + depth[i] - 2);
         }
     }
+
     u->lines[base].deleted = u->lines[ready].deleted = 1;
     ok = 1;
 done:
@@ -932,19 +1137,24 @@ static int lp_dead_inner_y_save(LpUnit *u, Function *f, size_t at)
     if (u->indirect || lp_state.is_volatile || lp_state.parser->no_stack_frames)
         return 0;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (lp_line_is(&u->lines[i], "sep #$20") || lp_line_is(&u->lines[i], "rep #$20"))
             u->lines[i].use = 0;
+    }
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
         unsigned j;
+
         if (!lp_line_is(&u->lines[i], "phy") || u->lines[i].x8)
             continue;
+
         for (j = i + 1; j < u->count; ++j) {
             LpLine *l = &u->lines[j];
             size_t n;
             const char *p = lp_operand(l, &n);
+
             if (l->label || lp_branch(l) || l->ends || l->x8 || l->use == LP_ALL ||
                 lp_is(l, "tsc") || lp_is(l, "tsx") ||
                 (n >= 2 && p[n - 2] == ',' && p[n - 1] == 's'))
@@ -957,6 +1167,7 @@ static int lp_dead_inner_y_save(LpUnit *u, Function *f, size_t at)
                 break;
         }
     }
+
     return 0;
 }
 
@@ -966,66 +1177,87 @@ static int lp_outgoing_move_frame(LpUnit *u, Function *f, size_t at)
 {
     unsigned entry = 0, i;
     int base, ready, save = -1, restore = -1;
+
     (void)at;
 
     if (lp_state.parser->no_stack_frames || u->indirect || statement_inline_markers(f->body) ||
         body_asm_statements(f->body))
         return 0;
 
-    while (entry < u->count && !u->lines[entry].op)
+    while (entry < u->count && !u->lines[entry].op) {
         ++entry;
+    }
+
     if (entry == u->count || !lp_line_is(&u->lines[entry], "phy") || u->lines[entry].x8)
         return 0;
+
     base = lp_next(u, entry, 1);
     ready = base < 0 ? -1 : lp_next(u, (unsigned)base, 1);
+
     if (ready < 0 || !lp_line_is(&u->lines[base], "tsc") || !lp_line_is(&u->lines[ready], "tay"))
         return 0;
+
     lp_liveness(u);
+
     if (u->lines[ready].out & (LP_A | LP_N | LP_Z))
         return 0;
 
     for (i = (unsigned)ready + 1; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (!l->op)
             continue;
         if (l->target >= 0 && l->target <= ready)
             return 0;
         if (l->call) {
             Symbol *callee = lp_callee(l);
+
             if (l->ends || !callee || callee->interrupt)
                 return 0;
+
             continue;
         }
         if (lp_is(l, "rts") || lp_is(l, "rtl")) {
             int pull = lp_next(u, i, -1);
+
             if (pull < 0 || !lp_line_is(&u->lines[pull], "ply") || u->lines[pull].x8)
                 return 0;
+
             continue;
         }
         if (lp_is(l, "ply"))
             continue;
+
         if (save < 0 && lp_line_is(l, "sty z:__arith_rhs") && !l->x8) {
             int op = lp_next(u, i, 1);
             static const char *const move[] = {"tsc", "sec", "sbc", "tcs", "inc",
                                                "tay", "phb", "lda", "mvn", "plb"};
             unsigned j;
+
             for (j = 0;
-                 j < sizeof move / sizeof move[0] && op >= 0 && lp_is(&u->lines[op], move[j]); ++j)
+                 j < sizeof move / sizeof move[0] && op >= 0 && lp_is(&u->lines[op], move[j]);
+                 ++j) {
                 op = lp_next(u, (unsigned)op, 1);
+            }
+
             if (j != sizeof move / sizeof move[0] || op < 0 ||
                 !lp_line_is(&u->lines[op], "ldy z:__arith_rhs") ||
                 (u->lines[op].out & (LP_N | LP_Z)))
                 return 0;
+
             save = (int)i;
             restore = op;
             i = (unsigned)op;
             continue;
         }
+
         if ((l->use | l->def) & LP_Y || lp_is(l, "mvn") || lp_is(l, "mvp"))
             return 0;
     }
+
     if (save < 0)
         return 0;
+
     u->lines[base].deleted = u->lines[ready].deleted = u->lines[save].deleted =
         u->lines[restore].deleted = 1;
     return 1;
@@ -1043,50 +1275,64 @@ static int lp_pointer_frame_home(LpUnit *u, Function *f, size_t at)
     LpUnit virtual_unit = *u;
     int phy = -1, setup[5], transfer, save, *depth, ok = 0, releases = 0;
     long size;
+
     unsigned i;
     (void)at;
+
     if (lp_state.parser->no_stack_frames || lp_state.parser->no_private_regions ||
         lp_state.is_volatile || u->indirect || u->helpers || !u->calls ||
         reg_width(f->symbol->type) > 2 || !p || !p->type.pointers || far_pointer(p->type) ||
         loop_escapes(f->body, p))
         return 0;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (lp_line_is(&u->lines[i], "phy")) {
             phy = (int)i;
             break;
         }
+    }
+
     if (phy < 0 || u->lines[phy].x8 || u->lines[phy].m8)
         return 0;
+
     setup[0] = lp_next(u, (unsigned)phy, 1);
 
-    for (i = 1; i < 5 && setup[i - 1] >= 0; ++i)
+    for (i = 1; i < 5 && setup[i - 1] >= 0; ++i) {
         setup[i] = lp_next(u, (unsigned)setup[i - 1], 1);
+    }
 
-    for (i = 0; i < 5; ++i)
+    for (i = 0; i < 5; ++i) {
         if (setup[i] < 0)
             return 0;
+    }
+
     if (!lp_line_is(&u->lines[setup[0]], "tsc") || !lp_line_is(&u->lines[setup[1]], "sec") ||
         !lp_is(&u->lines[setup[2]], "sbc") || (size = lp_immediate(&u->lines[setup[2]])) < 6 ||
         size > 64 || !lp_line_is(&u->lines[setup[3]], "tcs") ||
         !lp_line_is(&u->lines[setup[4]], "tay"))
         return 0;
+
     transfer = lp_next(u, (unsigned)setup[4], 1);
     save = transfer < 0 ? -1 : lp_next(u, (unsigned)transfer, 1);
+
     if (save < 0 || !lp_line_is(&u->lines[transfer], "txa") ||
         !lp_line_is(&u->lines[save], "sta a:$0001,y") || u->lines[save].m8)
         return 0;
 
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (lp_line_is(l, "sep #$20") || lp_line_is(l, "rep #$20"))
             l->use = 0;
         if (l->target > phy && l->target <= save)
             return 0;
     }
+
     lp_liveness(u);
+
     if (u->lines[save].out & LP_A)
         return 0;
+
     homes = allocate(u->count * sizeof *homes);
     depth = allocate(u->count * sizeof *depth);
     copy = allocate(u->count * sizeof *copy);
@@ -1095,25 +1341,33 @@ static int lp_pointer_frame_home(LpUnit *u, Function *f, size_t at)
         LpLine *l = &u->lines[i];
         size_t n;
         const char *operand = lp_operand(l, &n);
+
         if (!l->op || homes[i].erase)
             continue;
+
         if (lp_line_is(l, "tya")) {
             if (!fr_release(u, homes, i, (unsigned)size))
                 goto done;
+
             homes[i].offset = -1;
             ++releases;
             continue;
         }
+
         if (lp_is(l, "rts") || lp_is(l, "rtl")) {
             int prev = lp_next(u, i, -1);
+
             if (prev < 0 || homes[prev].erase != 2)
                 goto done;
+
             continue;
         }
         if (l->call) {
             Symbol *callee = lp_callee(l);
+
             if (l->ends || !callee || callee->interrupt)
                 goto done;
+
             continue;
         }
         if (l->use == LP_ALL || l->x8 || (l->def & LP_Y) || lp_is(l, "tsx") || lp_is(l, "phy") ||
@@ -1121,11 +1375,14 @@ static int lp_pointer_frame_home(LpUnit *u, Function *f, size_t at)
             goto done;
         if (!(l->use & LP_Y))
             continue;
+
         if (n == 9 && !strncmp(operand, "a:$", 3) && !strncmp(operand + 7, ",y", 2)) {
             char *end;
             long off = strtol(operand + 3, &end, 16);
+
             if (end != operand + 7 || off < 1 || off == 2 || lp_width(l) > 2)
                 goto done;
+
             if (off == 1) {
                 if (!lp_is(l, "ldx") || l->x8)
                     goto done;
@@ -1133,24 +1390,30 @@ static int lp_pointer_frame_home(LpUnit *u, Function *f, size_t at)
                        !(lp_is(l, "ldx") && !l->m8 &&
                          (!(l->out & LP_A) || !(l->out & (LP_N | LP_Z)))))
                 goto done;
+
             homes[i].offset = (int)off;
         } else
             goto done;
     }
+
     if (!releases)
         goto done;
+
     memcpy(copy, u->lines, u->count * sizeof *copy);
     virtual_unit.lines = copy;
     copy[setup[3]].op = NULL;
 
-    for (i = (unsigned)save + 1; i < u->count; ++i)
+    for (i = (unsigned)save + 1; i < u->count; ++i) {
         if (homes[i].erase == 1)
             copy[i].op = NULL;
+    }
+
     if (!lp_stack_depths(&virtual_unit, 0, depth) || depth[save] != 2)
         goto done;
 
     for (i = (unsigned)save + 1; i < u->count; ++i) {
         int offset = homes[i].offset;
+
         if (offset == -1 && depth[i] != 2)
             goto done;
         if (offset > 2 &&
@@ -1160,6 +1423,7 @@ static int lp_pointer_frame_home(LpUnit *u, Function *f, size_t at)
                  255))
             goto done;
     }
+
     lp_set(&u->lines[setup[2]], "    sbc #$%04lX", size - 2);
     u->lines[setup[4]].deleted = u->lines[save].deleted = 1;
     lp_set(&u->lines[transfer], "    txy");
@@ -1167,8 +1431,10 @@ static int lp_pointer_frame_home(LpUnit *u, Function *f, size_t at)
     for (i = (unsigned)save + 1; i < u->count; ++i) {
         int offset = homes[i].offset;
         LpLine *l = &u->lines[i];
+
         if (offset == -1) {
             int clc = lp_next(u, i, 1), add = lp_next(u, (unsigned)clc, 1);
+
             lp_set(l, "    tsc");
             lp_set(&u->lines[add], "    adc #$%04lX", size - 2);
         } else if (offset == 1)
@@ -1182,6 +1448,7 @@ static int lp_pointer_frame_home(LpUnit *u, Function *f, size_t at)
                 lp_set(l, "    %.3s %d,s", l->op, offset + depth[i] - 4);
         }
     }
+
     ok = 1;
 done:
     free(copy);
@@ -1201,20 +1468,25 @@ static int lp_snapshot_index(LpUnit *u, Function *f, size_t at)
 
     if (u->indirect || lp_state.is_volatile || lp_state.parser->no_private_regions)
         return 0;
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
         LpLine *first = &u->lines[i];
         size_t n;
         const char *name = lp_operand(first, &n);
+
         unsigned j, count = 0;
+
         if (!lp_is(first, "lda") || first->m8 || first->x8 || first->out & LP_X ||
             !pr_named(name, n) || memchr(name, ',', n))
             continue;
+
         for (j = i + 1; j < u->count; ++j) {
             LpLine *l = &u->lines[j];
             size_t len;
             const char *p = lp_operand(l, &len);
+
             if (l->label && !lp_inner_label(u, j, i, j))
                 break;
             if (!l->op)
@@ -1230,15 +1502,20 @@ static int lp_snapshot_index(LpUnit *u, Function *f, size_t at)
             if (lp_is(l, "lda") && lp_operand_is(l, name, n))
                 ++count;
         }
+
         if (count >= 2) {
             unsigned k;
             lp_set(first, "    lda %.*s\n    tax", (int)n, name);
-            for (k = i + 1; k < j; ++k)
+
+            for (k = i + 1; k < j; ++k) {
                 if (lp_is(&u->lines[k], "lda") && lp_operand_is(&u->lines[k], name, n))
                     lp_set(&u->lines[k], "    txa");
+            }
+
             return 1;
         }
     }
+
     return 0;
 }
 
@@ -1259,8 +1536,10 @@ static int lp_delay_byte_extract(LpUnit *u, Function *f, size_t at)
         size_t n;
         const char *p = lp_operand(load, &n);
         int swap, mask, push, other, high, clear, scale, tax, pull;
+
         if (!lp_is(load, "lda") || load->m8 || lp_workspace_word(p, n) < 0)
             continue;
+
         swap = lp_next(u, i, 1);
         mask = swap < 0 ? -1 : lp_next(u, (unsigned)swap, 1);
         push = mask < 0 ? -1 : lp_next(u, (unsigned)mask, 1);
@@ -1270,6 +1549,7 @@ static int lp_delay_byte_extract(LpUnit *u, Function *f, size_t at)
         scale = clear < 0 ? -1 : lp_next(u, (unsigned)clear, 1);
         tax = scale < 0 ? -1 : lp_next(u, (unsigned)scale, 1);
         pull = tax < 0 ? -1 : lp_next(u, (unsigned)tax, 1);
+
         if (pull < 0 || !lp_line_is(&u->lines[swap], "xba") ||
             !lp_line_is(&u->lines[mask], "and #$00FF") || !lp_line_is(&u->lines[push], "pha") ||
             !lp_is(&u->lines[other], "lda") || !lp_line_is(&u->lines[high], "xba") ||
@@ -1277,9 +1557,11 @@ static int lp_delay_byte_extract(LpUnit *u, Function *f, size_t at)
             !lp_line_is(&u->lines[tax], "tax") || !lp_line_is(&u->lines[pull], "pla") ||
             u->lines[pull].m8 || u->lines[tax].x8)
             continue;
+
         {
             size_t len;
             const char *q = lp_operand(&u->lines[other], &len);
+
             if (lp_workspace_word(q, len) < 0)
                 continue;
         }
@@ -1288,6 +1570,7 @@ static int lp_delay_byte_extract(LpUnit *u, Function *f, size_t at)
             1;
         return 1;
     }
+
     return 0;
 }
 
@@ -1301,6 +1584,7 @@ static int lp_equal_sum(LpUnit *u, Function *f, size_t at)
 
     if (u->indirect || lp_state.is_volatile || lp_state.parser->no_private_regions)
         return 0;
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
@@ -1310,9 +1594,11 @@ static int lp_equal_sum(LpUnit *u, Function *f, size_t at)
         int push, load, carry, adc, save, pull, cmp;
         long x, y;
         char *end;
+
         if (!lp_is(value, "lda") || value->m8 || n != 9 || strncmp(p, "a:$", 3) || p[7] != ',' ||
             (p[8] != 'x' && p[8] != 'y'))
             continue;
+
         push = lp_next(u, i, 1);
         load = push < 0 ? -1 : lp_next(u, (unsigned)push, 1);
         carry = load < 0 ? -1 : lp_next(u, (unsigned)load, 1);
@@ -1320,35 +1606,46 @@ static int lp_equal_sum(LpUnit *u, Function *f, size_t at)
         save = adc < 0 ? -1 : lp_next(u, (unsigned)adc, 1);
         pull = save < 0 ? -1 : lp_next(u, (unsigned)save, 1);
         cmp = pull < 0 ? -1 : lp_next(u, (unsigned)pull, 1);
+
         if (cmp < 0 || !lp_line_is(&u->lines[push], "pha") ||
             !lp_line_is(&u->lines[carry], "clc") || !lp_line_is(&u->lines[pull], "pla"))
             continue;
+
         sum = &u->lines[load];
         add = &u->lines[adc];
         store = &u->lines[save];
         compare = &u->lines[cmp];
+
         if (!lp_is(sum, "lda") || !lp_is(add, "adc") || !lp_is(store, "sta") ||
             !lp_is(compare, "cmp") || (compare->out & (LP_A | LP_N | LP_C)) ||
             !(compare->out & LP_Z) || sum->m8 || add->m8 || store->m8 || compare->m8)
             continue;
+
         a = lp_operand(sum, &ns);
         b = lp_operand(add, &na);
         slot = lp_operand(store, &m);
+
         if (ns < 3 || na < 3 || strncmp(a + ns - 2, ",s", 2) || strncmp(b + na - 2, ",s", 2) ||
             lp_workspace_word(slot, m) < 0 || !lp_operand_is(compare, slot, m))
             continue;
+
         x = strtol(a, &end, 10);
+
         if (end != a + ns - 2 || x < 3)
             continue;
+
         y = strtol(b, &end, 10);
+
         if (end != b + na - 2 || y < 3)
             continue;
+
         lp_set(sum, "    lda %ld,s", x - 2);
         lp_set(add, "    adc %ld,s", y - 2);
         lp_set(compare, "    cmp %.*s", (int)n, p);
         value->deleted = u->lines[push].deleted = u->lines[pull].deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -1368,10 +1665,13 @@ static int lp_reload_saved_x(LpUnit *u, Function *f, size_t at)
         size_t n;
         const char *slot = lp_operand(save, &n);
         int j;
+
         if (!lp_is(save, "stx") || save->x8 || lp_workspace_word(slot, n) < 0)
             continue;
+
         for (j = lp_next(u, i, 1); j >= 0; j = lp_next(u, (unsigned)j, 1)) {
             LpLine *l = &u->lines[j];
+
             if (l->x8 || l->m8 || l->def & LP_X || l->ends || lp_branch(l) || lp_is(l, "tcd") ||
                 lp_is(l, "pld") || lp_may_write(l, slot, n, 2))
                 break;
@@ -1381,6 +1681,7 @@ static int lp_reload_saved_x(LpUnit *u, Function *f, size_t at)
             }
         }
     }
+
     return 0;
 }
 
@@ -1389,22 +1690,27 @@ static int lp_reload_saved_x(LpUnit *u, Function *f, size_t at)
 static int lp_pushed_index_checks(LpUnit *u, Function *f, size_t at)
 {
     int changed = 0;
+
     (void)f;
     (void)at;
 
     if (u->indirect || lp_state.is_volatile)
         return 0;
+
     lp_liveness(u);
 
     for (unsigned i = 0; i < u->count; ++i) {
         if (!lp_line_is(&u->lines[i], "phx") || u->lines[i].x8)
             continue;
+
         int base = lp_next(u, i, 1);
         int frame = base < 0 ? -1 : lp_next(u, (unsigned)base, 1);
+
         if (frame >= 0 && lp_line_is(&u->lines[base], "tsc") &&
             lp_line_is(&u->lines[frame], "tay")) {
             for (int j = lp_next(u, (unsigned)frame, 1); j >= 0; j = lp_next(u, (unsigned)j, 1)) {
                 LpLine *next = &u->lines[j];
+
                 if (lp_line_is(next, "ldx a:$0001,y") && !next->x8 &&
                     !(next->out & (LP_N | LP_Z))) {
                     next->deleted = 1;
@@ -1417,37 +1723,46 @@ static int lp_pushed_index_checks(LpUnit *u, Function *f, size_t at)
                     break;
             }
         }
+
         for (unsigned j = i + 1; j < u->count; ++j) {
             LpLine *l = &u->lines[j];
+
             if (l->length && l->text[0] == ';')
                 continue;
             if (lp_fallthrough_label(l) && l->first_incoming < 0)
                 continue;
             if (l->m8 || l->x8)
                 break;
+
             if (lp_line_is(l, "lda 1,s")) {
                 int k = lp_next(u, j, 1);
+
                 if (k < 0 || !lp_line_is(&u->lines[k], "tax"))
                     break;
+
                 if (u->lines[k].out & (LP_A | LP_N | LP_Z))
                     lp_set(l, "    txa");
                 else
                     l->deleted = 1;
+
                 u->lines[k].deleted = 1;
                 j = (unsigned)k;
                 ++changed;
             } else if (lp_branch(l)) {
                 int after;
+
                 if (lp_cond_branch_target(u, (int)j, &after) < 0)
                     break;
                 if (after != (int)j &&
                     (u->lines[after].first_incoming != (int)j || l->next_incoming >= 0))
                     break;
+
                 j = (unsigned)after;
             } else if (!lp_is(l, "lda") && !lp_is(l, "cmp"))
                 break;
         }
     }
+
     return changed;
 }
 
@@ -1461,32 +1776,41 @@ static int lp_varargs_stack_read(LpUnit *u, Function *f, size_t at)
         body_asm_statements(f->body))
         return 0;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (lp_is(&u->lines[i], "plb") || lp_is(&u->lines[i], "mvn") || lp_is(&u->lines[i], "mvp"))
             return 0;
+    }
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
         int clear, add, index, load;
         long offset;
+
         if (!lp_line_is(&u->lines[i], "tsc") || u->lines[i].m8 || u->lines[i].x8)
             continue;
+
         clear = lp_next(u, i, 1);
         add = clear < 0 ? -1 : lp_next(u, (unsigned)clear, 1);
         index = add < 0 ? -1 : lp_next(u, (unsigned)add, 1);
         load = index < 0 ? -1 : lp_next(u, (unsigned)index, 1);
+
         if (load < 0 || !lp_line_is(&u->lines[clear], "clc") || !lp_is(&u->lines[add], "adc") ||
             !lp_line_is(&u->lines[index], "tax") || !lp_line_is(&u->lines[load], "lda a:$0000,x") ||
             (u->lines[load].out & (LP_X | LP_C | LP_V)))
             continue;
+
         offset = lp_immediate(&u->lines[add]);
+
         if (offset < 1 || offset > 255)
             continue;
+
         lp_set(&u->lines[load], "    lda %ld,s", offset);
         u->lines[i].deleted = u->lines[clear].deleted = u->lines[add].deleted =
             u->lines[index].deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -1497,74 +1821,97 @@ static int lp_saved_x_read(LpUnit *u, Function *f, size_t at)
     unsigned entry = 0;
     int push, *depth, saved, changed, matched = 0;
     unsigned char *state;
+
     (void)at;
 
     if (lp_state.frame_address || lp_state.is_volatile || u->indirect ||
         lp_state.parser->no_private_regions || body_asm_statements(f->body))
         return 0;
 
-    while (entry < u->count && !u->lines[entry].op)
+    while (entry < u->count && !u->lines[entry].op) {
         ++entry;
+    }
+
     if (entry == u->count)
         return 0;
+
     push = lp_line_is(&u->lines[entry], "pha") ? lp_next(u, entry, 1) : (int)entry;
+
     if (push < 0 || (unsigned)push + 1 >= u->count || !lp_line_is(&u->lines[push], "phx") ||
         u->lines[push].x8)
         return 0;
+
     depth = allocate(u->count * sizeof *depth);
+
     if (!lp_stack_depths(u, entry, depth)) {
         free(depth);
         return 0;
     }
+
     saved = depth[push] + 2;
     state = allocate(u->count);
     state[push + 1] = 1;
+
     do {
         changed = 0;
+
         for (unsigned i = (unsigned)push + 1; i < u->count; ++i) {
             LpLine *l = &u->lines[i];
             unsigned char next = state[i];
+
             if (!next)
                 continue;
+
             if (l->op) {
                 if (l->x8 || l->call || l->use == LP_ALL || (l->def & LP_X) || depth[i] < saved)
                     next = 2;
+
                 if (lp_store_op(l)) {
                     size_t n;
                     const char *o = lp_operand(l, &n);
+
                     if (n && !lp_operand_is(l, "a", 1) && lp_workspace_word(o, n) < 0) {
                         int offset = atoi(o), slot = depth[i] - saved + 1;
+
                         if (!lp_private(o, n) || o[n - 1] != 's' ||
                             (offset < slot + 2 && slot < offset + lp_width(l)))
                             next = 2;
                     }
                 }
             }
+
             if (!l->ends && i + 1 < u->count && state[i + 1] < next) {
                 state[i + 1] = next;
                 changed = 1;
             }
+
             if (l->target > push && state[l->target] < next) {
                 state[l->target] = next;
                 changed = 1;
             }
         }
     } while (changed);
+
     lp_liveness(u);
 
     for (unsigned i = (unsigned)push + 1; i < u->count; ++i) {
         LpLine *load = &u->lines[i];
         char operand[16];
         int slot = depth[i] - saved + 1;
+
         if (state[i] != 1 || slot < 1 || slot > 255 || load->m8 || load->x8 || !lp_is(load, "lda"))
             continue;
+
         size_t n = (size_t)snprintf(operand, sizeof operand, "%d,s", slot);
+
         if (!lp_operand_is(load, operand, n))
             continue;
+
         lp_set(load, load->out & (LP_A | LP_C) ? "    txa" : "    cpx #$0000");
         matched = 1;
         break;
     }
+
     free(state);
     free(depth);
     return matched;
@@ -1580,6 +1927,7 @@ static int lp_varargs_tail_call(LpUnit *u, Function *f, size_t at)
     size_t n;
     const char *operand;
     Symbol *callee;
+
     (void)at;
 
     if (!f->uses_varargs || f->symbol->param_count != 1 ||
@@ -1588,53 +1936,73 @@ static int lp_varargs_tail_call(LpUnit *u, Function *f, size_t at)
         body_asm_statements(f->body) || statement_inline_markers(f->body))
         return 0;
 
-    while ((unsigned)start < u->count && !u->lines[start].op)
+    while ((unsigned)start < u->count && !u->lines[start].op) {
         ++start;
+    }
+
     if ((unsigned)start == u->count)
         return 0;
+
     i = start;
 
     for (unsigned part = 0; part < sizeof prologue / sizeof prologue[0]; ++part) {
         if (i < 0 || u->lines[i].m8 || u->lines[i].x8 || !lp_is(&u->lines[i], prologue[part]))
             return 0;
+
         add = i;
         i = lp_next(u, (unsigned)i, 1);
     }
+
     call = i;
+
     if (call < 0 || !lp_is(&u->lines[call], long_return ? "jsl" : "jsr") ||
         lp_immediate(&u->lines[add]) != 9 + long_return)
         return 0;
+
     callee = lp_callee(&u->lines[call]);
+
     if (!callee || callee->interrupt || callee->variadic || callee->param_count != 2 ||
         !same_type(callee->type, f->symbol->type) ||
         !same_type(callee->params[0], f->symbol->params[0]) || !callee->params[1].pointers ||
         !register_parameter(1, callee->params[1]))
         return 0;
 
-    for (pull = call + 1; (unsigned)pull < u->count && !u->lines[pull].op; ++pull)
+    for (pull = call + 1; (unsigned)pull < u->count && !u->lines[pull].op; ++pull) {
         if (u->lines[pull].text[0] != ';' &&
             (!u->lines[pull].label || strncmp(u->lines[pull].text, "return_", 7)))
             return 0;
+    }
+
     if ((unsigned)pull == u->count || !lp_line_is(&u->lines[pull], "plx") || u->lines[pull].x8)
         return 0;
+
     i = lp_next(u, (unsigned)pull, 1);
+
     if (i < 0 || !lp_line_is(&u->lines[i], "plx") || u->lines[i].x8)
         return 0;
+
     i = lp_next(u, (unsigned)i, 1);
+
     if (i < 0 || !lp_line_is(&u->lines[i], "ply") || u->lines[i].x8)
         return 0;
+
     ret = lp_next(u, (unsigned)i, 1);
+
     if (ret < 0 || !lp_line_is(&u->lines[ret], long_return ? "rtl" : "rts"))
         return 0;
 
-    for (i = ret + 1; (unsigned)i < u->count; ++i)
+    for (i = ret + 1; (unsigned)i < u->count; ++i) {
         if (u->lines[i].op)
             return 0;
+    }
+
     operand = lp_operand(&u->lines[call], &n);
 
-    for (i = start; i <= ret; ++i)
+    for (i = start; i <= ret; ++i) {
         if (u->lines[i].op)
             u->lines[i].deleted = 1;
+    }
+
     lp_set(&u->lines[call], "    tsc\n    clc\n    adc #$%04X\n    %s %.*s", 3 + long_return,
            long_return ? "jml" : "jmp", (int)n, operand);
     return 1;
@@ -1651,6 +2019,7 @@ static int lp_test_indexed_mask(LpUnit *u, Function *f, size_t at)
 
     if (u->indirect || lp_state.is_volatile || lp_state.parser->no_private_regions)
         return 0;
+
     lp_liveness(u);
 
     for (i = 0; i + 1 < u->count; ++i) {
@@ -1659,33 +2028,40 @@ static int lp_test_indexed_mask(LpUnit *u, Function *f, size_t at)
         size_t n, m, b, w, k;
         const char *operand, *slot, *index_operand, *mask_operand;
         int slot_offset, index_offset;
+
         wrapped = lp_line_is(&u->lines[i], "sep #$20") && u->lines[i + 1].length == 3 &&
                   !strncmp(u->lines[i + 1].text, ".a8", 3);
+
         if (wrapped) {
             load = lp_next(u, i + 1, 1);
             rep = load < 0 ? -1 : lp_next(u, (unsigned)load, 1);
+
             if (rep < 0 || !lp_line_is(&u->lines[rep], "rep #$20") ||
                 (unsigned)rep + 1 >= u->count || u->lines[rep + 1].length != 4 ||
                 strncmp(u->lines[rep + 1].text, ".a16", 4))
                 continue;
+
             zero = lp_next(u, (unsigned)rep + 1, 1);
         } else if (lp_is(&u->lines[i], "lda") && !u->lines[i].m8) {
             load = (int)i;
             zero = lp_next(u, i, 1);
         } else
             continue;
+
         save = zero < 0 ? -1 : lp_next(u, (unsigned)zero, 1);
         index = save < 0 ? -1 : lp_next(u, (unsigned)save, 1);
         scale = index < 0 ? -1 : lp_next(u, (unsigned)index, 1);
         tax = scale < 0 ? -1 : lp_next(u, (unsigned)scale, 1);
         mask = tax < 0 ? -1 : lp_next(u, (unsigned)tax, 1);
         test = mask < 0 ? -1 : lp_next(u, (unsigned)mask, 1);
+
         if (test < 0 || !lp_is(&u->lines[load], "lda") ||
             !lp_line_is(&u->lines[zero], "and #$00FF") || !lp_is(&u->lines[save], "sta") ||
             !lp_is(&u->lines[index], "lda") || !lp_line_is(&u->lines[scale], "asl a") ||
             !lp_line_is(&u->lines[tax], "tax") || !lp_is(&u->lines[mask], "lda") ||
             !lp_is(&u->lines[test], "and") || (u->lines[test].out & (LP_A | LP_N)))
             continue;
+
         byte = &u->lines[load];
         word = &u->lines[mask];
         operand = lp_operand(byte, &n);
@@ -1694,6 +2070,7 @@ static int lp_test_indexed_mask(LpUnit *u, Function *f, size_t at)
         mask_operand = lp_operand(word, &w);
         slot_offset = lp_workspace_word(slot, m);
         index_offset = lp_workspace_word(index_operand, b);
+
         if (n < 5 || operand[0] != '[' || strncmp(operand + n - 3, "],y", 3) || slot_offset < 0 ||
             index_offset < 0 || lp_overlaps(&u->lines[save], slot_offset, index_offset) ||
             !lp_operand_is(&u->lines[test], slot, m) || w < 5 ||
@@ -1707,6 +2084,7 @@ static int lp_test_indexed_mask(LpUnit *u, Function *f, size_t at)
             size_t len;
             const char *p = lp_operand(l, &len);
             int off = lp_workspace_word(p, len);
+
             if ((l->target >= 0 && l->target <= test) || (lp_branch(l) && l->use == LP_ALL))
                 break;
             if (off >= 0 && lp_overlaps(l, off, slot_offset))
@@ -1714,8 +2092,10 @@ static int lp_test_indexed_mask(LpUnit *u, Function *f, size_t at)
             if (off < 0 && lp_text_words(p, p + len) & (1u << (slot_offset / 2)))
                 break;
         }
+
         if (k != u->count || (slot_offset & 1))
             continue;
+
         if (wrapped) {
             lp_set(&u->lines[i], "    lda %.*s\n    asl a\n    tax\n    lda %.*s\n    sep #$20",
                    (int)b, index_operand, (int)w, mask_operand);
@@ -1726,11 +2106,13 @@ static int lp_test_indexed_mask(LpUnit *u, Function *f, size_t at)
                    "%.*s\n    rep #$20\n.a16",
                    (int)b, index_operand, (int)w, mask_operand, (int)n, operand);
         }
+
         u->lines[zero].deleted = u->lines[save].deleted = u->lines[index].deleted = 1;
         u->lines[scale].deleted = u->lines[tax].deleted = word->deleted = u->lines[test].deleted =
             1;
         return 1;
     }
+
     return 0;
 }
 
@@ -1745,9 +2127,11 @@ static int lp_push_parameter_frame(LpUnit *u, Function *f, size_t at)
     if (lp_state.parser->no_stack_frames || u->indirect || lp_state.is_volatile)
         return 0;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (lp_line_is(&u->lines[i], "sep #$20") || lp_line_is(&u->lines[i], "rep #$20"))
             u->lines[i].use = 0;
+    }
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
@@ -1755,8 +2139,10 @@ static int lp_push_parameter_frame(LpUnit *u, Function *f, size_t at)
         long size;
         size_t n;
         const char *slot;
+
         if (!lp_line_is(&u->lines[i], "phy") || u->lines[i].m8 || u->lines[i].x8)
             continue;
+
         prior = lp_next(u, i, -1);
         base = lp_next(u, i, 1);
         carry = base < 0 ? -1 : lp_next(u, (unsigned)base, 1);
@@ -1765,18 +2151,24 @@ static int lp_push_parameter_frame(LpUnit *u, Function *f, size_t at)
         txy = ready < 0 ? -1 : lp_next(u, (unsigned)ready, 1);
         load = txy < 0 ? -1 : lp_next(u, (unsigned)txy, 1);
         save = load < 0 ? -1 : lp_next(u, (unsigned)load, 1);
+
         if (prior < 0 || save < 0 || !lp_is(&u->lines[prior], "sta") ||
             !lp_line_is(&u->lines[base], "tsc") || !lp_line_is(&u->lines[carry], "sec") ||
             !lp_is(&u->lines[sub], "sbc") || !lp_line_is(&u->lines[ready], "tcs") ||
             !lp_line_is(&u->lines[txy], "txy") || !lp_is(&u->lines[load], "lda") ||
             !lp_line_is(&u->lines[save], "sta 1,s") || (u->lines[save].out & LP_FLAGS))
             continue;
+
         size = lp_immediate(&u->lines[sub]);
+
         if (size != 4 && size != 6 && size != 8)
             continue;
+
         slot = lp_operand(&u->lines[prior], &n);
+
         if (lp_workspace_word(slot, n) < 0 || !lp_operand_is(&u->lines[load], slot, n))
             continue;
+
         lp_set(&u->lines[base], "%s",
                size == 4   ? "    pha\n    pha"
                : size == 6 ? "    pha\n    pha\n    pha"
@@ -1785,6 +2177,7 @@ static int lp_push_parameter_frame(LpUnit *u, Function *f, size_t at)
         u->lines[load].deleted = u->lines[save].deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -1806,8 +2199,10 @@ static int lp_stage_subtract_before_sum(LpUnit *u, Function *f, size_t at)
         size_t n, m, k, b;
         const char *p = lp_operand(start, &n), *q, *slot, *src;
         char moved[96];
+
         if (!lp_is(start, "lda") || start->m8 || n < 3 || strncmp(p + n - 2, ",s", 2))
             continue;
+
         carry = lp_next(u, i, 1);
         add = carry < 0 ? -1 : lp_next(u, (unsigned)carry, 1);
         push = add < 0 ? -1 : lp_next(u, (unsigned)add, 1);
@@ -1816,24 +2211,29 @@ static int lp_stage_subtract_before_sum(LpUnit *u, Function *f, size_t at)
         pull = save < 0 ? -1 : lp_next(u, (unsigned)save, 1);
         sec = pull < 0 ? -1 : lp_next(u, (unsigned)pull, 1);
         sub = sec < 0 ? -1 : lp_next(u, (unsigned)sec, 1);
+
         if (sub < 0 || !lp_line_is(&u->lines[carry], "clc") || !lp_is(&u->lines[add], "adc") ||
             !lp_line_is(&u->lines[push], "pha") || !lp_is(&u->lines[field], "lda") ||
             !lp_is(&u->lines[save], "sta") || !lp_line_is(&u->lines[pull], "pla") ||
             !lp_line_is(&u->lines[sec], "sec") || !lp_is(&u->lines[sub], "sbc"))
             continue;
+
         q = lp_operand(&u->lines[add], &m);
         src = lp_operand(&u->lines[field], &k);
         slot = lp_operand(&u->lines[save], &b);
+
         if (m < 3 || strncmp(q + m - 2, ",s", 2) || k != 9 || strncmp(src, "a:$", 3) ||
             src[7] != ',' || (src[8] != 'x' && src[8] != 'y') || lp_workspace_word(slot, b) < 0 ||
             !lp_operand_is(&u->lines[sub], slot, b))
             continue;
+
         snprintf(moved, sizeof moved, "    lda %.*s\n    sta %.*s\n", (int)k, src, (int)b, slot);
         lp_insert(start, moved);
         u->lines[push].deleted = u->lines[field].deleted = u->lines[save].deleted =
             u->lines[pull].deleted = 1;
         return 1;
     }
+
     return 0;
 }
 
@@ -1849,15 +2249,19 @@ static int lp_unused_push_frame(LpUnit *u, Function *f, size_t at)
     int next, ready, *depth, ok = 0;
     LpLine *copy;
     LpUnit trial = *u;
+
     (void)at;
 
     if (lp_state.parser->no_stack_frames || u->indirect || reg_width(f->symbol->type) > 2)
         return 0;
 
-    while (first < u->count && !u->lines[first].op)
+    while (first < u->count && !u->lines[first].op) {
         ++first;
+    }
+
     if (first == u->count || u->lines[first].x8)
         return 0;
+
     saves_y = lp_line_is(&u->lines[first], "phy");
     next = saves_y ? lp_next(u, first, 1) : (int)first;
     ready = saves_y ? (int)first : -1;
@@ -1867,8 +2271,10 @@ static int lp_unused_push_frame(LpUnit *u, Function *f, size_t at)
         ready = next;
         next = lp_next(u, (unsigned)next, 1);
     }
+
     if (saves_y) {
         int setup = next < 0 ? -1 : lp_next(u, (unsigned)next, 1);
+
         if (setup >= 0 && lp_line_is(&u->lines[next], "tsc") &&
             lp_line_is(&u->lines[setup], "tay")) {
             ready = setup;
@@ -1876,66 +2282,85 @@ static int lp_unused_push_frame(LpUnit *u, Function *f, size_t at)
         }
     } else if (!pushes)
         return 0;
+
     frame_bytes = 2 * ((int)pushes + saves_y);
 
-    for (i = (unsigned)ready + 1; i < u->count; ++i)
+    for (i = (unsigned)ready + 1; i < u->count; ++i) {
         if (lp_line_is(&u->lines[i], "sep #$20") || lp_line_is(&u->lines[i], "rep #$20"))
             u->lines[i].use = 0;
+    }
+
     lp_liveness(u);
+
     if (frame_y && (u->lines[ready].out & (LP_A | LP_N | LP_Z)))
         return 0;
+
     copy = allocate(u->count * sizeof *copy);
     memcpy(copy, u->lines, u->count * sizeof *copy);
     trial.lines = copy;
     depth = allocate(u->count * sizeof *depth);
 
-    for (i = first; i <= (unsigned)ready; ++i)
+    for (i = first; i <= (unsigned)ready; ++i) {
         copy[i].op = NULL;
+    }
 
     for (i = (unsigned)ready + 1; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (!l->op || !copy[i].op)
             continue;
         if (l->target >= 0 && l->target <= ready)
             goto done;
+
         if (lp_is(l, "rts") || lp_is(l, "rtl")) {
             int prev = lp_next(u, i, -1);
+
             if (saves_y) {
                 if (prev < 0 || !lp_line_is(&u->lines[prev], "ply"))
                     goto done;
+
                 copy[prev].op = NULL;
                 prev = lp_next(u, (unsigned)prev, -1);
             }
+
             for (j = 0; j < pushes; ++j) {
                 if (prev < 0 || !lp_line_is(&u->lines[prev], "plx") || u->lines[prev].x8 ||
                     (u->lines[prev].out & (LP_X | LP_N | LP_Z)))
                     goto done;
+
                 copy[prev].op = NULL;
                 prev = lp_next(u, (unsigned)prev, -1);
             }
+
             ++returns;
             continue;
         }
+
         if (l->call) {
             Symbol *callee = lp_callee(l);
+
             if (l->ends || !callee || callee->interrupt)
                 goto done;
         } else if (saves_y && lp_is(l, "ply")) {
             int ret = lp_next(u, i, 1);
+
             if (ret < 0 || (!lp_is(&u->lines[ret], "rts") && !lp_is(&u->lines[ret], "rtl")))
                 goto done;
         } else if (saves_y && !lp_is(l, "plx") && ((l->use | l->def) & LP_Y))
             goto done;
+
         if (!frame_y && n >= 3 && p[n - 2] == ',' && p[n - 1] == 's' && !lp_state.is_volatile &&
             (!lp_state.frame_address || (f->uses_varargs && !u->calls)) &&
             !body_asm_statements(f->body)) {
             char *end;
             long offset = strtol(p, &end, 10);
+
             if (!store_depths) {
                 if (!lp_stack_depths(u, first, depth))
                     goto done;
+
                 store_depths = 1;
             }
 
@@ -1947,24 +2372,32 @@ static int lp_unused_push_frame(LpUnit *u, Function *f, size_t at)
                 continue;
             }
         }
+
         if ((lp_is(l, "sta") || lp_is(l, "lda")) && n >= 3 && p[n - 2] == ',' && p[n - 1] == 's') {
             char *end;
             long offset = strtol(p, &end, 10);
             int first_local;
+
             if (saves_y || lp_state.frame_address || lp_state.is_volatile ||
                 lp_state.parser->no_private_regions || frame_address_visible(f->body) ||
                 body_asm_statements(f->body) || end != p + n - 2 || offset < 1 || offset > 255)
                 goto done;
+
             if (!store_depths) {
                 if (!lp_stack_depths(u, first, depth))
                     goto done;
+
                 store_depths = 1;
             }
+
             first_local = depth[i] - 2 * (int)pushes + 1;
+
             if (first_local < 1 || offset < first_local || offset + lp_width(l) - 1 > depth[i])
                 goto done;
+
             if (lp_is(l, "lda")) {
                 int mask = lp_next(u, i, 1), store = mask < 0 ? -1 : lp_next(u, (unsigned)mask, 1);
+
                 if (store < 0 || !lp_is(&u->lines[store], "sta") ||
                     !lp_operand_is(&u->lines[store], p, n) || u->lines[mask].m8 != l->m8 ||
                     u->lines[store].m8 != l->m8 ||
@@ -1973,37 +2406,48 @@ static int lp_unused_push_frame(LpUnit *u, Function *f, size_t at)
                     lp_immediate(&u->lines[mask]) < 0 ||
                     (u->lines[store].out & (LP_A | LP_N | LP_Z)))
                     goto done;
+
                 copy[mask].op = copy[store].op = NULL;
             }
+
             copy[i].op = NULL;
             discarded_stores = 1;
             continue;
         }
+
         if (lp_is(l, "tsc") || lp_is(l, "tsx") || lp_is(l, "txs") || l->use == LP_ALL ||
             (n >= 2 && p[n - 2] == ',' && p[n - 1] == 's') ||
             (n >= 5 && p[n - 5] == ',' && p[n - 4] == 's' && p[n - 3] == ')'))
             goto done;
     }
+
     if (!returns || !lp_stack_depths(&trial, 0, depth))
         goto done;
+
     if (rebase_arguments || discarded_stores) {
-        for (i = (unsigned)ready + 1; i < u->count; ++i)
+        for (i = (unsigned)ready + 1; i < u->count; ++i) {
             if (u->lines[i].call && !fr_arguments_above_frame(&u->lines[i], depth[i]))
                 goto done;
+        }
     }
+
     if (rebase_arguments) {
-        for (i = (unsigned)ready + 1; i < u->count; ++i)
+        for (i = (unsigned)ready + 1; i < u->count; ++i) {
             if (copy[i].op) {
                 size_t n;
                 const char *p = lp_operand(&u->lines[i], &n);
+
                 if (n >= 3 && p[n - 2] == ',' && p[n - 1] == 's')
                     lp_set(&u->lines[i], "    %.3s %d,s", u->lines[i].op, atoi(p) - frame_bytes);
             }
+        }
     }
 
-    for (i = first; i < u->count; ++i)
+    for (i = first; i < u->count; ++i) {
         if (u->lines[i].op && !copy[i].op)
             u->lines[i].deleted = 1;
+    }
+
     ok = 1;
 done:
     free(depth);
@@ -2018,37 +2462,49 @@ static int lp_unused_call_save(LpUnit *u, Function *f, size_t at)
 {
     unsigned first = 0, i;
     int call = -1, read, clear, add, cleanup, pull, ret, arguments, *depth, ok = 0;
+
     (void)at;
 
     if (lp_state.parser->no_stack_frames || u->indirect || u->calls != 1 ||
         frame_address_visible(f->body) || statement_inline_markers(f->body))
         return 0;
 
-    while (first < u->count && !u->lines[first].op)
+    while (first < u->count && !u->lines[first].op) {
         ++first;
+    }
+
     if (first == u->count || !lp_line_is(&u->lines[first], "phx") || u->lines[first].x8)
         return 0;
 
-    for (i = first + 1; i < u->count; ++i)
+    for (i = first + 1; i < u->count; ++i) {
         if (u->lines[i].call) {
             call = (int)i;
             break;
         }
+    }
+
     if (call < 0 || u->lines[call].ends || !lp_callee(&u->lines[call]))
         return 0;
+
     read = lp_next(u, (unsigned)call, 1);
     clear = read < 0 ? -1 : lp_next(u, (unsigned)read, 1);
     add = clear < 0 ? -1 : lp_next(u, (unsigned)clear, 1);
     cleanup = add < 0 ? -1 : lp_next(u, (unsigned)add, 1);
     pull = cleanup < 0 ? -1 : lp_next(u, (unsigned)cleanup, 1);
+
     if (cleanup >= 0 && pull < 0) {
         i = (unsigned)cleanup + 1;
-        while (i < u->count && u->lines[i].text[0] == ';')
+
+        while (i < u->count && u->lines[i].text[0] == ';') {
             ++i;
+        }
+
         if (i < u->count && u->lines[i].label && !strncmp(u->lines[i].text, "return_", 7))
             pull = lp_next(u, i, 1);
     }
+
     ret = pull < 0 ? -1 : lp_next(u, (unsigned)pull, 1);
+
     if (ret < 0 || !lp_line_is(&u->lines[read], "tsc") || !lp_line_is(&u->lines[clear], "clc") ||
         !lp_is(&u->lines[add], "adc") || u->lines[add].m8 ||
         (arguments = (int)lp_immediate(&u->lines[add])) <= 0 ||
@@ -2060,6 +2516,7 @@ static int lp_unused_call_save(LpUnit *u, Function *f, size_t at)
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (!l->op)
             continue;
         if (i > (unsigned)ret || l->target >= 0 || lp_branch(l) || l->use == LP_ALL ||
@@ -2070,21 +2527,30 @@ static int lp_unused_call_save(LpUnit *u, Function *f, size_t at)
             (n >= 5 && !memcmp(p + n - 5, ",s),y", 5)))
             return 0;
     }
+
     lp_liveness(u);
+
     if ((u->lines[cleanup].out & (LP_A | LP_FLAGS)) || (u->lines[pull].out & (LP_X | LP_N | LP_Z)))
         return 0;
+
     depth = allocate(u->count * sizeof *depth);
+
     if (lp_stack_depths(u, first, depth) && depth[call] == arguments + 2 && depth[pull] == 2) {
         ok = 1;
-        for (i = first + 1; i <= (unsigned)pull; ++i)
+
+        for (i = first + 1; i <= (unsigned)pull; ++i) {
             if (depth[i] < 2) {
                 ok = 0;
                 break;
             }
+        }
     }
+
     free(depth);
+
     if (ok)
         u->lines[first].deleted = u->lines[pull].deleted = 1;
+
     return ok;
 }
 
@@ -2097,9 +2563,11 @@ static int fr_arguments_above_frame(const LpLine *l, int available)
         callee->param_count < 0 || structure_object(callee->type))
         return 0;
 
-    for (int k = 0; k < callee->param_count; ++k)
+    for (int k = 0; k < callee->param_count; ++k) {
         if (!register_parameter(k, callee->params[k]))
             required += argument_width(callee->params[k]);
+    }
+
     return available >= required;
 }
 
@@ -2111,45 +2579,59 @@ static int fr_literal_call_frame(LpUnit *u, Function *f, unsigned ready, int fra
 {
     if (body_asm_statements(f->body) || f->symbol->interrupt)
         return 0;
+
     lp_liveness(u);
 
     for (unsigned i = ready; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (!l->op)
             continue;
+
         if (l->target >= 0) {
             /* A forward error check may skip its branch veneer and a
              * nullary error call without changing argument construction. */
             unsigned j = i + 1;
+
             for (; j < (unsigned)l->target; ++j) {
                 LpLine *skip = &u->lines[j];
+
                 if (!skip->op)
                     continue;
                 if (lp_is(skip, "jmp") && skip->target > (int)j)
                     continue;
+
                 Symbol *callee = skip->call ? lp_callee(skip) : NULL;
+
                 if (callee && callee->param_count == 0 && fr_arguments_above_frame(skip, 0))
                     continue;
+
                 return 0;
             }
+
             if (j != (unsigned)l->target)
                 return 0;
+
             continue;
         }
+
         if (l->x8)
             return 0;
         if (lp_line_is(l, "sep #$20") || lp_line_is(l, "rep #$20"))
             continue;
+
         if (l->m8) {
             /* A byte store cannot expose a frame address. Calls and stack
              * adjustments still require the public 16-bit register modes. */
             if ((lp_is(l, "lda") && lp_immediate(l) >= 0) ||
                 (lp_is(l, "sta") && lp_private(p, n) && p[n - 1] == 's'))
                 continue;
+
             return 0;
         }
+
         if (lp_is(l, "tcs")) {
             if (l->out & LP_A)
                 return 0;
@@ -2164,15 +2646,19 @@ static int fr_literal_call_frame(LpUnit *u, Function *f, unsigned ready, int fra
             /* The last aggregate word may already be in A. As with PEA,
              * a literal push cannot pass an address into this frame. */
             int prev = (int)i - 1;
+
             for (; prev >= 0; --prev) {
                 LpLine *prior = &u->lines[prev];
+
                 if (prior->text[0] == ';' || lp_is(prior, "sta") || lp_is(prior, "pea"))
                     continue;
                 if (!u->indirect && (!strncmp(prior->text, ".export __inlined_", 18) ||
                                      (lp_fallthrough_label(prior) && prior->first_incoming < 0)))
                     continue;
+
                 break;
             }
+
             if (prev < 0 || !lp_is(&u->lines[prev], "lda") || lp_immediate(&u->lines[prev]) < 0)
                 return 0;
         } else if (l->call) {
@@ -2182,6 +2668,7 @@ static int fr_literal_call_frame(LpUnit *u, Function *f, unsigned ready, int fra
                    !lp_is(l, "txa") && !lp_is(l, "rts") && !lp_is(l, "rtl"))
             return 0;
     }
+
     return 1;
 }
 
@@ -2195,40 +2682,51 @@ static int fr_drop_unused_reservation(LpUnit *u, Function *f, unsigned entry, un
     if (lp_state.parser->no_stack_frames || body_asm_statements(f->body) ||
         (lp_state.frame_address && !fr_literal_call_frame(u, f, ready, frame, depth)))
         return 0;
+
     lp_liveness(u);
 
     for (unsigned i = ready; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (!l->op)
             continue;
+
         size_t n;
         const char *op = lp_operand(l, &n);
+
         if ((n >= 2 && op[n - 2] == ',' && op[n - 1] == 's') ||
             (lp_is(l, "tcs") && (l->out & (LP_FLAGS | LP_A))) ||
             (l->call && !fr_arguments_above_frame(l, depth[i] - frame)))
             return 0;
+
         if (lp_is(l, "tsc") && depth[i] == frame) {
             int clear = lp_next(u, i, 1);
             int add = clear < 0 ? -1 : lp_next(u, (unsigned)clear, 1);
             int set = add < 0 ? -1 : lp_next(u, (unsigned)add, 1);
+
             if (release >= 0 || set < 0 || !lp_line_is(&u->lines[clear], "clc") ||
                 !lp_is(&u->lines[add], "adc") || lp_immediate(&u->lines[add]) != frame ||
                 !lp_line_is(&u->lines[set], "tcs"))
                 return 0;
+
             release = (int)i;
             restored = set;
         }
     }
+
     if (release < 0)
         return 0;
 
-    for (unsigned i = entry; i <= ready; ++i)
+    for (unsigned i = entry; i <= ready; ++i) {
         if (u->lines[i].op)
             u->lines[i].deleted = 1;
+    }
 
-    for (int i = release; i <= restored; ++i)
+    for (int i = release; i <= restored; ++i) {
         if (u->lines[i].op)
             u->lines[i].deleted = 1;
+    }
+
     return 1;
 }
 
@@ -2244,7 +2742,9 @@ static int lp_dead_stack_frame_stores(LpUnit *u, Function *f, size_t at)
 
     unsigned entry = 0, i;
     int carry, subtract, ready, frame, saved = 0, allocated, *depth, changed = 0, again = 1;
+
     (void)at;
+
     if (lp_state.parser->no_private_regions || lp_state.is_volatile || u->indirect)
         return 0;
 
@@ -2252,34 +2752,45 @@ static int lp_dead_stack_frame_stores(LpUnit *u, Function *f, size_t at)
         LpLine *l = &u->lines[entry];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (l->op && !((lp_is(l, "sta") || lp_is(l, "stx")) && lp_workspace_word(p, n) >= 0))
             break;
+
         ++entry;
     }
+
     if (entry < u->count && lp_line_is(&u->lines[entry], "phy") && !u->lines[entry].x8) {
         int setup = lp_next(u, entry, 1);
+
         if (setup < 0 || lp_state.frame_address || body_asm_statements(f->body))
             return 0;
+
         saved = 2;
         entry = (unsigned)setup;
     }
+
     if (entry == u->count || !lp_line_is(&u->lines[entry], "tsc"))
         return 0;
+
     carry = lp_next(u, entry, 1);
     subtract = carry < 0 ? -1 : lp_next(u, (unsigned)carry, 1);
     ready = subtract < 0 ? -1 : lp_next(u, (unsigned)subtract, 1);
+
     if (ready < 0 || (unsigned)(ready + 1) >= u->count || !lp_line_is(&u->lines[carry], "sec") ||
         !lp_is(&u->lines[subtract], "sbc") || u->lines[subtract].m8 ||
         (frame = (int)lp_immediate(&u->lines[subtract])) < 1 || frame > 64 ||
         !lp_line_is(&u->lines[ready], "tcs"))
         return 0;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         if (u->lines[i].target >= 0 && u->lines[i].target <= ready)
             return 0;
+    }
+
     depth = allocate(u->count * sizeof *depth);
     bytes = allocate(u->count * sizeof *bytes);
     allocated = frame + saved;
+
     if (!lp_stack_depths_from(u, (unsigned)ready + 1, allocated, depth))
         goto done;
     if (lp_state.frame_address && !fr_literal_call_frame(u, f, (unsigned)ready, frame, depth))
@@ -2292,6 +2803,7 @@ static int lp_dead_stack_frame_stores(LpUnit *u, Function *f, size_t at)
         char *end;
         int offset, b, width;
         uint64_t mask = 0;
+
         if (depth[i] < 0 || !l->op)
             continue;
         if ((depth[i] > saved && depth[i] < allocated) ||
@@ -2301,26 +2813,35 @@ static int lp_dead_stack_frame_stores(LpUnit *u, Function *f, size_t at)
             goto done;
         if (saved && l->call && !fr_arguments_above_frame(l, depth[i] - allocated))
             goto done;
+
         if (lp_is(l, "tsc")) {
             int clear = lp_next(u, i, 1), add = clear < 0 ? -1 : lp_next(u, (unsigned)clear, 1);
             int set = add < 0 ? -1 : lp_next(u, (unsigned)add, 1);
+
             if (set < 0 || !lp_line_is(&u->lines[clear], "clc") || !lp_is(&u->lines[add], "adc") ||
                 lp_immediate(&u->lines[add]) < 0 || !lp_line_is(&u->lines[set], "tcs"))
                 goto done;
         }
+
         if ((l->use == LP_ALL && !lp_line_is(l, "sep #$20") && !lp_line_is(l, "rep #$20")) ||
             lp_is(l, "tsx") || (n >= 2 && p[n - 2] == ',' && p[n - 1] == 'y'))
             goto done;
         if (n < 3 || p[n - 2] != ',' || p[n - 1] != 's')
             continue;
+
         offset = (int)strtol(p, &end, 10);
+
         if (end != p + n - 2 || offset < 0 || offset > 255 || depth[i] < allocated)
             goto done;
+
         offset += allocated - depth[i];
         width = lp_width(l);
-        for (b = offset; b < offset + width; ++b)
+
+        for (b = offset; b < offset + width; ++b) {
             if (b >= 1 && b <= frame)
                 mask |= UINT64_C(1) << (b - 1);
+        }
+
         if (lp_is(l, "sta")) {
             bytes[i].write = mask;
             bytes[i].local_store = offset >= 1 && offset + width - 1 <= frame;
@@ -2330,13 +2851,17 @@ static int lp_dead_stack_frame_stores(LpUnit *u, Function *f, size_t at)
 
     while (again) {
         again = 0;
+
         for (i = u->count; i-- > (unsigned)ready + 1;) {
             LpLine *l = &u->lines[i];
             uint64_t out = (!l->ends && i + 1 < u->count) ? bytes[i + 1].live : 0;
             uint64_t live;
+
             if (l->target >= 0)
                 out |= bytes[l->target].live;
+
             live = bytes[i].read | (out & ~bytes[i].write);
+
             if (live != bytes[i].live) {
                 bytes[i].live = live;
                 again = 1;
@@ -2344,19 +2869,24 @@ static int lp_dead_stack_frame_stores(LpUnit *u, Function *f, size_t at)
         }
     }
 
-    for (i = (unsigned)ready + 1; i < u->count; ++i)
+    for (i = (unsigned)ready + 1; i < u->count; ++i) {
         if (bytes[i].local_store) {
             LpLine *l = &u->lines[i];
             uint64_t out = (!l->ends && i + 1 < u->count) ? bytes[i + 1].live : 0;
+
             if (l->target >= 0)
                 out |= bytes[l->target].live;
+
             if (!(bytes[i].write & out)) {
                 l->deleted = 1;
                 changed = 1;
             }
         }
+    }
+
     if (!changed && !saved)
         changed = fr_drop_unused_reservation(u, f, entry, (unsigned)ready, frame, depth);
+
 done:
     free(bytes);
     free(depth);
@@ -2372,32 +2902,41 @@ static int lp_remove_index_save(LpUnit *u, Function *f, size_t at)
 
     if (u->indirect)
         return 0;
+
     lp_liveness(u);
 
     for (i = 0; i < u->count; ++i) {
         LpLine *push = &u->lines[i];
+
         unsigned reg = lp_is(push, "phx") ? LP_X : lp_is(push, "phy") ? LP_Y : 0;
         unsigned last_target = i;
+
         if (!reg)
             continue;
+
         for (j = i + 1; j < u->count; ++j) {
             LpLine *l = &u->lines[j];
             size_t n;
             const char *p = lp_operand(l, &n);
+
             if (l->label && !lp_inner_label(u, j, i + 1, j))
                 break;
             if (!l->op)
                 continue;
+
             if (lp_is(l, reg == LP_X ? "plx" : "ply")) {
                 if (j >= last_target && !(l->out & (LP_N | LP_Z))) {
                     push->deleted = l->deleted = 1;
                     return 1;
                 }
+
                 break;
             }
+
             if (l->target > (int)j && !l->call) {
                 if ((unsigned)l->target > last_target)
                     last_target = (unsigned)l->target;
+
                 continue;
             }
             if (l->call || l->ends || lp_branch(l) || l->use == LP_ALL || (l->def & reg) ||
@@ -2408,6 +2947,7 @@ static int lp_remove_index_save(LpUnit *u, Function *f, size_t at)
                 break;
         }
     }
+
     return 0;
 }
 
@@ -2418,15 +2958,19 @@ static int lp_place_late_y_save(LpUnit *u, unsigned first, unsigned ret)
     unsigned i, tail = ret, early = 0, tag;
     char restore[96], definition[120];
 
-    while (tail > first && !u->lines[tail - 1].op)
+    while (tail > first && !u->lines[tail - 1].op) {
         --tail;
+    }
+
     if (tail <= first)
         return 0;
 
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (l->target < 0)
             continue;
+
         if (i < first) {
             if ((unsigned)l->target >= tail)
                 ++early;
@@ -2437,8 +2981,10 @@ static int lp_place_late_y_save(LpUnit *u, unsigned first, unsigned ret)
         else if ((unsigned)l->target >= tail && !lp_branch(l) && !lp_is(l, "jmp"))
             return 0;
     }
+
     if (!early)
         return 0;
+
     tag = lp_next_label();
     snprintf(restore, sizeof restore, "cg_%s_%u", lp_state.parser->unit, tag);
     snprintf(definition, sizeof definition, "%s = *\n    ply\n", restore);
@@ -2447,6 +2993,7 @@ static int lp_place_late_y_save(LpUnit *u, unsigned first, unsigned ret)
 
     for (i = first; i < ret; ++i) {
         LpLine *l = &u->lines[i];
+
         if (l->target >= 0 && (unsigned)l->target >= tail) {
             if (lp_is(l, "jmp"))
                 lp_set(l, "    jmp .loword(%s)", restore);
@@ -2454,6 +3001,7 @@ static int lp_place_late_y_save(LpUnit *u, unsigned first, unsigned ret)
                 lp_set(l, "    %.3s %s", l->op, restore);
         }
     }
+
     return 1;
 }
 
@@ -2464,16 +3012,21 @@ static int lp_hoist_local_y_saves(LpUnit *u, Function *f, size_t at)
 {
     unsigned i, entry = 0, saves = 0, restores = 0, first_save = 0, returns = 0, ret = 0;
     int *depth, ok = 0, plain_push = 0, late;
+
     (void)at;
 
     if (u->calls || u->indirect || f->symbol->interrupt || lp_state.parser->no_register_cursors)
         return 0;
 
-    while (entry < u->count && !u->lines[entry].op)
+    while (entry < u->count && !u->lines[entry].op) {
         ++entry;
+    }
+
     if (entry == u->count)
         return 0;
+
     depth = allocate(u->count * sizeof *depth);
+
     if (!lp_stack_depths(u, 0, depth))
         goto done;
 
@@ -2481,19 +3034,23 @@ static int lp_hoist_local_y_saves(LpUnit *u, Function *f, size_t at)
         LpLine *l = &u->lines[i];
         size_t n;
         const char *p = lp_operand(l, &n);
+
         if (l->label && plain_push)
             goto done;
         if (!l->op)
             continue;
         if (depth[i] < 0 || l->x8 || (l->target >= 0 && (unsigned)l->target <= entry))
             goto done;
+
         if (lp_is(l, "pha")) {
             if (plain_push || depth[i] != 0 || l->m8)
                 goto done;
+
             plain_push = 1;
         } else if (lp_is(l, "pla")) {
             if (!plain_push || depth[i] != 2 || l->m8)
                 goto done;
+
             plain_push = 0;
         } else if (plain_push && (l->target >= 0 || l->ends || ((l->use | l->def) & LP_Y)))
             goto done;
@@ -2502,14 +3059,17 @@ static int lp_hoist_local_y_saves(LpUnit *u, Function *f, size_t at)
                 goto done;
             if (!saves)
                 first_save = i;
+
             ++saves;
         } else if (lp_is(l, "ply")) {
             if (depth[i] != 2)
                 goto done;
+
             ++restores;
         } else if (lp_is(l, "rts") || lp_is(l, "rtl")) {
             if (depth[i])
                 goto done;
+
             ++returns;
             ret = i;
         } else if (lp_line_is(l, "rep #$20") || lp_line_is(l, "sep #$20")) {
@@ -2521,30 +3081,38 @@ static int lp_hoist_local_y_saves(LpUnit *u, Function *f, size_t at)
                    (((l->use | l->def) & LP_Y) && depth[i] != 2))
             goto done;
     }
+
     if (plain_push || saves < 2 || !restores)
         goto done;
 
     /* Removing PLY changes N/Z, so check the flag uses independently of
      * accumulator-width switches. */
-    for (i = entry; i < u->count; ++i)
+    for (i = entry; i < u->count; ++i) {
         if (lp_line_is(&u->lines[i], "rep #$20") || lp_line_is(&u->lines[i], "sep #$20"))
             u->lines[i].use = 0;
+    }
+
     lp_liveness(u);
 
-    for (i = entry; i < u->count; ++i)
+    for (i = entry; i < u->count; ++i) {
         if (lp_is(&u->lines[i], "ply") && (u->lines[i].out & (LP_N | LP_Z)))
             goto done;
+    }
+
     late = returns == 1 && lp_place_late_y_save(u, first_save, ret);
+
     if (!late)
         lp_insert(&u->lines[entry], "    phy\n");
 
     for (i = entry; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (lp_is(l, "phy") || lp_is(l, "ply"))
             l->deleted = 1;
         else if (!late && (lp_is(l, "rts") || lp_is(l, "rtl")))
             lp_insert(l, "    ply\n");
     }
+
     ok = 1;
 done:
     free(depth);

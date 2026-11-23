@@ -66,36 +66,36 @@ enum {
 
 // One parsed line of assembly text and its liveness/edit metadata
 typedef struct {
-    const char *text;      // raw line text inside the unit buffer
-    size_t length;         // line length excluding '\n'
-    const char *op;        // mnemonic start if this line is an instruction, else NULL
-    int label;             // 1 if this line defines a label
-    int m8;                // 1 if accumulator A is in 8-bit mode here
-    int x8;                // 1 if index registers X/Y are in 8-bit mode here
-    int target;            // destination line index for a local branch/jump, or -1
-    int first_incoming;    // head of linked list of lines jumping here, or -1
-    int next_incoming;     // next incoming jumper sharing the same target, or -1
-    int ends;              // 1 if control flow does not fall through to the next line
-    int call;              // 1 if this line is a call or tail call
-    int indirect;          // 1 if this line is an indirect jump
-    int wrap_step;         // 1 if preceded by a near-pointer wrap marker
-    unsigned use;          // bitmask of registers/flags read by this line
-    unsigned def;          // bitmask of registers/flags written by this line
-    unsigned live;         // bitmask live on entry to this line
-    unsigned out;          // bitmask live on exit from this line
-    char *replace;         // replacement line text staged by a pass, or NULL
-    int deleted;           // 1 if a pass marked this line for removal
-    char *before;          // extra text to insert right before this line, or NULL
+    const char *text; // raw line text inside the unit buffer
+    size_t length; // line length excluding '\n'
+    const char *op; // mnemonic start if this line is an instruction, else NULL
+    int label; // 1 if this line defines a label
+    int m8; // 1 if accumulator A is in 8-bit mode here
+    int x8; // 1 if index registers X/Y are in 8-bit mode here
+    int target; // destination line index for a local branch/jump, or -1
+    int first_incoming; // head of linked list of lines jumping here, or -1
+    int next_incoming; // next incoming jumper sharing the same target, or -1
+    int ends; // 1 if control flow does not fall through to the next line
+    int call; // 1 if this line is a call or tail call
+    int indirect; // 1 if this line is an indirect jump
+    int wrap_step; // 1 if preceded by a near-pointer wrap marker
+    unsigned use; // bitmask of registers/flags read by this line
+    unsigned def; // bitmask of registers/flags written by this line
+    unsigned live; // bitmask live on entry to this line
+    unsigned out; // bitmask live on exit from this line
+    char *replace; // replacement line text staged by a pass, or NULL
+    int deleted; // 1 if a pass marked this line for removal
+    char *before; // extra text to insert right before this line, or NULL
 } LpLine;
 
 // Parsed assembly lines for one function body
 typedef struct {
-    char *text;            // owned copy of the function's assembly text
-    LpLine *lines;         // array of parsed lines
-    unsigned count;        // number of entries in lines[]
-    int indirect;          // 1 if the function contains jump tables or indirect jumps
-    int calls;             // number of call / tail-call instructions
-    int helpers;           // 1 if any call targets an internal __helper or pointer
+    char *text; // owned copy of the function's assembly text
+    LpLine *lines; // array of parsed lines
+    unsigned count; // number of entries in lines[]
+    int indirect; // 1 if the function contains jump tables or indirect jumps
+    int calls; // number of call / tail-call instructions
+    int helpers; // 1 if any call targets an internal __helper or pointer
 } LpUnit;
 
 static int lp_is(const LpLine *l, const char *name)
@@ -117,6 +117,7 @@ static const char *lp_operand(const LpLine *l, size_t *n)
         *n = 0;
         return "";
     }
+
     *n = l->length - 8;
     return l->op + 4;
 }
@@ -133,6 +134,7 @@ static unsigned lp_index_use(const LpLine *l)
 {
     size_t n;
     const char *o = lp_operand(l, &n);
+
     unsigned use = 0;
 
     if (n >= 2 && o[n - 2] == ',' && o[n - 1] == 'x')
@@ -141,17 +143,21 @@ static unsigned lp_index_use(const LpLine *l)
         use |= LP_Y;
     if (n >= 3 && o[0] == '(' && memchr(o, ',', n) && o[n - 1] == ')' && o[n - 2] == 'x')
         use |= LP_X;
+
     return use;
 }
 
 static void lp_effects(LpLine *l)
 {
     static const char *const branches[] = {"bcc", "bcs", "beq", "bne", "bmi", "bpl", "bvc", "bvs"};
+
     static const unsigned reads[] = {LP_C, LP_C, LP_Z, LP_Z, LP_N, LP_N, LP_V, LP_V};
     const char *op = l->op;
+
     unsigned a = l->m8 ? LP_AL : LP_A, x = l->x8 ? 0 : LP_X, y = l->x8 ? 0 : LP_Y,
              idx = lp_index_use(l);
     size_t n;
+
     unsigned i;
     const char *operand = lp_operand(l, &n);
     int accumulator = !n || (n == 1 && operand[0] == 'a');
@@ -160,23 +166,28 @@ static void lp_effects(LpLine *l)
     l->def = 0;
     l->target = -1;
 
-    for (i = 0; i < 8; ++i)
+    for (i = 0; i < 8; ++i) {
         if (op_is(op, branches[i])) {
             l->use = reads[i];
             return;
         }
+    }
+
     if (op_is(op, "bra") || op_is(op, "brl")) {
         l->use = 0;
         l->ends = 1;
         return;
     }
+
     if (op_is(op, "jmp") || op_is(op, "jml")) {
         l->ends = 1;
+
         if (n && (operand[0] == '(' || operand[0] == '[')) {
             l->indirect = 1;
             l->use = LP_ALL;
             return;
         }
+
         l->use = 0;
         return; /* resolved as a label below, or a tail call */
     }
@@ -409,9 +420,11 @@ static int lp_branch(const LpLine *l)
                                         "bpl", "bvc", "bvs", "bra", "brl"};
     unsigned i;
 
-    for (i = 0; i < 10; ++i)
+    for (i = 0; i < 10; ++i) {
         if (lp_is(l, names[i]))
             return 1;
+    }
+
     return 0;
 }
 
@@ -419,21 +432,25 @@ static Symbol *lp_callee(const LpLine *call)
 {
     size_t length;
     const char *name = lp_operand(call, &length);
+
     unsigned i;
 
     if (length > 9 && !strncmp(name, ".loword(", 8) && name[length - 1] == ')') {
         name += 8;
         length -= 9;
     }
+
     if (length < 2 || name[0] != '_' || name[1] == '_')
         return NULL;
 
     for (i = 0; i < lp_state.parser->symbol_count; ++i) {
         Symbol *s = &lp_state.parser->symbols[i];
+
         if (s->function && strlen(s->asm_name) == length - 1 &&
             !memcmp(name + 1, s->asm_name, length - 1))
             return s;
     }
+
     return NULL;
 }
 
@@ -443,13 +460,16 @@ static unsigned lp_call_use(const LpLine *call)
 
     if (!callee || callee->variadic || callee->param_count < 0)
         return LP_A | LP_X | LP_Y;
+
     if (callee->old_style) {
         /* A visible K&R definition still has fixed incoming register homes */
         Function *body = inl.by_symbol[callee - lp_state.parser->symbols];
+
         if (!body || body->aggregate_abi || body->uses_varargs || callee->interrupt ||
             body_asm_statements(body->body))
             return LP_A | LP_X | LP_Y;
     }
+
     return LP_Y |
            (callee->param_count >= 1 && register_parameter(0, callee->params[0]) ? LP_X : 0) |
            (callee->param_count >= 2 && register_parameter(1, callee->params[1]) ? LP_A : 0);
@@ -459,24 +479,29 @@ static void lp_parse(LpUnit *u, const char *source, size_t length)
 {
     const char *p;
     int m8 = 0, x8 = 0, wrap_step = 0;
+
     unsigned i, label_count = 0;
     AssemblyLabels labels;
 
     memset(u, 0, sizeof *u);
     u->text = malloc(length + 1);
     u->lines = malloc((length / 2 + 2) * sizeof *u->lines);
+
     if (!u->text || !u->lines) {
         fputs("out of memory emitting assembly\n", stderr);
         exit(EXIT_FAILURE);
     }
+
     memcpy(u->text, source, length);
     u->text[length] = 0;
 
     for (p = u->text; *p;) {
         const char *eol = strchr(p, '\n');
         LpLine *l = &u->lines[u->count++];
+
         if (!eol)
             eol = p + strlen(p);
+
         memset(l, 0, sizeof *l);
         l->text = p;
         l->length = (size_t)(eol - p);
@@ -485,84 +510,107 @@ static void lp_parse(LpUnit *u, const char *source, size_t length)
         l->label = assembly_decode(p, l->length, &m8, &x8, &l->op);
         l->m8 = m8;
         l->x8 = x8;
+
         if (!strncmp(p, "; near pointer wrap\n", 20))
             wrap_step = 1;
         if (!l->op && !l->label && l->length && *p == '.' &&
             (!strncmp(p, ".word", 5) || !strncmp(p, ".addr", 5) || !strncmp(p, ".byte", 5) ||
              !strncmp(p, ".faraddr", 8)))
             u->indirect = 1;
+
         if (l->op) {
             l->wrap_step = wrap_step;
             wrap_step = 0;
         }
+
         if (l->label)
             ++label_count;
+
         p = *eol ? eol + 1 : eol;
     }
+
     assembly_labels_init(&labels, label_count);
 
     for (i = 0; i < u->count; ++i) {
         const LpLine *l = &u->lines[i];
+
         if (l->label)
             assembly_label_add(&labels, l->text, l->length, i);
     }
 
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (!l->op)
             continue;
+
         lp_effects(l);
+
         if (l->indirect)
             u->indirect = 1;
         if (l->call)
             ++u->calls;
+
         if (lp_branch(l) || op_is(l->op, "jmp") || op_is(l->op, "jml")) {
             size_t n;
             const char *name = lp_operand(l, &n);
+
             if (!l->indirect && n) {
                 if (n > 9 && !strncmp(name, ".loword(", 8) && name[n - 1] == ')') {
                     name += 8;
                     n -= 9;
                 }
+
                 l->target = assembly_label_target(&labels, i, name, n);
+
                 if (l->target < 0 && (op_is(l->op, "jmp") || op_is(l->op, "jml"))) {
                     /* A transfer out of the function: a tail call */
                     l->call = 1;
                     ++u->calls;
                     l->use = lp_call_use(l);
+
                     if (!strncmp(name, "__", 2))
                         u->helpers = 1;
                 } else if (l->target < 0)
                     l->use = LP_ALL;
             }
         }
+
         if (op_is(l->op, "jsr") || op_is(l->op, "jsl")) {
             size_t n;
             const char *name = lp_operand(l, &n);
+
             l->use = lp_call_use(l);
             static const char stack_args[] = "; unprototyped stack arguments: ";
+
             if (i && u->lines[i - 1].length > sizeof stack_args - 1 &&
                 !strncmp(u->lines[i - 1].text, stack_args, sizeof stack_args - 1)) {
                 Symbol *callee = lp_callee(l);
                 size_t name_length = u->lines[i - 1].length - (sizeof stack_args - 1);
+
                 if (callee && callee->param_count < 0 && strlen(callee->asm_name) == name_length &&
                     !memcmp(u->lines[i - 1].text + sizeof stack_args - 1, callee->asm_name,
                             name_length))
                     l->use = LP_Y;
             }
+
             if (n > 8 && !strncmp(name, ".loword(", 8)) {
                 name += 8;
             }
+
             if (!strncmp(name, "__", 2) || name[0] == '(' || name[0] == '[')
                 u->helpers = 1;
         }
     }
+
     assembly_labels_free(&labels);
 
     for (i = u->count; i-- > 0;) {
         LpLine *l = &u->lines[i];
+
         if (l->target >= 0) {
             LpLine *target = &u->lines[l->target];
+
             l->next_incoming = target->first_incoming;
             target->first_incoming = (int)i;
         }
@@ -584,16 +632,21 @@ static void lp_free_edits(LpUnit *u)
 static void lp_liveness(LpUnit *u)
 {
     int changed = 1;
+
     unsigned i;
 
-    for (i = 0; i < u->count; ++i)
+    for (i = 0; i < u->count; ++i) {
         u->lines[i].live = u->lines[i].out = 0;
+    }
 
     while (changed) {
         changed = 0;
+
         for (i = u->count; i-- > 0;) {
             LpLine *l = &u->lines[i];
+
             unsigned out = 0, live;
+
             if (!l->op) {
                 out = i + 1 < u->count ? u->lines[i + 1].live : LP_ALL;
                 live = out;
@@ -602,8 +655,10 @@ static void lp_liveness(LpUnit *u)
                     out |= i + 1 < u->count ? u->lines[i + 1].live : LP_ALL;
                 if (l->target >= 0)
                     out |= u->lines[l->target].live;
+
                 live = l->use | (out & ~l->def);
             }
+
             if (live != l->live || out != l->out) {
                 l->live = live;
                 l->out = out;
@@ -622,13 +677,16 @@ static int lp_next(const LpUnit *u, unsigned k, int direction)
         if (direction < 0) {
             if (!i)
                 return -1;
+
             --i;
         } else if (++i >= u->count)
             return -1;
+
         if (!u->lines[i].length)
             return -1;
         if (u->lines[i].text[0] == ';')
             continue;
+
         return u->lines[i].op ? (int)i : -1;
     }
 }
@@ -638,14 +696,17 @@ static void lp_set(LpLine *l, const char *format, ...)
     va_list args;
     int n;
     char *text;
+
     va_start(args, format);
     n = vsnprintf(NULL, 0, format, args);
     va_end(args);
     text = malloc((size_t)n + 1);
+
     if (!text) {
         fputs("out of memory emitting assembly\n", stderr);
         exit(EXIT_FAILURE);
     }
+
     va_start(args, format);
     vsnprintf(text, (size_t)n + 1, format, args);
     va_end(args);
@@ -663,6 +724,7 @@ static void lp_insert(LpLine *l, const char *text)
         fputs("out of memory emitting assembly\n", stderr);
         exit(EXIT_FAILURE);
     }
+
     memcpy(b + old, text, n + 1);
     l->before = b;
 }
@@ -677,6 +739,7 @@ static void lp_emit(LpUnit *u, size_t at)
 
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
+
         if (l->before)
             code("%s", l->before);
         if (l->deleted)
@@ -702,8 +765,10 @@ static unsigned lp_text_words(const char *p, const char *end)
             unsigned byte = q[8] == 'r' ? 4 : 0;
             unsigned bytes = (q > p && q[-1] == '[') ? 3u : 2u;
             q += 11;
+
             if (q < end && *q == '+')
                 byte += (unsigned)strtoul(q + 1, (char **)&q, 10);
+
             dp_mark_width(&taken, byte, bytes);
             --q;
         } else if (*q == '$' && q > p && (q[-1] == ':' || q[-1] == '[' || q[-1] == '(') &&
@@ -712,6 +777,7 @@ static unsigned lp_text_words(const char *p, const char *end)
             dp_mark_width(&taken, (unsigned)strtoul(q + 1, NULL, 16) - 0xE0u,
                           (q > p && q[-1] == '[') ? 3u : 2u);
     }
+
     return taken;
 }
 
@@ -725,14 +791,19 @@ static int lp_workspace_offset(const char *o, size_t n)
     if (n < 11 || strncmp(o, "__arith_", 8) ||
         (strncmp(o + 8, "lhs", 3) && strncmp(o + 8, "rhs", 3)))
         return -1;
+
     byte = o[8] == 'r' ? 4 : 0;
+
     if (n == 11)
         return (int)byte;
     if (o[11] != '+')
         return -1;
+
     byte += (unsigned)strtoul(o + 12, &stop, 10);
+
     if (stop != o + n || byte > 30)
         return -1;
+
     return (int)byte;
 }
 
@@ -759,17 +830,22 @@ static int lp_width(const LpLine *l)
                                         "ora", "eor", "bit", "inc", "dec", "asl",
                                         "lsr", "rol", "ror", "stz", "tsb", "trb"};
     static const char *const x_ops[] = {"ldx", "stx", "cpx", "ldy", "sty", "cpy"};
+
     unsigned i;
 
-    for (i = 0; i < sizeof a_ops / sizeof *a_ops; ++i)
+    for (i = 0; i < sizeof a_ops / sizeof *a_ops; ++i) {
         if (lp_is(l, a_ops[i]))
             return l->m8 ? 1 : 2;
+    }
 
-    for (i = 0; i < sizeof x_ops / sizeof *x_ops; ++i)
+    for (i = 0; i < sizeof x_ops / sizeof *x_ops; ++i) {
         if (lp_is(l, x_ops[i]))
             return l->x8 ? 1 : 2;
+    }
+
     if (lp_is(l, "pei"))
         return 2;
+
     return 4;
 }
 
@@ -800,18 +876,24 @@ static int lp_loop(const LpUnit *u, unsigned k, unsigned *back)
     for (h = (int)k; h >= 0; --h) {
         unsigned j, last = 0;
         int found = 0;
+
         if (!u->lines[h].label)
             continue;
-        for (j = k; j < u->count; ++j)
+
+        for (j = k; j < u->count; ++j) {
             if (u->lines[j].op && u->lines[j].target == h) {
                 found = 1;
                 last = j;
             }
+        }
+
         if (!found)
             continue;
+
         *back = last;
         return h;
     }
+
     return -1;
 }
 
@@ -827,30 +909,38 @@ static int lp_entries(const LpUnit *u, unsigned h, unsigned b, unsigned *sites, 
     if (u->indirect)
         return 0;
 
-    while (group > 0 && !u->lines[group - 1].op)
+    while (group > 0 && !u->lines[group - 1].op) {
         --group;
+    }
 
-    while (end + 1 < u->count && !u->lines[end + 1].op)
+    while (end + 1 < u->count && !u->lines[end + 1].op) {
         ++end;
+    }
+
     *count = 0;
     for (j = 0; j < u->count; ++j) {
         const LpLine *l = &u->lines[j];
+
         if (!l->op || l->target < 0 || (j >= h && j <= b))
             continue;
         if ((unsigned)l->target < group || (unsigned)l->target > b)
             continue;
         if ((unsigned)l->target > end || !l->ends || lp_is(l, "jml") || *count == 8)
             return 0;
+
         sites[(*count)++] = j;
     }
 
-    for (prev = (int)group - 1; prev >= 0 && !u->lines[prev].op; --prev)
-        ;
+    for (prev = (int)group - 1; prev >= 0 && !u->lines[prev].op; --prev) {
+    }
+
     if (prev >= 0 && !u->lines[prev].ends) {
         if (*count == 8)
             return 0;
+
         sites[(*count)++] = group;
     }
+
     return *count > 0;
 }
 
@@ -863,14 +953,18 @@ static int lp_region_writes(const LpUnit *u, unsigned h, unsigned b, const char 
         const LpLine *l = &u->lines[j];
         size_t m;
         const char *o;
+
         if (!l->op)
             continue;
         if (l->call || lp_is(l, "mvn") || lp_is(l, "mvp") ||
             (l->use == LP_ALL && !lp_is(l, "rep") && !lp_is(l, "sep")))
             return 1;
+
         o = lp_operand(l, &m);
+
         if (word >= 0) {
             int w = lp_workspace_word(o, m);
+
             if (w < 0 && lp_text_words(o, o + m) & (3u << (word / 2)))
                 return 1; /* other spelling of the workspace */
             if (w >= 0 && lp_overlaps(l, w, word) && lp_store_op(l))
@@ -878,14 +972,15 @@ static int lp_region_writes(const LpUnit *u, unsigned h, unsigned b, const char 
         } else if (m == n && !strncmp(o, operand, n) && lp_store_op(l))
             return 1;
     }
+
     return 0;
 }
 
 // Scratch cache for running line passes to a fixed point without re-parsing unchanged text
 typedef struct {
-    LpUnit parsed;         // cached parse of the current assembly text
-    LpLine *work;          // scratch copy passed to each pass so rejected passes stay clean
-    unsigned capacity;     // allocated size of work[]
+    LpUnit parsed; // cached parse of the current assembly text
+    LpLine *work; // scratch copy passed to each pass so rejected passes stay clean
+    unsigned capacity; // allocated size of work[]
 } LpRunner;
 
 static void lp_invalidate(LpRunner *runner)
@@ -921,6 +1016,7 @@ static int lp_run(LpRunner *runner, Function *f, size_t at,
 
         // Rejected passes can change analysis fields as well as stage edits, so give each pass a fresh copy
         u.lines = runner->work;
+
         if (u.count) {
             memcpy(u.lines, runner->parsed.lines, u.count * sizeof *u.lines);
         }

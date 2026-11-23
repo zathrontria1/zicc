@@ -311,8 +311,10 @@ static int parameter_incoming_live(Symbol *v);
  * stack-pointer provenance is available at each individual call. */
 static int automatic_designator(Expr *e)
 {
-    while (e && e->kind == EX_MEMBER && e->op != TOK_ARROW)
+    while (e && e->kind == EX_MEMBER && e->op != TOK_ARROW) {
         e = e->left;
+    }
+
     return e && e->kind == EX_OBJECT && e->symbol->owner;
 }
 
@@ -336,9 +338,11 @@ static int frame_address_expression(Expr *e)
         frame_address_expression(e->third))
         return 1;
 
-    for (i = 0; i < e->arg_count; ++i)
+    for (i = 0; i < e->arg_count; ++i) {
         if (frame_address_expression(e->args[i]))
             return 1;
+    }
+
     return 0;
 }
 
@@ -346,11 +350,13 @@ static const char frame_address_marker[] = "; caller frame address visible\n";
 
 static int frame_address_visible(Statement *s)
 {
-    for (; s; s = s->next)
+    for (; s; s = s->next) {
         if (frame_address_expression(s->expression) || frame_address_expression(s->step) ||
             frame_address_visible(s->initial) || frame_address_visible(s->body) ||
             frame_address_visible(s->alternate))
             return 1;
+    }
+
     return 0;
 }
 
@@ -392,15 +398,17 @@ static void require_frame_home(Symbol *s)
                                    (cg.retained_y == 5 && cg.retained_ptr)))
         cg.retained_failed = 1;
 
-    for (i = 0; i < cg.dead_index_count; ++i)
+    for (i = 0; i < cg.dead_index_count; ++i) {
         if (cg.dead_indices[i] == s)
             error_at(here(cg.parser), "internal read/write of eliminated induction home '%s'",
                      s->name);
+    }
 
-    for (i = 0; i < cg.omitted_parameter_count; ++i)
+    for (i = 0; i < cg.omitted_parameter_count; ++i) {
         if (cg.omitted_parameters[i] == s)
             error_at(here(cg.parser), "internal read/write of eliminated parameter home '%s'",
                      s->name);
+    }
 }
 
 static void code(const char *format, ...)
@@ -408,28 +416,37 @@ static void code(const char *format, ...)
     va_list args, copy;
     int n;
     char *buffer;
+
     va_start(args, format);
     va_copy(copy, args);
     n = vsnprintf(NULL, 0, format, args);
     va_end(args);
+
     if (n < 0) {
         va_end(copy);
         fputs("assembly formatting failed\n", stderr);
         exit(EXIT_FAILURE);
     }
+
     if (cg.length + (size_t)n + 1 > cg.capacity) {
         size_t capacity = cg.capacity ? cg.capacity : 4096;
-        while (capacity < cg.length + (size_t)n + 1)
+
+        while (capacity < cg.length + (size_t)n + 1) {
             capacity *= 2;
+        }
+
         buffer = realloc(cg.assembly, capacity);
+
         if (!buffer) {
             va_end(copy);
             fputs("out of memory emitting assembly\n", stderr);
             exit(EXIT_FAILURE);
         }
+
         cg.assembly = buffer;
         cg.capacity = capacity;
     }
+
     vsnprintf(cg.assembly + cg.length, cg.capacity - cg.length, format, copy);
     va_end(copy);
     cg.length += (size_t)n;
@@ -439,6 +456,7 @@ static void inline_marker(Statement *s)
 {
     if (!s->inline_callee)
         return;
+
     unsigned id = ++cg.inline_label;
     code("; inlined call: %s %s\n.export __inlined_%s_%u_%s\n__inlined_%s_%u_%s:\n",
          cg.function->symbol->asm_name, s->inline_callee->asm_name, cg.parser->unit, id,
@@ -453,6 +471,7 @@ static int statement_inline_markers(Statement *s)
             return 1;
         }
     }
+
     return 0;
 }
 
@@ -467,14 +486,17 @@ static unsigned frame_offset(unsigned offset)
         return offset - cg.frame_saved;
     if (offset && word < 384 && cg.frame_map[word])
         return cg.frame_map[word] + ((offset - 1) & 1);
+
     return offset;
 }
 
 static const char *frame_operand(unsigned offset)
 {
     static char buffers[8][24];
+
     static unsigned next;
     char *text = buffers[next++ & 7];
+
     unsigned word;
 
     if (cg.retained_index &&
@@ -482,27 +504,36 @@ static const char *frame_operand(unsigned offset)
          (cg.retained_y == 5 && cg.retained_ptr)) &&
         offset >= cg.retained_index->offset && offset < cg.retained_index->offset + 2)
         cg.retained_failed = 1;
+
     if (dp_state.homes && dp_state.zero_stack && offset >= dp_state.incoming_base) {
         if (cg.loop_y_borrowed)
             dp_state.failed = 1;
+
         snprintf(text, sizeof buffers[0], "a:$%04X,y",
                  offset - dp_state.incoming_base + 5 + cg.parser->long_return);
         return text;
     }
+
     if (bound_state.cursor && !bound_state.own && offset == bound_state.cursor->offset)
         bound_state.failed = 1;
+
     if (lftr_state.active) {
         unsigned k;
-        for (k = 0; k < lftr_state.count; ++k)
+
+        for (k = 0; k < lftr_state.count; ++k) {
             if (offset >= lftr_state.indices[k]->offset &&
                 offset <= lftr_state.indices[k]->offset + 1)
                 lftr_state.failed = 1;
+        }
     }
+
     word = offset ? (offset - 1) / 2 : 0;
+
     if ((dp_state.trial) && offset && word < 384) {
         unsigned depth = cg.loop_count < 4 ? cg.loop_count : 4;
         dp_state.weight[word] += 1u << (3 * depth);
     }
+
     if (dp_state.homes) {
         /* A promoted word is spelled as a placeholder until the function is
          * validated, so the workspace scan can tell homes from other uses. */
@@ -515,8 +546,10 @@ static const char *frame_operand(unsigned offset)
         if (dp_state.frameless || (offset && word < dp_state.words && dp_state.map[word]))
             dp_state.failed = 1;
     }
+
     if (cg.loop_y_borrowed)
         dp_state.failed = 1;
+
     offset = frame_offset(offset);
     snprintf(text, sizeof buffers[0], "a:$%04X,y", offset);
     return text;
@@ -533,21 +566,26 @@ static void call_entry(const char *name)
 
     if (cg.parser->source_lto && name[0] == '_') {
         Function *f;
-        for (f = cg.parser->functions; f; f = f->next)
+
+        for (f = cg.parser->functions; f; f = f->next) {
             if (!strcmp(f->symbol->asm_name, name + 1) && !f->symbol->inline_omit &&
                 (!f->symbol->inline_hint || f->symbol->internal || f->symbol->inline_external)) {
                 p = NULL;
                 break;
             }
+        }
     }
 
     while (p && *p) {
         const char *end = strchr(p, ',');
         size_t length = end ? (size_t)(end - p) : strlen(p);
+
         if (length == n && !strncmp(p, name, n))
             far = 1;
+
         p = end ? end + 1 : NULL;
     }
+
     if (far)
         code("    jsl %s\n", name);
     else
@@ -561,6 +599,7 @@ static void helper(const char *name)
          * the assembly modules by tests/check-interrupt-scratch.py. */
         static const struct {
             const char *name;
+
             unsigned writes;
             const char *entry;
         } safe[] = {{"__ucmp16", 0},
@@ -601,24 +640,33 @@ static void helper(const char *name)
                     {"__ufix64_64", 0x001f}};
 
         unsigned i;
-        for (i = 0; i < sizeof safe / sizeof *safe; ++i)
+
+        for (i = 0; i < sizeof safe / sizeof *safe; ++i) {
             if (!strcmp(name, safe[i].name))
                 break;
+        }
+
         if (i == sizeof safe / sizeof *safe)
             error_at(here(cg.parser), "interrupt handler requires unsafe arithmetic helper '%s'",
                      name);
+
         cg.interrupt_scratch |= safe[i].writes;
+
         if (safe[i].entry)
             name = safe[i].entry;
     }
+
     unsigned i;
     cg.arithmetic = 1;
 
-    for (i = 0; i < cg.helper_count; ++i)
+    for (i = 0; i < cg.helper_count; ++i) {
         if (!strcmp(cg.helpers[i], name))
             break;
+    }
+
     if (i == cg.helper_count)
         cg.helpers[cg.helper_count++] = name;
+
     call_entry(name);
 }
 
@@ -641,7 +689,9 @@ static void push_value(Type t)
 {
     if (reg_width(t) == 4)
         code("    phx\n");
+
     code("    pha\n");
+
     if (cg.stack_leaf)
         cg.stack_bias += reg_width(t);
 }
@@ -649,6 +699,7 @@ static void push_value(Type t)
 static void pop_value(Type t)
 {
     code("    pla\n");
+
     if (reg_width(t) == 4)
         code("    plx\n");
     if (cg.stack_leaf)

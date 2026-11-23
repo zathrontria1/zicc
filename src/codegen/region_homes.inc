@@ -31,6 +31,7 @@ static void region_copy(int in)
     for (i = 0; i < region_count; ++i) {
         if (!(in ? region_in[i] : region_out[i]))
             continue;
+
         if (in)
             code("    lda %s\n    sta z:__dp_home_%02u\n", frame_operand(region_slots[i] * 2 + 1),
                  region_words[i]);
@@ -44,16 +45,20 @@ static void region_enter(Statement *s)
 {
     if (s != region_loop)
         return;
+
     region_entered = 1;
     region_begin = cg.length;
+
     if (region_count) {
         code("; region direct-page homes: %u frame words\n", region_count);
         region_copy(1);
         dp_state.homes = 1;
         dp_state.frameless = 0;
         dp_state.failed = 0;
+
         if (region_initializers) {
             Statement *previous = loop_previous, *current = loop_current;
+
             code("; initialize promoted loop homes directly\n");
             emit_statements(region_initializers);
             loop_previous = previous;
@@ -67,11 +72,13 @@ static void region_exit(Statement *s)
 {
     if (s != region_loop)
         return;
+
     if (region_count) {
         dp_state.homes = 0;
         region_copy(0);
     } else
         dp_state.trial = 0;
+
     region_end = cg.length;
 }
 
@@ -80,8 +87,11 @@ static int region_offset(Expr *e, Symbol **base, int *k)
 {
     int c;
 
-    while (e && e->kind == EX_CAST && value_width(e->type) == 2 && value_width(e->left->type) == 2)
+    while (e && e->kind == EX_CAST && value_width(e->type) == 2 &&
+           value_width(e->left->type) == 2) {
         e = e->left;
+    }
+
     if (!e)
         return 0;
     if (lftr_constant(e, k)) {
@@ -99,6 +109,7 @@ static int region_offset(Expr *e, Symbol **base, int *k)
         *k = e->op == '+' ? c : -c;
         return 1;
     }
+
     return 0;
 }
 
@@ -118,26 +129,32 @@ static unsigned region_trips(Statement *s)
         return 8;
     if (c->left->type.is_unsigned || c->right->type.is_unsigned)
         return 8; /* bounds are read as signed words */
+
     v = c->left->symbol;
 
-    for (init = s->kind == ST_FOR ? s->initial : NULL; init; init = init->next)
+    for (init = s->kind == ST_FOR ? s->initial : NULL; init; init = init->next) {
         if (init->kind == ST_EXPR && init->expression && init->expression->kind == EX_ASSIGN &&
             !init->expression->op && lftr_object(init->expression->left, v) &&
             region_offset(init->expression->right, &from_base, &from))
             found = 1;
+    }
+
     if (!found && !(s->kind == ST_FOR && s->initial)) {
         Statement *before = loop_current && loop_current->next == s     ? loop_current
                             : loop_previous && loop_previous->next == s ? loop_previous
                                                                         : NULL;
         Expr *e = before && before->kind == ST_EXPR ? before->expression : NULL;
+
         if (e && e->kind == EX_ASSIGN && !e->op && lftr_object(e->left, v) &&
             region_offset(e->right, &from_base, &from))
             found = 1;
     }
+
     if (!found || from_base != to_base || from_base == v)
         return 8;
     if (c->op == TOK_LE)
         ++to;
+
     return to > from ? (unsigned)(to - from) : 0;
 }
 
@@ -151,6 +168,7 @@ static int far_sentinel_word_loop(Statement *s)
     Statement *body, *tail;
     Symbol *src, *dest, *count;
     uint32_t bits;
+
     unsigned start, advanced, done;
     int pre, post;
 
@@ -162,27 +180,37 @@ static int far_sentinel_word_loop(Statement *s)
         return 0;
     if (guard->left->kind != EX_OBJECT)
         return 0;
+
     count = guard->left->symbol;
     test = guard->right;
+
     if (count->type.base != TY_INT || count->type.pointers || width(count->type) != 2 ||
         !count->type.is_unsigned || test->kind != EX_DEREF || width(test->type) != 1 ||
         test->left->kind != EX_OBJECT)
         return 0;
+
     src = test->left->symbol;
     body = s->body;
+
     if (body && body->kind == ST_BLOCK && !body->inline_callee)
         body = body->body;
+
     tail = body ? body->next : NULL;
+
     if (!tail || tail->next || body->kind != ST_EXPR || tail->kind != ST_EXPR ||
         volatile_statements(body))
         return 0;
+
     store = body->expression;
     decrement = tail->expression;
+
     if (store->kind != EX_ASSIGN || store->op || store->left->kind != EX_DEREF ||
         store->left->type.base != TY_INT || store->left->type.pointers ||
         width(store->left->type) != 2 || store->left->type.is_bool)
         return 0;
+
     dest = loop_address(store->left->left, &pre, &post);
+
     if (!dest || pre || post != 1 || far_pointer(dest->type) || width(dest->type) != 2 ||
         !far_pointer(src->type) || src->type.pointers != 1 || src->type.base != TY_CHAR ||
         !loop_private(src) || !loop_private(dest) || !loop_private(count))
@@ -190,6 +218,7 @@ static int far_sentinel_word_loop(Statement *s)
     if ((decrement->kind != EX_PRE && decrement->kind != EX_POST) || decrement->op != TOK_DEC ||
         decrement->left->kind != EX_OBJECT || decrement->left->symbol != count)
         return 0;
+
     load = store->right;
     bits = 0;
 
@@ -199,18 +228,22 @@ static int far_sentinel_word_loop(Statement *s)
             load = load->left;
         } else if (load->kind == EX_BINARY && load->op == '|') {
             uint32_t part;
+
             if (integer_constant(load->right, &part))
                 load = load->left;
             else if (integer_constant(load->left, &part))
                 load = load->right;
             else
                 return 0;
+
             if (part > 0xffff || (part & 0xff))
                 return 0;
+
             bits |= part;
         } else
             break;
     }
+
     if (!load->type.is_unsigned || load->type.is_bool || width(load->type) != 1)
         return 0;
     if (load->kind == EX_CAST)
@@ -246,6 +279,7 @@ static int far_sentinel_word_loop(Statement *s)
     code("\n    txa\n    sta ");
     array_operand(dest, 0);
     code("\n");
+
     if (loop_observed_outside(cg.function->body, s, src)) {
         code("    lda z:__arith_lhs\n    sta ");
         array_operand(src, 0);
@@ -253,6 +287,7 @@ static int far_sentinel_word_loop(Statement *s)
         array_operand(src, 2);
         code("\n");
     }
+
     divmod_state.available = 0;
     return 1;
 }
@@ -269,10 +304,14 @@ typedef struct {
 static void loop_divmod_expression(Expr *e, LoopDivmod *plan)
 {
     DivmodCache *pair;
+
     unsigned i;
+
     if (!e)
         return;
+
     pair = divmod_find(e);
+
     if (pair && (!plan->pair || plan->pair == pair) && e->right->kind == EX_OBJECT &&
         body_private(e->right->symbol) &&
         divmod_byte_guard(e, common_type(e->left->type, e->right->type))) {
@@ -280,12 +319,14 @@ static void loop_divmod_expression(Expr *e, LoopDivmod *plan)
         plan->divisor = e->right->symbol;
         plan->operations |= e->op == '/' ? 1u : 2u;
     }
+
     loop_divmod_expression(e->left, plan);
     loop_divmod_expression(e->right, plan);
     loop_divmod_expression(e->third, plan);
 
-    for (i = 0; i < e->arg_count; ++i)
+    for (i = 0; i < e->arg_count; ++i) {
         loop_divmod_expression(e->args[i], plan);
+    }
 }
 
 static int loop_divmod_scan(Statement *s, LoopDivmod *plan)
@@ -293,6 +334,7 @@ static int loop_divmod_scan(Statement *s, LoopDivmod *plan)
     for (; s; s = s->next) {
         if (s->inline_callee)
             return 0;
+
         switch (s->kind) {
         case ST_BLOCK:
         case ST_EMPTY:
@@ -304,22 +346,28 @@ static int loop_divmod_scan(Statement *s, LoopDivmod *plan)
         case ST_RETURN:
             if (!plan->remaining)
                 return 0;
+
             --plan->remaining;
             break;
         default:
             return 0;
         }
+
         loop_divmod_expression(s->expression, plan);
+
         if (!loop_divmod_scan(s->body, plan) || !loop_divmod_scan(s->alternate, plan))
             return 0;
     }
+
     return 1;
 }
 
 static Symbol *loop_divmod_version(Statement *s)
 {
     LoopDivmod plan = {0};
+
     plan.remaining = 16;
+
     if (!divmod_state.count || divmod_state.version || s->kind != ST_DO ||
         cg.function->jump_label_count || cg.function->symbol->interrupt || cg.switch_depth ||
         cg.parser->no_strength_reduction || cg.parser->no_body_optimizations ||
@@ -328,6 +376,7 @@ static Symbol *loop_divmod_version(Statement *s)
     if (!loop_divmod_scan(s->body, &plan) || plan.operations != 3 ||
         scalar_writes(s->body, plan.divisor) || scalar_writes_expr(s->expression, plan.divisor))
         return NULL;
+
     return plan.divisor;
 }
 
@@ -335,13 +384,16 @@ static int emit_region_loop(Statement *s, Statement *initializers)
 {
     CodegenCheckpoint *saved;
     size_t start = cg.length;
+
     unsigned taken = 0, mapped = 0, i, j, count = 0, free_words[16], free_count = 0, words, trips;
     static unsigned weight[384], order[384];
     int result;
     Function *f = cg.function;
     Symbol *divisor = loop_divmod_version(s);
+
     if (initializers && (divisor || dot_state.count))
         return -1;
+
     if (divisor) {
         unsigned wide = ++cg.label, done = ++cg.label;
         code("; loop version for invariant divmod divisor\n");
@@ -361,21 +413,27 @@ static int emit_region_loop(Statement *s, Statement *initializers)
         label(done);
         return 1;
     }
+
     if (!initializers && far_sentinel_word_loop(s))
         return 1;
     if (cg.parser->no_region_homes || cg.parser->no_dp_homes || region_loop || dp_state.homes ||
         dp_state.trial || cg.stack_leaf || cg.scalar_leaf || cg.scalar_first || cg.leaf_count ||
         cg.switch_depth || !f || f->symbol->interrupt || !f->slots || volatile_statement(s))
         return initializers ? -1 : bound_loop_statement(s);
+
     trips = region_trips(s); /* before any emission moves loop_current */
     saved = malloc(sizeof *saved);
+
     if (!saved) {
         fputs("out of memory emitting assembly\n", stderr);
         exit(EXIT_FAILURE);
     }
+
     words = (f->slots + 1) / 2;
+
     if (words > 384)
         words = 384;
+
     cg_checkpoint_save(saved);
     region_loop = s;
     region_initializers = NULL;
@@ -388,31 +446,38 @@ static int emit_region_loop(Statement *s, Statement *initializers)
     memcpy(weight, dp_state.weight, sizeof weight);
     cg_checkpoint_restore(saved, start);
     region_loop = NULL;
+
     if (!i) {
         free(saved);
         return initializers ? -1 : bound_loop_statement(s);
     }
 
-    for (i = 0; i < 16; ++i)
+    for (i = 0; i < 16; ++i) {
         if (!(taken & (1u << i)))
             free_words[free_count++] = i;
+    }
 
     /* A frame access inside a loop weighs 8 per nesting level, so weight/8
      * times the trip count estimates accesses per region entry. Each saves 12
      * master clocks (abs,y 40 -> dp 28); copying a word in and out costs 136. */
-    for (i = 0; i < words; ++i)
+    for (i = 0; i < words; ++i) {
         if ((unsigned long)weight[i] * trips * 12 > 136ul * 8) {
-            for (j = count; j && weight[order[j - 1]] < weight[i]; --j)
+            for (j = count; j && weight[order[j - 1]] < weight[i]; --j) {
                 order[j] = order[j - 1];
+            }
+
             order[j] = i;
             ++count;
         }
+    }
+
     if (!count || !free_count) {
         free(saved);
         return initializers ? -1 : bound_loop_statement(s);
     }
     if (initializers)
         s->initial = initializers;
+
     memset(dp_state.map, 0, sizeof dp_state.map);
 
     for (i = 0; i < count && i < free_count; ++i) {
@@ -422,22 +487,28 @@ static int emit_region_loop(Statement *s, Statement *initializers)
         region_words[i] = free_words[i];
         region_home_liveness(f, s, order[i] * 2 + 1, &region_in[i], &region_out[i]);
     }
+
     if (initializers)
         s->initial = NULL;
+
     if (initializers) {
         Statement *init;
+
         for (init = initializers; init; init = init->next) {
             unsigned offset = init->expression->left->symbol->offset;
+
             if (offset && (offset & 1) && (offset - 1) / 2 < words &&
                 dp_state.map[(offset - 1) / 2])
                 break;
         }
+
         if (!init) {
             memcpy(dp_state.map, saved->dp.map, sizeof dp_state.map);
             free(saved);
             return -1;
         }
     }
+
     region_count = i;
     region_loop = s;
     region_entered = 0;
@@ -453,12 +524,14 @@ static int emit_region_loop(Statement *s, Statement *initializers)
 #ifdef REGION_DRYRUN
     i = 0;
 #endif
+
     if (!i) {
         cg_checkpoint_restore(saved, start);
         free(saved);
         region_count = 0;
         return initializers ? -1 : bound_loop_statement(s);
     }
+
     region_count = 0;
     free(saved);
     dp_resolve(region_begin);
@@ -476,6 +549,7 @@ static int emit_loop_statement(Statement *s)
 static int emit_region_initializers(Statement *first, Statement **loop)
 {
     Statement copies[4], *s = first, *previous = loop_previous, *current = loop_current;
+
     unsigned count = 0;
     int result;
 
@@ -486,27 +560,37 @@ static int emit_region_initializers(Statement *first, Statement **loop)
 
     for (; s && count < 4; s = s->next) {
         Expr *set = plain_assignment(s), *target, *value;
+
         if (!set || s->inline_callee)
             break;
+
         target = set->left;
         value = set->right;
+
         if (!body_private(target->symbol) || !word_integer(target->type) ||
             !word_integer(value->type) || (value->kind != EX_INT && value->kind != EX_OBJECT) ||
             volatile_expression(set))
             break;
+
         copies[count] = *s;
+
         if (count)
             copies[count - 1].next = &copies[count];
+
         ++count;
     }
+
     if (!count || !s || s->kind != ST_DO || s->initial || body_asm_statements(cg.function->body))
         return -1;
+
     copies[count - 1].next = NULL;
     loop_current = s;
     result = emit_region_loop(s, copies);
     loop_previous = previous;
     loop_current = current;
+
     if (result >= 0)
         *loop = s;
+
     return result;
 }
