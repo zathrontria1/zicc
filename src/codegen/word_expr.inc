@@ -756,7 +756,7 @@ static int word_expression(Expr *e)
 {
     WordPlan *p;
 
-    if (cg.stack_leaf || cg.leaf_count)
+    if (cg.stack_leaf)
         return 0;
 
     p = word_plan(e, cg.function, 0);

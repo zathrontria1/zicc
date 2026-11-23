@@ -816,7 +816,7 @@ static int variable_word_shift(Expr *left, Expr *right, int op)
              "    pha\n    and #$000F\n    tax\n    pla\n",
              cg.parser->unit, done, cg.parser->unit, loop);
     } else if (!min_shift && right->kind == EX_OBJECT && !right->symbol->owner &&
-               compare_memory_operand(right, 0) && right->symbol != cg.leaf_count) {
+               compare_memory_operand(right, 0)) {
         /* Index loads cannot use long or stack-relative addressing. A fixed
          * near word is read once, with A retained for the common count. */
         code("    ldx ");
@@ -841,7 +841,7 @@ static int variable_word_shift(Expr *left, Expr *right, int op)
         }
     } else if (!min_shift && !bounded_15 && right->kind == EX_OBJECT && dp_state.homes &&
                !cg.stack_leaf && right->symbol->owner == cg.function->id && right->symbol->offset &&
-               !right->type.array && width(right->type) == 2 && right->symbol != cg.leaf_count &&
+               !right->type.array && width(right->type) == 2 &&
                !strncmp(frame_operand(right->symbol->offset), "z:", 2)) {
         code("    ldx %s\n", frame_operand(right->symbol->offset));
 
@@ -860,7 +860,7 @@ static int variable_word_shift(Expr *left, Expr *right, int op)
         }
     } else if (!min_shift && bounded_15 && right->kind == EX_OBJECT && dp_state.homes &&
                !cg.stack_leaf && right->symbol->owner == cg.function->id && right->symbol->offset &&
-               !right->type.array && width(right->type) == 2 && right->symbol != cg.leaf_count &&
+               !right->type.array && width(right->type) == 2 &&
                !strncmp(frame_operand(right->symbol->offset), "z:", 2)) {
         code("    ldx %s\n", frame_operand(right->symbol->offset));
     } else if (min_shift && right->kind == EX_BINARY && right->op == '-' &&

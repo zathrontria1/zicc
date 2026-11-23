@@ -221,12 +221,8 @@ static int direct_operand(Expr *e, Type target, unsigned high, int emit)
         (s == cg.retained_index && (cg.retained_y == 1 || cg.retained_y == 2)))
         return 0;
 
-    if (emit) {
-        if (s == cg.leaf_count)
-            code("z:__arith_rhs");
-        else
-            array_operand(s, offset + high * 2);
-    }
+    if (emit)
+        array_operand(s, offset + high * 2);
 
     return 1;
 }
@@ -545,9 +541,6 @@ static int stage_expression(Expr *e, Type t, unsigned right, int emit)
         return 1;
 
     cg.arithmetic = 1;
-
-    if (right && e->kind == EX_OBJECT && e->symbol == cg.leaf_count && reg_width(t) == 2)
-        return 1;
 
     for (i = 0; i < reg_width(t) / 2; ++i) {
         if (integer_constant(e, &v) && !((v >> (i * 16)) & 65535))

@@ -154,7 +154,7 @@ static int shared_element_binary(Expr *e)
     unsigned lo, ro, unused;
     int word_left, word_right, swap;
 
-    if (cg.stack_leaf || cg.leaf_count || e->kind != EX_BINARY ||
+    if (cg.stack_leaf || e->kind != EX_BINARY ||
         (!basic_integer_op(e->op) && e->op != '*' && e->op != '/' && e->op != '%'))
         return 0;
 

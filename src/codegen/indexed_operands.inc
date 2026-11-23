@@ -700,8 +700,7 @@ static int indexed_access(Expr *e)
             operand.index->kind == EX_OBJECT && operand.index->symbol->scope &&
             body_private(operand.index->symbol) && operand.index->symbol != cg.scan_cursor &&
             operand.index->symbol != cg.numeric_index &&
-            operand.index->symbol != cg.numeric_recurrence &&
-            operand.index->symbol != cg.leaf_count && operand.index->type.base == TY_INT &&
+            operand.index->symbol != cg.numeric_recurrence && operand.index->type.base == TY_INT &&
             !operand.index->type.pointers &&
             !indexed_expr_writes_symbol(e->right, operand.index->symbol)) {
             if (!cg.retained_index && !cg.stack_leaf && operand.scale == 1) {

@@ -354,7 +354,7 @@ static int word_rows_enabled(void)
 {
     return !(cg.parser->no_indexed_operands || cg.parser->no_body_optimizations ||
              cg.parser->no_strength_reduction || cg.stack_leaf || cg.scalar_leaf ||
-             cg.scalar_first || cg.leaf_count || cg.retained_index || cg.retained_second ||
+             cg.scalar_first || cg.retained_index || cg.retained_second ||
              cg.affine_active || bound_state.cursor || cg.scan_cursor || cg.dead_index_count ||
              cg.omitted_parameter_count || cg.function->symbol->interrupt);
 }

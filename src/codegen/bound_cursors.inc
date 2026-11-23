@@ -189,7 +189,7 @@ static int bound_loop_statement(Statement *s)
     int result;
 
     if (cg.parser->no_register_cursors || cg.switch_depth || cg.stack_leaf || cg.scalar_leaf ||
-        cg.scalar_first || cg.leaf_count || bound_state.cursor || bound_state.pending ||
+        cg.scalar_first || bound_state.cursor || bound_state.pending ||
         volatile_statement(s) || bound_contains_loop(s->body))
         return emit_loop(s);
 

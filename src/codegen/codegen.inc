@@ -897,10 +897,6 @@ static void load_symbol(Symbol *s)
         narrow_char(s->type);
         return;
     }
-    if (s == cg.leaf_count) {
-        code("    lda z:__arith_rhs\n");
-        return;
-    }
     if (object_volatile(s->type) && !s->type.array) {
         load_array_element(s, 0, s->type);
         return;
@@ -1774,8 +1770,7 @@ static void truth(Expr *e)
     if (!cg.parser->no_strength_reduction && e->kind == EX_OBJECT && e->type.is_bool &&
         !e->type.pointers && !volatile_expression(e) && e->symbol != cg.scalar_first &&
         e->symbol != cg.numeric_index && e->symbol != cg.numeric_recurrence &&
-        e->symbol != cg.leaf_count && e->symbol != cg.retained_index &&
-        e->symbol != cg.retained_second) {
+        e->symbol != cg.retained_index && e->symbol != cg.retained_second) {
         code("    lda ");
         array_operand(e->symbol, 0);
         code("\n");
@@ -6526,7 +6521,7 @@ static Expr *indirect_long_base(Expr *e, unsigned *offset)
     }
 
     if (*offset > 65533 || base->kind != EX_OBJECT || base->type.array || !base->type.pointers ||
-        far_pointer(base->type) || base->symbol == cg.scalar_first || base->symbol == cg.leaf_count)
+        far_pointer(base->type) || base->symbol == cg.scalar_first)
         return NULL;
 
     return base;
@@ -6713,7 +6708,7 @@ static int advanced_cursor_load(Expr *e)
     bytes = (unsigned)back * width(pointed_type(address->type));
 
     if (!bytes || bytes > 3 || home->kind != EX_OBJECT || !loop_private(home->symbol) ||
-        home->symbol == cg.scalar_first || home->symbol == cg.leaf_count)
+        home->symbol == cg.scalar_first)
         return 0;
 
     emit_value_x(home);
@@ -7781,12 +7776,7 @@ static void hw_byte_emit_m8_load(const HwByteOperand *op)
     } else if (op->kind == HW_BYTE_MEM) {
         dp_state.byte_operand = 1;
         code("    lda ");
-
-        if (op->sym == cg.leaf_count)
-            code("z:__arith_rhs");
-        else
-            array_operand(op->sym, op->offset);
-
+        array_operand(op->sym, op->offset);
         code("\n");
         dp_state.byte_operand = 0;
     } else if (op->kind == HW_BYTE_FAR_INDEXED) {
@@ -7806,12 +7796,7 @@ static void hw_byte_emit_m8_op(const char *opname, const HwByteOperand *op)
     } else if (op->kind == HW_BYTE_MEM) {
         dp_state.byte_operand = 1;
         code("    %s ", opname);
-
-        if (op->sym == cg.leaf_count)
-            code("z:__arith_rhs");
-        else
-            array_operand(op->sym, op->offset);
-
+        array_operand(op->sym, op->offset);
         code("\n");
         dp_state.byte_operand = 0;
     } else {
@@ -9112,7 +9097,7 @@ static Symbol *fixed_byte_home(Expr *e, unsigned byte, unsigned *offset)
     *offset = 0;
     s = e->kind == EX_OBJECT ? e->symbol : fixed_memory_object(e, offset);
 
-    if (!s || s->function || s == cg.scalar_first || s == cg.leaf_count || s == cg.scan_cursor ||
+    if (!s || s->function || s == cg.scalar_first || s == cg.scan_cursor ||
         s == cg.numeric_index || s == cg.numeric_recurrence || s == cg.retained_index ||
         s == cg.retained_second)
         return NULL;
@@ -9761,9 +9746,8 @@ static int discarded_byte_shift_difference(Expr *e)
 
     v = target->symbol;
 
-    if (!v->owner || v->type.array || v == cg.scalar_first || v == cg.leaf_count ||
-        v == cg.scan_cursor || v == cg.numeric_index || v == cg.numeric_recurrence ||
-        v == cg.retained_index)
+    if (!v->owner || v->type.array || v == cg.scalar_first || v == cg.scan_cursor ||
+        v == cg.numeric_index || v == cg.numeric_recurrence || v == cg.retained_index)
         return 0;
 
     sum = e->right;
@@ -9806,9 +9790,8 @@ static int discarded_byte_shift_difference(Expr *e)
 
     w = other->symbol;
 
-    if (!w->owner || w->type.array || w == cg.scalar_first || w == cg.leaf_count ||
-        w == cg.scan_cursor || w == cg.numeric_index || w == cg.numeric_recurrence ||
-        w == cg.retained_index)
+    if (!w->owner || w->type.array || w == cg.scalar_first || w == cg.scan_cursor ||
+        w == cg.numeric_index || w == cg.numeric_recurrence || w == cg.retained_index)
         return 0;
 
     code("; discarded byte narrowed difference\n    sep #$20\n.a8\n    lda ");
@@ -11181,9 +11164,9 @@ static Statement *carry_mask_sequence(Statement *s)
         Symbol *source = values[i]->symbol;
 
         if (thresholds[i] > 255 || (!source->type.is_bool && masks[i] > 255) ||
-            source == cg.scalar_first || source == cg.scan_cursor || source == cg.leaf_count ||
-            source == cg.numeric_index || source == cg.numeric_recurrence ||
-            source == cg.retained_index || source == cg.retained_second)
+            source == cg.scalar_first || source == cg.scan_cursor || source == cg.numeric_index ||
+            source == cg.numeric_recurrence || source == cg.retained_index ||
+            source == cg.retained_second)
             byte = 0;
     }
 

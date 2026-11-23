@@ -226,7 +226,6 @@ typedef struct {
     Symbol *scalar_first;
     int scalar_leaf;
     int scalar_spill;
-    Symbol *leaf_count;
     int near_strcmp;
     int need_smul8;
     int need_pack_coeff;

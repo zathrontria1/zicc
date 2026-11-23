@@ -199,7 +199,7 @@ static int affine_pair_loop(Statement *s)
 
     if (s->kind != ST_FOR || cg.parser->no_strength_reduction || cg.parser->no_register_loops ||
         cg.switch_depth || cg.function->jump_label_count || cg.stack_leaf || cg.scalar_leaf ||
-        cg.scalar_first || cg.leaf_count || cg.retained_index || bound_state.cursor ||
+        cg.scalar_first || cg.retained_index || bound_state.cursor ||
         bound_state.pending || cg.affine_active || cg.scan_cursor || cg.dead_index_count ||
         cg.omitted_parameter_count || cg.function->symbol->interrupt || !test ||
         test->kind != EX_BINARY || test->op != '<' || test->left->kind != EX_OBJECT || !step ||

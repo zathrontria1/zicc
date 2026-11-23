@@ -173,7 +173,7 @@ static int far_sentinel_word_loop(Statement *s)
     int pre, post;
 
     if (s->kind != ST_WHILE || cg.parser->no_register_loops || cg.parser->no_strength_reduction ||
-        cg.stack_leaf || cg.scalar_leaf || cg.scalar_first || cg.leaf_count || cg.retained_index ||
+        cg.stack_leaf || cg.scalar_leaf || cg.scalar_first || cg.retained_index ||
         cg.scan_cursor || bound_state.cursor || bound_state.pending || cg.dead_index_count ||
         cg.omitted_parameter_count || !cg.function || cg.function->symbol->interrupt || !guard ||
         guard->kind != EX_BINARY || guard->op != TOK_LAND || volatile_expression(guard))
@@ -417,7 +417,7 @@ static int emit_region_loop(Statement *s, Statement *initializers)
     if (!initializers && far_sentinel_word_loop(s))
         return 1;
     if (cg.parser->no_region_homes || cg.parser->no_dp_homes || region_loop || dp_state.homes ||
-        dp_state.trial || cg.stack_leaf || cg.scalar_leaf || cg.scalar_first || cg.leaf_count ||
+        dp_state.trial || cg.stack_leaf || cg.scalar_leaf || cg.scalar_first ||
         cg.switch_depth || !f || f->symbol->interrupt || !f->slots || volatile_statement(s))
         return initializers ? -1 : bound_loop_statement(s);
 
