@@ -234,12 +234,12 @@ static int retained_y5_scan_stmt(Statement *s,Symbol *index,Symbol **ptr_out,uns
 static Symbol *retained_y5_find_ptr(Statement *loop,Symbol *index)
 {
     Symbol *ptr=NULL;unsigned uses=0,word;uint32_t start=0;int found=0,in,out;
-    if(!cg.dp_homes||!retained_initial_constant(loop->initial,index,&start,&found)||!found||start)return NULL;
+    if(!dp_state.homes||!retained_initial_constant(loop->initial,index,&start,&found)||!found||start)return NULL;
     region_home_liveness(cg.function,loop,index->offset,&in,&out);
     if(out)return NULL;
     if(!retained_y5_scan_stmt(loop->body,index,&ptr,&uses)||!ptr||!uses)return NULL;
     word=(ptr->offset-1)/2;
-    if(!ptr->offset||word>=cg.dp_words||!cg.dp_map[word])return NULL;
+    if(!ptr->offset||word>=dp_state.words||!dp_state.map[word])return NULL;
     if(scalar_writes(loop->body,ptr)||retained_count_sym_stmt(loop->body,ptr)!=uses)return NULL;
     region_home_liveness(cg.function,loop,ptr->offset,&in,&out);
     if(out)return NULL;
@@ -317,11 +317,11 @@ static unsigned retained_body_insns(size_t first,size_t last)
 }
 static int retained_trial(Statement *s,Symbol *index,unsigned limit,unsigned scale,int y,Symbol *second,unsigned second_scale)
 {
-    Codegen *saved=malloc(sizeof *saved);size_t at=cg.length,first,last;unsigned enter,body,step,end,done,step_scale=scale;
+    CodegenCheckpoint *saved=malloc(sizeof *saved);size_t at=cg.length,first,last;unsigned enter,body,step,end,done,step_scale=scale;
     Statement *previous=loop_previous,*current=loop_current;
     int borrowed=second&&second==cg.retained_second&&second_scale==cg.retained_second_scale&&cg.retained_y==3&&!cg.retained_index;
     RetainedCursor cursors[MAX_RETAINED_CURSORS];unsigned cursor_count=0,cursor_mask=0;
-    if(!saved){fputs("out of memory emitting retained loop\n",stderr);exit(EXIT_FAILURE);}*saved=cg;
+    if(!saved){fputs("out of memory emitting retained loop\n",stderr);exit(EXIT_FAILURE);}cg_checkpoint_save(saved);
     Symbol *y5_ptr=y==5?retained_y5_find_ptr(s,index):NULL;
     for(int attempt=0;attempt<2;++attempt){
         uint32_t initial=0;int found=0;
@@ -370,17 +370,14 @@ static int retained_trial(Statement *s,Symbol *index,unsigned limit,unsigned sca
         cg.retained_y=y;cg.retained_scratch=0;cg.retained_failed=0;
         cg.retained_cursor_count=cursor_count;
         if(cursor_count)memcpy(cg.retained_cursors,cursors,cursor_count*sizeof cursors[0]);
-        cg.retained_cursor_mask=saved->retained_cursor_mask|cursor_mask;
+        cg.retained_cursor_mask=saved->cg.retained_cursor_mask|cursor_mask;
         cg.loop_start[cg.loop_count]=step;cg.loop_end[cg.loop_count++]=end;
-        cg.divmod_available=0;label(body);first=cg.length;emit_statements(s->body);last=cg.length;
+        divmod_state.available=0;label(body);first=cg.length;emit_statements(s->body);last=cg.length;
         if(cg.retained_failed||!retained_scan(first,last,y==4?0:y,0)){
             if(y5_ptr){
-                char *assembly=cg.assembly;size_t capacity=cg.capacity;
-                y5_ptr=NULL;cg=*saved;cg.assembly=assembly;cg.capacity=capacity;
-                cg.length=at;cg.assembly[at]=0;loop_previous=previous;loop_current=current;continue;
+                y5_ptr=NULL;cg_checkpoint_restore(saved, at);loop_previous=previous;loop_current=current;continue;
             }
-            char *assembly=cg.assembly;size_t capacity=cg.capacity;cg=*saved;cg.assembly=assembly;cg.capacity=capacity;
-            cg.length=at;cg.assembly[at]=0;loop_previous=previous;loop_current=current;free(saved);return 0;
+            cg_checkpoint_restore(saved, at);loop_previous=previous;loop_current=current;free(saved);return 0;
         }
         if(attempt==0&&y==4&&!cg.parser->no_loop_unroll&&!borrowed&&!cursor_count&&found&&initial<limit&&
            !body_asm_statements(s->body)&&retained_unrollable_body(s->body)){
@@ -406,13 +403,13 @@ static int retained_trial(Statement *s,Symbol *index,unsigned limit,unsigned sca
                 }
             }
         }
-        if(attempt==0&&y==1&&!saved->retained_cursor_count){
+        if(attempt==0&&y==1&&!saved->cg.retained_cursor_count){
             RetainedCursorPlan plan={0};
             retained_collect_cursors(s->body,index,limit,scale,0,&plan);
             if(plan.count){
-                unsigned used=lp_text_words(cg.assembly+first,cg.assembly+last)|0x05u|saved->retained_cursor_mask;
+                unsigned used=lp_text_words(cg.assembly+first,cg.assembly+last)|0x05u|saved->cg.retained_cursor_mask;
                 unsigned order[16],ocount=0;
-                if(cg.dp_homes)for(unsigned w=0;w<cg.dp_words;++w)if(cg.dp_map[w])used|=1u<<(cg.dp_map[w]-1u);
+                if(dp_state.homes)for(unsigned w=0;w<dp_state.words;++w)if(dp_state.map[w])used|=1u<<(dp_state.map[w]-1u);
                 for(unsigned ci=0;ci<plan.count;++ci){
                     if(!plan.unconditional[ci]&&plan.uses[ci]<2)continue;
                     unsigned score=(plan.unconditional[ci]?1000u:0u)+plan.uses[ci]*4u+(plan.scale[ci]==2?100u:0u);
@@ -433,16 +430,14 @@ static int retained_trial(Statement *s,Symbol *index,unsigned limit,unsigned sca
                     cursors[cursor_count++]=(RetainedCursor){plan.base[ci],plan.offset[ci],plan.scale[ci],(unsigned)free_word};
                 }
                 if(cursor_count){
-                    char *assembly=cg.assembly;size_t capacity=cg.capacity;
-                    cg=*saved;cg.assembly=assembly;cg.capacity=capacity;
-                    cg.length=at;cg.assembly[at]=0;loop_previous=previous;loop_current=current;
+                    cg_checkpoint_restore(saved, at);loop_previous=previous;loop_current=current;
                     continue;
                 }
             }
         }
         break;
     }
-    cg.divmod_available=0;label(step);
+    divmod_state.available=0;label(step);
     for(unsigned ci=0;ci<cg.retained_cursor_count;++ci){
         unsigned dp_off=cg.retained_cursors[ci].dp_word*2u;
         unsigned delta=cg.retained_cursors[ci].scale-1u;
@@ -468,11 +463,11 @@ static int retained_trial(Statement *s,Symbol *index,unsigned limit,unsigned sca
     label(end);--cg.loop_count;
     cg.retained_index=NULL;cg.retained_ptr=NULL;cg.retained_scale=cg.retained_limit=cg.retained_bias=cg.retained_unroll=0;cg.retained_y=cg.retained_scratch=0;cg.retained_failed=0;
     cg.retained_second=NULL;cg.retained_second_scale=0;
-    cg.retained_cursor_count=0;cg.retained_cursor_mask=saved->retained_cursor_mask;
+    cg.retained_cursor_count=0;cg.retained_cursor_mask=saved->cg.retained_cursor_mask;
     if(y==1||y==2){unsigned j=second_scale;code("    tya\n");if(y==2)while(j>1){code("    lsr a\n");j>>=1;}code("    ply\n");store_symbol(index);}
     else if(y&&y!=4&&!borrowed)code("    ply\n");
     if(borrowed){cg.retained_second=second;cg.retained_second_scale=second_scale;cg.retained_y=3;}
-    label(done);cg.divmod_available=0;
+    label(done);divmod_state.available=0;
     if(borrowed)code("; retained nested end\n");
     loop_previous=previous;loop_current=current;free(saved);return 1;
 }
@@ -494,9 +489,9 @@ static int retained_nested_plan(Statement *s,RetainedPlan *plan,unsigned *loops)
 }
 static int retained_nested_trial(Statement *s,Symbol *index,unsigned limit,unsigned scale)
 {
-    Codegen *saved=malloc(sizeof *saved);size_t at=cg.length,first,last;unsigned enter,body,step,end,done,j;
+    CodegenCheckpoint *saved=malloc(sizeof *saved);size_t at=cg.length,first,last;unsigned enter,body,step,end,done,j;
     Statement *previous=loop_previous,*current=loop_current;
-    if(!saved){fputs("out of memory emitting nested retained loop\n",stderr);exit(EXIT_FAILURE);}*saved=cg;
+    if(!saved){fputs("out of memory emitting nested retained loop\n",stderr);exit(EXIT_FAILURE);}cg_checkpoint_save(saved);
     enter=++cg.label;body=++cg.label;step=++cg.label;end=++cg.label;done=++cg.label;
     code("; retained enclosing displacement: %s stride %u\n",index->name,scale);
     branch(s->expression,enter,done,enter);label(enter);load_symbol(index);
@@ -506,14 +501,13 @@ static int retained_nested_trial(Statement *s,Symbol *index,unsigned limit,unsig
     cg.loop_start[cg.loop_count]=step;cg.loop_end[cg.loop_count++]=end;
     label(body);first=cg.length;emit_statements(s->body);last=cg.length;
     if(cg.retained_failed||!strstr(cg.assembly+first,"; retained nested begin\n")||!retained_scan(first,last,4,0)){
-        char *assembly=cg.assembly;size_t capacity=cg.capacity;cg=*saved;cg.assembly=assembly;cg.capacity=capacity;
-        cg.length=at;cg.assembly[at]=0;loop_previous=previous;loop_current=current;free(saved);return 0;
+        cg_checkpoint_restore(saved, at);loop_previous=previous;loop_current=current;free(saved);return 0;
     }
     label(step);for(j=0;j<scale;++j)code("    iny\n");
     load_symbol(index);store_symbol(index);
     code("    cpy #$%04X\n    bcs :+\n",limit*scale);jump(body);code(":\n");label(end);--cg.loop_count;
     cg.retained_second=NULL;cg.retained_second_scale=0;cg.retained_y=0;
-    code("    ply\n");label(done);cg.divmod_available=0;
+    code("    ply\n");label(done);divmod_state.available=0;
     loop_previous=previous;loop_current=current;free(saved);return 1;
 }
 /* A constant byte fill of a fixed near object can use word stores. The
@@ -575,14 +569,14 @@ static int retained_byte_fill(Statement *s,Symbol *index,unsigned limit)
         code("    sep #$20\n.a8\n    sta ");array_operand(operand.base,offset+count-1);
         code("\n    rep #$20\n.a16\n");
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 static int retained_loop(Statement *s)
 {
     Expr *condition=s->expression,*step=s->step;Symbol *index;RetainedPlan plan={0};unsigned i,scale=0,best=0;uint32_t n;
     if(cg.parser->no_loop_index_retention||cg.parser->no_indexed_operands||cg.parser->no_register_cursors||
-       cg.parser->no_body_optimizations||cg.retained_index||cg.numeric_index||cg.bound||cg.affine_active||cg.lftr_active||
+       cg.parser->no_body_optimizations||cg.retained_index||cg.numeric_index||bound_state.cursor||cg.affine_active||lftr_state.active||
        cg.scalar_first||cg.scalar_leaf||cg.stack_leaf||cg.switch_depth||cg.loop_count==64||s->kind!=ST_FOR||
        !condition||condition->kind!=EX_BINARY||(condition->op!='<'&&condition->op!=TOK_LE)||
        condition->left->kind!=EX_OBJECT||!integer_constant(condition->right,&n))return 0;
@@ -669,7 +663,7 @@ static int retained_countdown_for_loop(Statement *s,int before_initial)
 {
     Symbol *index=NULL;
     Expr *condition=s->expression,*step=s->step,*init_expr=NULL,*start_expr=NULL,*bound=NULL;
-    Codegen *saved;
+    CodegenCheckpoint *saved;
     Statement *previous=loop_previous,*current=loop_current,*init;
     unsigned body,step_label,end;
     size_t at,body_start;
@@ -679,8 +673,8 @@ static int retained_countdown_for_loop(Statement *s,int before_initial)
     int32_t trips=0;
     if(cg.parser->no_loop_index_retention||cg.parser->no_register_cursors||
        cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||
-       cg.retained_index||cg.retained_second||cg.numeric_index||cg.bound||
-       cg.bound_pending||cg.affine_active||cg.lftr_active||cg.scan_cursor||
+       cg.retained_index||cg.retained_second||cg.numeric_index||bound_state.cursor||
+       bound_state.pending||cg.affine_active||lftr_state.active||cg.scan_cursor||
        cg.scalar_first||cg.scalar_leaf||cg.stack_leaf||cg.switch_depth||cg.loop_count==64||
        s->kind!=ST_FOR||cg.function->symbol->interrupt||cg.function->jump_label_count||
        volatile_statement(s)||body_asm_statements(s->body))return 0;
@@ -751,7 +745,7 @@ static int retained_countdown_for_loop(Statement *s,int before_initial)
             }
         }
     }
-    saved=allocate(sizeof *saved);*saved=cg;at=cg.length;
+    saved=allocate(sizeof *saved);cg_checkpoint_save(saved);at=cg.length;
     body=++cg.label;step_label=++cg.label;end=++cg.label;
     if(trips>0){
         code("; register countdown\n    ldx #$%04X\n",(unsigned)trips);
@@ -771,8 +765,7 @@ static int retained_countdown_for_loop(Statement *s,int before_initial)
         emit_value(bound);convert_registers(bound->type,t);
         code("    sec\n    sbc ");
         if(!direct_operand(condition->left,t,0,1)){
-            char *assembly=cg.assembly;size_t capacity=cg.capacity;
-            cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=at;cg.assembly[at]=0;
+            cg_checkpoint_restore(saved, at);
             loop_previous=previous;loop_current=current;free(saved);return 0;
         }
         code("\n    bcc :+\n    bne :++\n:\n");jump(end);code(":\n");
@@ -780,11 +773,10 @@ static int retained_countdown_for_loop(Statement *s,int before_initial)
         code("    tax\n");
     }
     cg.loop_start[cg.loop_count]=step_label;cg.loop_end[cg.loop_count++]=end;
-    cg.divmod_available=0;label(body);body_start=cg.length;
+    divmod_state.available=0;label(body);body_start=cg.length;
     emit_statements(s->body);
     if(!retained_scan(body_start,cg.length,0,1)){
-        char *assembly=cg.assembly;size_t capacity=cg.capacity;
-        cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=at;cg.assembly[at]=0;
+        cg_checkpoint_restore(saved, at);
         loop_previous=previous;loop_current=current;free(saved);return 0;
     }
     label(step_label);code("    dex\n");flag_branch("bne","beq",body,0,0);
@@ -794,7 +786,7 @@ static int retained_countdown_for_loop(Statement *s,int before_initial)
         if(index->type.base==TY_CHAR)narrow_char(index->type);
         store_symbol(index);
     }
-    cg.divmod_available=0;loop_previous=previous;loop_current=current;free(saved);
+    divmod_state.available=0;loop_previous=previous;loop_current=current;free(saved);
     return 1;
 }
 /* Reuse normal body emission so volatile accesses keep their original width
@@ -802,18 +794,18 @@ static int retained_countdown_for_loop(Statement *s,int before_initial)
 static int retained_countdown_loop(Statement *s)
 {
     Symbol *index;
-    Codegen *saved;
+    CodegenCheckpoint *saved;
     Statement *previous=loop_previous,*current=loop_current;
     unsigned body,step,end,chunks=0,factor;
     size_t body_start;
     if(s->kind==ST_FOR)return retained_countdown_for_loop(s,0);
     if(cg.parser->no_loop_index_retention||cg.parser->no_register_cursors||
        cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||
-       cg.retained_index||cg.retained_second||cg.numeric_index||cg.bound||
-       cg.bound_pending||cg.affine_active||cg.lftr_active||cg.scan_cursor||
+       cg.retained_index||cg.retained_second||cg.numeric_index||bound_state.cursor||
+       bound_state.pending||cg.affine_active||lftr_state.active||cg.scan_cursor||
        cg.scalar_first||cg.scalar_leaf||cg.stack_leaf||cg.switch_depth||cg.loop_count==64||
        !(index=post_test_countdown(s))||body_asm_statements(s->body))return 0;
-    saved=allocate(sizeof *saved);*saved=cg;
+    saved=allocate(sizeof *saved);cg_checkpoint_save(saved);
     body=++cg.label;step=++cg.label;end=++cg.label;
     factor=retained_countdown_unroll(s,index,previous,&chunks);
     if(factor)code("; unrolled register countdown: %u trips\n    ldx #$%04X\n",factor,chunks);
@@ -824,11 +816,10 @@ static int retained_countdown_loop(Statement *s)
         code("    tax\n");
     }
     cg.loop_start[cg.loop_count]=step;cg.loop_end[cg.loop_count++]=end;
-    cg.divmod_available=0;label(body);body_start=cg.length;
+    divmod_state.available=0;label(body);body_start=cg.length;
     for(unsigned i=0;i<(factor?factor:1u);++i)emit_statements(s->body);
     if(!retained_scan(body_start,cg.length,0,1)){
-        char *assembly=cg.assembly;size_t capacity=cg.capacity;
-        cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.assembly[cg.length]=0;
+        cg_checkpoint_restore_length(saved);
         loop_previous=previous;loop_current=current;free(saved);return 0;
     }
     label(step);code("    dex\n");flag_branch("bne","beq",body,0,0);
@@ -838,6 +829,6 @@ static int retained_countdown_loop(Statement *s)
         if(index->type.base==TY_CHAR)narrow_char(index->type);
         store_symbol(index);
     }
-    cg.divmod_available=0;loop_previous=previous;loop_current=current;free(saved);
+    divmod_state.available=0;loop_previous=previous;loop_current=current;free(saved);
     return 1;
 }

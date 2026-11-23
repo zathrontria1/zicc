@@ -14,9 +14,7 @@ static void setup(void)
 
     memset(&parser, 0, sizeof parser);
     memset(&function, 0, sizeof function);
-    memset(&cg, 0, sizeof cg);
-
-    cg.parser = &parser;
+    cg_reset_program(&parser);
     cg.function = &function;
     lp_bind_from_codegen(1, 0, 1, 1); // volatile, no escaping frame address, word value result
 

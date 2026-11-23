@@ -69,9 +69,9 @@ static int numeric_scan(size_t first,size_t last)
 }
 static int numeric_loop(Statement *s)
 {
-    Statement *init=s->initial,*first=NULL;Expr *e,*condition=s->expression;Symbol *index,*rec=NULL;uint32_t count;unsigned a=0,b=0,start,done;size_t at,body_begin,body_end;Codegen saved;
+    Statement *init=s->initial,*first=NULL;Expr *e,*condition=s->expression;Symbol *index,*rec=NULL;uint32_t count;unsigned a=0,b=0,start,done;size_t at,body_begin,body_end;CodegenCheckpoint saved;
     if(cg.parser->no_register_cursors||cg.parser->no_body_optimizations||cg.numeric_index||s->kind!=ST_FOR||
-       cg.scalar_leaf||cg.stack_leaf||cg.scalar_first||cg.bound||volatile_statement(s)||!numeric_flat(s->body,&first)||!first)return 0;
+       cg.scalar_leaf||cg.stack_leaf||cg.scalar_first||bound_state.cursor||volatile_statement(s)||!numeric_flat(s->body,&first)||!first)return 0;
     while(init&&init->kind==ST_BLOCK&&!init->next)init=init->body;
     if(!init||init->next||init->kind!=ST_EXPR||(e=init->expression)->kind!=EX_ASSIGN||e->op||e->left->kind!=EX_OBJECT||
        !integer_constant(e->right,&count)||!count||count>32768)return 0;
@@ -83,17 +83,17 @@ static int numeric_loop(Statement *s)
     e=first->expression;
     if(e->kind==EX_ASSIGN&&!e->op&&e->left->kind==EX_OBJECT&&loop_private(e->left->symbol)&&
        e->left->type.base==TY_INT&&!e->left->type.pointers&&numeric_affine(e->right,index,&a,&b)&&a&&a<=4&&scalar_writes(s->body,e->left->symbol)==1)rec=e->left->symbol;
-    saved=cg;at=cg.length;cg.numeric_index=index;cg.numeric_recurrence=rec;cg.numeric_limit=count;cg.numeric_scale=a;cg.numeric_offset=b;
+    cg_checkpoint_save(&saved);at=cg.length;cg.numeric_index=index;cg.numeric_recurrence=rec;cg.numeric_limit=count;cg.numeric_scale=a;cg.numeric_offset=b;
     code("; arithmetic indexed region: X=index-1%s\n",rec?", Y=affine scalar":"");
     if(rec)code("    phy\n    ldy #$%04X\n",(a*count+b)&65535);
     code("    ldx #$%04X\n",(unsigned)count-1);start=++cg.label;done=++cg.label;label(start);body_begin=cg.length;
-    cg.divmod_available=0;emit_statements(s->body);body_end=cg.length;
+    divmod_state.available=0;emit_statements(s->body);body_end=cg.length;
     if(!numeric_scan(body_begin,body_end)||!strstr(cg.assembly+body_begin,"; arithmetic region indexed byte")){
-        char *assembly=cg.assembly;size_t capacity=cg.capacity;cg=saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=at;cg.assembly[at]=0;return 0;
+        cg_checkpoint_restore(&saved, at);return 0;
     }
     if(rec)for(unsigned i=0;i<a;++i)code("    dey\n");
     code("    dex\n    bmi :+\n");jump(start);code(":\n");label(done);
-    cg.numeric_index=NULL;cg.numeric_recurrence=NULL;cg.divmod_available=0;
+    cg.numeric_index=NULL;cg.numeric_recurrence=NULL;divmod_state.available=0;
     if(rec){code("    tya\n    clc\n    adc #$%04X\n    ply\n",a);store_symbol(rec);}
     code("    lda #$0000\n");store_symbol(index);return 1;
 }

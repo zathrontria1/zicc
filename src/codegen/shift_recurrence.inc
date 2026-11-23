@@ -71,7 +71,7 @@ static int register_loop_state_available(Statement *s)
     return !cg.parser->no_strength_reduction&&!cg.parser->no_body_optimizations&&
         !cg.parser->no_register_loops&&!cg.parser->no_register_cursors&&!cg.function->jump_label_count&&
         !cg.function->symbol->interrupt&&!cg.switch_depth&&!cg.retained_index&&!cg.retained_second&&
-        !cg.affine_active&&!cg.lftr_active&&!cg.scan_cursor&&!cg.numeric_index&&!cg.bound&&!cg.bound_pending&&
+        !cg.affine_active&&!lftr_state.active&&!cg.scan_cursor&&!cg.numeric_index&&!bound_state.cursor&&!bound_state.pending&&
         !cg.scalar_leaf&&!cg.scalar_first&&!volatile_statement(s);
 }
 
@@ -152,7 +152,7 @@ static int shift_recurrence_loop(Statement *s)
         code("    lda #$%04X\n",final);
         store_symbol(index);
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 
@@ -210,6 +210,6 @@ static int low_bit_sum_loop(Statement *s)
     code("    bne cg_%s_%u\n",cg.parser->unit,loop);label(done);
     if(loop_observed_outside(cg.function->body,s,value))store_symbol(value);
     code("    txa\n");store_symbol(sum);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }

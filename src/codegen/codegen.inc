@@ -1,308 +1,5 @@
-#define DP_SCRATCH_BASE 0x02
+#include "emit_buffer.inc"
 
-typedef struct BankVariant BankVariant;
-// Each call keeps its C locals in a stack frame. Calls can overwrite arithmetic scratch space
-typedef struct { Symbol *base,*index;unsigned scale,offset;int wram; } InductionCursor;
-typedef struct { Expr *address;unsigned offset,stride; } AffineAccess;
-typedef struct {
-    Symbol *index;
-    Expr *bound;
-    int update_index,recover_index,wide,countdown,descending,inclusive,wrap_at_limit,starts_zero,bound_loaded,entry_test;
-} DpCounter;
-typedef struct {
-    unsigned factor,span,width,stride,bytes,cost,rolled;
-    int known,full,hoist;
-    DpCounter counter;
-} UnrollPlan;
-typedef struct {
-    Statement *statement;Symbol *index;int delta;
-    AffineAccess accesses[8];unsigned count;
-    Symbol *dependencies[32];unsigned dependency_count;
-    UnrollPlan unroll;int unroll_selected,dead_index;
-} AffineLoop;
-
-typedef struct { Expr *expression;unsigned operations,offset;int reused,survives_indirect; } DivmodCache;
-typedef struct {
-    Symbol *source,*destination,*font,*buffer;
-    unsigned source_uses,destination_uses,max_offset;
-    int failed;
-} FixedWordRows;
-enum { MAX_DOT_TERMS=8, MAX_DOT_PRODUCTS=16, MAX_DOT_PACKS=24 };
-typedef struct {
-    Expr *value_expr;
-    Symbol *coeff_sym,*pack_sym;
-    int negate;
-} DotTerm;
-typedef struct {
-    Statement *loop;
-    Expr *expr;
-    Symbol *bias_sym;
-    DotTerm terms[MAX_DOT_TERMS];
-    unsigned term_count;
-    int uses_x;
-} DotProduct;
-typedef struct {
-    Statement *loop;
-    Symbol *coeff_sym,*pack_sym;
-    int negate,swapped;
-} DotPack;
-enum { MAX_RETAINED_CURSORS=4 };
-typedef struct {
-    Symbol *base;
-    unsigned offset,scale,dp_word;
-} RetainedCursor;
-typedef struct {
-    Parser *parser; Function *function; unsigned label,inline_label;
-    BankVariant *banks[256];unsigned bank_count;
-    int arithmetic,require_float_format,require_int64_format;
-    Symbol *retained_index,*retained_second,*retained_ptr;unsigned retained_scale,retained_limit,retained_second_scale,retained_bias,retained_unroll;int retained_y,retained_scratch,retained_failed;
-    Symbol *scaled_ring_head,*scaled_ring_tail;
-    unsigned scaled_ring_x_guards,scaled_ring_x_tests;
-    RetainedCursor retained_cursors[MAX_RETAINED_CURSORS];unsigned retained_cursor_count,retained_cursor_mask;
-    Symbol *numeric_index,*numeric_recurrence;unsigned numeric_limit,numeric_scale,numeric_offset;
-    unsigned interrupt_scratch;
-    const char *helpers[64]; unsigned helper_count;
-    unsigned loop_start[64],loop_end[64],loop_count,switch_depth,jump_base;
-    InductionCursor cursors[32];unsigned cursor_count;
-    DivmodCache divmod[16];unsigned divmod_count,divmod_available;
-    Symbol *divmod_version;int divmod_wide_version;
-    AffineLoop affine[32],*affine_active;unsigned affine_count;
-    Symbol *dead_indices[32];unsigned dead_index_count;
-    Symbol *omitted_parameters[2];unsigned omitted_parameter_count,register_homes,register_spills;
-    int stack_leaf;unsigned stack_bias;
-    int loop_y_borrowed;
-    Symbol *scaled_ring_indices[4];
-    FixedWordRows *fixed_rows;
-    Symbol *scalar_first;int scalar_leaf,scalar_spill;
-    Symbol *leaf_count;
-    int near_strcmp,need_smul8,need_pack_coeff;
-    DotProduct dots[MAX_DOT_PRODUCTS];unsigned dot_count;
-    DotPack dot_packs[MAX_DOT_PACKS];unsigned dot_pack_count;
-    Symbol *scan_cursor;
-    int scan_failed;
-    /* Direct-page homes (dp_homes.inc): dp_map[word] is 1+workspace word */
-    int dp_homes,dp_frameless,dp_trial,dp_failed,dp_byte_operand;unsigned dp_words;
-    unsigned dp_incoming_base;int dp_zero_stack;
-    unsigned short frame_map[384];unsigned frame_saved;
-    unsigned char dp_map[384];unsigned dp_weight[384];
-    /* Register-resident cursor (bound_cursors.inc): X holds bound->offset's
-     * value plus bound_delta between bound_start and bound_end. */
-    InductionCursor *bound,*bound_pending;unsigned bound_delta,bound_mark_count;
-    int bound_failed,bound_own,bound_entered;size_t bound_start,bound_end,bound_marks[128];
-    /* Eliminated C indices (lftr.inc); lftr_failed records any use of a home */
-    Symbol *lftr[8];unsigned lftr_count;int lftr_active,lftr_failed;
-    char *assembly;size_t length,capacity;
-} Codegen;
-static Codegen cg;
-static int integer_constant(Expr *e,uint32_t *value);
-static int parameter_incoming_live(Symbol *v);
-/* The caller's automatic objects stay live while a callee runs. Once
- * their addresses can be observed, even a zero-argument call may read them
- * through a previously published pointer. Use a function-wide guard until
- * stack-pointer provenance is available at each individual call. */
-static int automatic_designator(Expr *e)
-{
-    while(e&&e->kind==EX_MEMBER&&e->op!=TOK_ARROW)e=e->left;
-    return e&&e->kind==EX_OBJECT&&e->symbol->owner;
-}
-
-static int frame_address_expression(Expr *e)
-{
-    unsigned i;
-    if(!e)return 0;
-    /* A direct scalar field access does not publish the enclosing address */
-    if(e->kind==EX_MEMBER&&!e->type.array&&!structure_object(e->type)&&automatic_designator(e))
-        return 0;
-    if(e->kind==EX_VA_START||e->kind==EX_RESULT_ADDR||
-       (e->kind==EX_ADDRESS&&automatic_designator(e->left))||
-       (e->kind==EX_OBJECT&&e->symbol->owner&&
-        (e->symbol->type.array||structure_object(e->symbol->type))))return 1;
-    if(frame_address_expression(e->left)||frame_address_expression(e->right)||
-       frame_address_expression(e->third))return 1;
-    for(i=0;i<e->arg_count;++i)if(frame_address_expression(e->args[i]))return 1;
-    return 0;
-}
-
-static const char frame_address_marker[]="; caller frame address visible\n";
-
-static int frame_address_visible(Statement *s)
-{
-    for(;s;s=s->next)
-        if(frame_address_expression(s->expression)||frame_address_expression(s->step)||
-           frame_address_visible(s->initial)||frame_address_visible(s->body)||
-           frame_address_visible(s->alternate))return 1;
-    return 0;
-}
-
-static int loop_escapes(Statement *s,Symbol *symbol);
-static int known_integer(Type t);
-static int vr_immutable(Symbol *s);
-static int body_private(Symbol *v);
-static int body_equal(Expr *a,Expr *b);
-static int body_address_pure(Expr *e);
-static int body_has_deref(Expr *e);
-static int mapped_word_home(Symbol *v);
-static int structured_byte_loop(Statement *s);
-static int fixed_byte_copy_loop(Statement *s);
-static int counted_byte_copy_loop(Statement *s);
-static int fixed_byte_sum_loop(Statement *s);
-static int runtime_byte_sum_loop(Statement *s);
-static int strided_byte_store_loop(Statement *s);
-static int packed_byte_mask_loop(Statement *s);
-static void known_prepare(Function *f);
-static unsigned scalar_writes(Statement *s,Symbol *v);
-static int dot_reserved_symbol(const Symbol *v);
-static void region_home_liveness(Function *f,Statement *s,unsigned offset,int *in,int *out);
-static DotProduct *dot_match_expr(Expr *e);
-static int dot_indexed_byte(Expr *e,Symbol **base_out,Expr **idx_out,
-                            unsigned *off_out,unsigned *scale_out,int *far_out);
-static int dot_preserves_x(Expr *e);
-static void dot_emit_loop_setup(Statement *s);
-static int dot_emit_expr(Expr *e);
-static void zicc_smul8_name(char *name,size_t size);
-static void zicc_pack_coeff_name(char *name,size_t size);
-static void require_frame_home(Symbol *s)
-{
-    unsigned i;
-    if(s==cg.scan_cursor)cg.scan_failed=1;
-    if(s==cg.retained_index&&(cg.retained_y==1||cg.retained_y==2||cg.retained_y==4||(cg.retained_y==5&&cg.retained_ptr)))cg.retained_failed=1;
-    for(i=0;i<cg.dead_index_count;++i)if(cg.dead_indices[i]==s)
-        error_at(here(cg.parser),"internal read/write of eliminated induction home '%s'",s->name);
-    for(i=0;i<cg.omitted_parameter_count;++i)if(cg.omitted_parameters[i]==s)
-        error_at(here(cg.parser),"internal read/write of eliminated parameter home '%s'",s->name);
-}
-static void code(const char *format,...)
-{
-    va_list args,copy;int n;char *buffer;
-    va_start(args,format);va_copy(copy,args);n=vsnprintf(NULL,0,format,args);va_end(args);
-    if(n<0){va_end(copy);fputs("assembly formatting failed\n",stderr);exit(EXIT_FAILURE);}
-    if(cg.length+(size_t)n+1>cg.capacity){
-        size_t capacity=cg.capacity?cg.capacity:4096;
-        while(capacity<cg.length+(size_t)n+1)capacity*=2;
-        buffer=realloc(cg.assembly,capacity);
-        if(!buffer){va_end(copy);fputs("out of memory emitting assembly\n",stderr);exit(EXIT_FAILURE);}
-        cg.assembly=buffer;cg.capacity=capacity;
-    }
-    vsnprintf(cg.assembly+cg.length,cg.capacity-cg.length,format,copy);va_end(copy);cg.length+=(size_t)n;
-}
-static void inline_marker(Statement *s)
-{
-    if(!s->inline_callee)return;
-    unsigned id=++cg.inline_label;
-    code("; inlined call: %s %s\n.export __inlined_%s_%u_%s\n__inlined_%s_%u_%s:\n",
-        cg.function->symbol->asm_name,s->inline_callee->asm_name,cg.parser->unit,id,s->inline_callee->asm_name,
-        cg.parser->unit,id,s->inline_callee->asm_name);
-}
-static int statement_inline_markers(Statement *s)
-{
-    for (; s; s = s->next) {
-        if (s->inline_callee || statement_inline_markers(s->body) ||
-            statement_inline_markers(s->alternate) || statement_inline_markers(s->initial)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-/* Operand text for the general path's frame byte at offset. Every Y-relative
- * frame access is formatted here so individual slots can later be relocated
- * without touching emitters. Rotating buffers allow several per call. */
-static unsigned frame_offset(unsigned offset)
-{
-    unsigned word=(offset-1)/2;
-    if(offset>cg.function->slots)return offset-cg.frame_saved;
-    if(offset&&word<384&&cg.frame_map[word])return cg.frame_map[word]+((offset-1)&1);
-    return offset;
-}
-static const char *frame_operand(unsigned offset)
-{
-    static char buffers[8][24];static unsigned next;
-    char *text=buffers[next++&7];unsigned word;
-    if(cg.retained_index&&(cg.retained_y==1||cg.retained_y==2||cg.retained_y==4||(cg.retained_y==5&&cg.retained_ptr))&&offset>=cg.retained_index->offset&&offset<cg.retained_index->offset+2)cg.retained_failed=1;
-    if(cg.dp_homes&&cg.dp_zero_stack&&offset>=cg.dp_incoming_base){
-        if(cg.loop_y_borrowed)cg.dp_failed=1;
-        snprintf(text,sizeof buffers[0],"a:$%04X,y",offset-cg.dp_incoming_base+5+cg.parser->long_return);return text;
-    }
-    if(cg.bound&&!cg.bound_own&&offset==cg.bound->offset)cg.bound_failed=1;
-    if(cg.lftr_active){unsigned k;for(k=0;k<cg.lftr_count;++k)
-        if(offset>=cg.lftr[k]->offset&&offset<=cg.lftr[k]->offset+1)cg.lftr_failed=1;}
-    word=offset?(offset-1)/2:0;
-    if((cg.dp_trial)&&offset&&word<384){
-        unsigned depth=cg.loop_count<4?cg.loop_count:4;
-        cg.dp_weight[word]+=1u<<(3*depth);
-    }
-    if(cg.dp_homes){
-        /* A promoted word is spelled as a placeholder until the function is
-         * validated, so the workspace scan can tell homes from other uses. */
-        if(offset&&word<cg.dp_words&&cg.dp_map[word]&&(!((offset-1)&1)||cg.dp_byte_operand)){
-            snprintf(text,sizeof buffers[0],"z:__dp_home_%02u%s",cg.dp_map[word]-1u,
-                     (offset-1)&1?"+1":"");return text;
-        }
-        if(cg.dp_frameless||(offset&&word<cg.dp_words&&cg.dp_map[word]))cg.dp_failed=1;
-    }
-    if(cg.loop_y_borrowed)cg.dp_failed=1;
-    offset=frame_offset(offset);
-    snprintf(text,sizeof buffers[0],"a:$%04X,y",offset);
-    return text;
-}
-static int affine_pointer(Expr *e,int in_x);
-/* The build driver supplies cross-bank public entries before relaxation */
-static void call_entry(const char *name)
-{
-    const char *p=cg.parser->long_calls;int far=cg.parser->long_return||!strcmp(name,"_main");size_t n=strlen(name);
-    if(cg.parser->source_lto&&name[0]=='_'){
-        Function *f;for(f=cg.parser->functions;f;f=f->next)
-            if(!strcmp(f->symbol->asm_name,name+1)&&!f->symbol->inline_omit&&
-               (!f->symbol->inline_hint||f->symbol->internal||f->symbol->inline_external)){p=NULL;break;}
-    }
-    while(p&&*p){
-        const char *end=strchr(p,',');size_t length=end?(size_t)(end-p):strlen(p);
-        if(length==n&&!strncmp(p,name,n))far=1;
-        p=end?end+1:NULL;
-    }
-    if(far)code("    jsl %s\n",name);else code("    jsr .loword(%s)\n",name);
-}
-static void helper(const char *name)
-{
-    if(cg.function&&cg.function->symbol->interrupt){
-        /* Word bits are relative to the scratch base. Helper contracts are audited against
-         * the assembly modules by tests/check-interrupt-scratch.py. */
-        static const struct { const char *name;unsigned writes;const char *entry; } safe[]={
-            {"__ucmp16",0},{"__scmp16",0},{"__ucmp32",0},{"__scmp32",0},
-            {"__shl32",3},{"__ushr32",3},{"__sshr32",3},
-            {"__ucmp64",0},{"__scmp64",0},
-            {"__shl64",0x000f},{"__ushr64",0x000f},{"__sshr64",0x000f},
-            {"__mul64",0x0fff,"__mul64_soft"},
-            {"__uquot64",0x1f0f,"__udiv64_soft"},{"__umod64",0x1f0f,"__umod64_soft"},
-            {"__sdiv64",0x1fff,"__sdiv64_soft"},{"__smod64",0x1fff,"__smod64_soft"},
-            {"__dcmp",0},{"__dcmp_signal",0},{"__dneg",0x0008},
-            {"__dadd",0x3fff},{"__dsub",0x3fff},{"__dmul",0x1fff,"__dmul_soft"},{"__ddiv",0x7fff,"__ddiv_soft"},
-            {"__fext32_64",0x01ff},{"__ftrunc64_32",0x0ff3},
-            {"__sfloat64_32",0x00ff},{"__ufloat64_32",0x00ff},
-            {"__sfloat64_64",0x003f},{"__ufloat64_64",0x003f},
-            {"__sfloat32_64",0x007f},{"__ufloat32_64",0x007f},
-            {"__fix64_32",0x0073},{"__ufix64_32",0x0073},
-            {"__fix64_64",0x001f},{"__ufix64_64",0x001f}
-        };
-        unsigned i;
-        for(i=0;i<sizeof safe/sizeof *safe;++i)if(!strcmp(name,safe[i].name))break;
-        if(i==sizeof safe/sizeof *safe)
-            error_at(here(cg.parser),"interrupt handler requires unsafe arithmetic helper '%s'",name);
-        cg.interrupt_scratch|=safe[i].writes;
-        if(safe[i].entry)name=safe[i].entry;
-    }
-    unsigned i;cg.arithmetic=1;
-    for(i=0;i<cg.helper_count;++i)if(!strcmp(cg.helpers[i],name))break;
-    if(i==cg.helper_count)cg.helpers[cg.helper_count++]=name;
-    call_entry(name);
-}
-static const char *code_segment(void)
-{
-    return cg.function&&cg.function->symbol->interrupt==INT_NMI?"NMI_USER":"CODE";
-}
-static void label(unsigned id){code("cg_%s_%u = *\n",cg.parser->unit,id);}
-static void jump(unsigned id){code("    jmp .loword(cg_%s_%u)\n",cg.parser->unit,id);}
-static void push_value(Type t){if(reg_width(t)==4)code("    phx\n");code("    pha\n");if(cg.stack_leaf)cg.stack_bias+=reg_width(t);}
-static void pop_value(Type t){code("    pla\n");if(reg_width(t)==4)code("    plx\n");if(cg.stack_leaf)cg.stack_bias-=reg_width(t);}
 static void cleanup(unsigned bytes,Type result)
 {
     if(!bytes)return;
@@ -608,7 +305,7 @@ static void emit_address(Expr *e)
             code("    lda #.loword(%s%s)\n    ldx #.bankbyte(%s%s)\n",prefix,s->asm_name,prefix,s->asm_name);
             return;
         }
-        if(s->owner){if(cg.dp_homes)cg.dp_failed=1;code("    tya\n    clc\n    adc #$%04X\n",frame_offset(s->offset));}
+        if(s->owner){if(dp_state.homes)dp_state.failed=1;code("    tya\n    clc\n    adc #$%04X\n",frame_offset(s->offset));}
         else {code("    lda #.loword(_%s)\n",s->asm_name);if(s->type.banked)code("    ldx #.bankbyte(_%s)\n",s->asm_name);}
     }else if(e->kind==EX_DEREF)emit_value(e->left);
     else if(e->kind==EX_MEMBER){
@@ -636,7 +333,7 @@ static void emit_address(Expr *e)
 }
 static void frame_address_x(unsigned offset)
 {
-    unsigned i;if(cg.dp_homes)cg.dp_failed=1;
+    unsigned i;if(dp_state.homes)dp_state.failed=1;
     offset=frame_offset(offset);
     /* TYX and each INX cost two CPU cycles. Up to three increments beat
      * TYA/CLC/ADC #word/TAX (nine cycles); larger offsets use the add. */
@@ -701,7 +398,7 @@ static unsigned frame_byte_index_x(Expr *lhs)
        width(pointed_type(value_type(base->type)))!=1||index->type.base!=TY_INT||
        index->type.pointers||integer_constant(index,&constant)||
        !direct_operand(index,type(TY_INT,0),0,0))return 0;
-    if(cg.dp_homes)cg.dp_failed=1;
+    if(dp_state.homes)dp_state.failed=1;
     base->symbol->used=1;
     /* A valid subscript of a stack array stays in the near bank. Keep the
      * array's fixed frame displacement in the final indexed access. */
@@ -1533,7 +1230,7 @@ static int branch_checked_sum(Expr *e,unsigned yes,unsigned no,unsigned fallthro
         checked_word_chain(test->left,1);
         code("    cmp z:__arith_rhs\n    bne :+\n");jump(no);code(":\n");
         flag_branch("bcs","bcc",yes,no,fallthrough);
-        cg.divmod_available=0;
+        divmod_state.available=0;
         return 1;
     }
     code("    pha\n");
@@ -1543,7 +1240,7 @@ static int branch_checked_sum(Expr *e,unsigned yes,unsigned no,unsigned fallthro
     code("    cmp 1,s\n    beq cg_%s_%u\n    bcc cg_%s_%u\n    pla\n",cg.parser->unit,fail,cg.parser->unit,fail);
     jump(yes);label(fail);code("    pla\n");
     if(no!=fallthrough)jump(no);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 static Expr *promoted_byte_source(Expr *e)
@@ -1582,7 +1279,7 @@ static int branch_indexed_byte_pair(Expr *e,unsigned yes,unsigned no,unsigned fa
     unsigned first_byte,second_byte,done;
     int equal=e->left->op==TOK_EQ;
     if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||
-       cg.retained_index||cg.bound||cg.scan_cursor||
+       cg.retained_index||bound_state.cursor||cg.scan_cursor||
        e->left->op!=e->right->op||body_effect(e)||
        !indexed_byte_equality(e->left,&first,&first_byte)||
        !indexed_byte_equality(e->right,&second,&second_byte)||
@@ -1684,11 +1381,11 @@ static int branch_shared_byte_index(Expr *e,unsigned yes,unsigned no,unsigned fa
     if(delta->kind==EX_UNARY&&delta->op=='-'){subtract=1;delta=word_bits(delta->left);}
     if(delta->kind!=EX_OBJECT||delta->type.pointers||width(delta->type)!=2||
        !body_private(delta->symbol)||!compare_memory_operand(delta,0)||
-       !body_private(against->symbol)||!cg.dp_homes||!pointer->offset||!(pointer->offset&1)||
-       (pointer->offset-1)/2>=cg.dp_words||!cg.dp_map[(pointer->offset-1)/2]||
+       !body_private(against->symbol)||!dp_state.homes||!pointer->offset||!(pointer->offset&1)||
+       (pointer->offset-1)/2>=dp_state.words||!dp_state.map[(pointer->offset-1)/2]||
        !against->symbol->offset||!(against->symbol->offset&1)||
-       (against->symbol->offset-1)/2>=cg.dp_words||
-       !cg.dp_map[(against->symbol->offset-1)/2])return 0;
+       (against->symbol->offset-1)/2>=dp_state.words||
+       !dp_state.map[(against->symbol->offset-1)/2])return 0;
     if(result){
         result=word_bits(result);
         if(result->kind!=EX_BINARY||result->op!=(subtract?'-':'+')||
@@ -1701,7 +1398,7 @@ static int branch_shared_byte_index(Expr *e,unsigned yes,unsigned no,unsigned fa
     if(result){
         Symbol *field=a->left->left->symbol;
         unsigned offset=field->offset;
-        if(offset&&(offset&1)&&(offset-1)/2<cg.dp_words&&cg.dp_map[(offset-1)/2]){
+        if(offset&&(offset&1)&&(offset-1)/2<dp_state.words&&dp_state.map[(offset-1)/2]){
             fail=++cg.label;
             code("; reuse field address before probing reservation\n");
             load_symbol(field);
@@ -1719,7 +1416,7 @@ static int branch_shared_byte_index(Expr *e,unsigned yes,unsigned no,unsigned fa
                  frame_operand(pointer->offset),array->asm_name,cg.parser->unit,fail,
                  cg.function->symbol->asm_name);
             label(fail);
-            cg.divmod_available=0;
+            divmod_state.available=0;
             return 1;
         }
     }
@@ -1834,7 +1531,7 @@ static int branch_adjacent_byte_checks(Expr *e,unsigned yes,unsigned no,unsigned
     if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||
        volatile_expression(left)||volatile_expression(e->right)||
        !(home=fixed_byte_check(left,op,&first,&a))||home->type.banked||
-       (home->owner&&cg.dp_homes)||home!=fixed_byte_check(e->right,op,&second,&b)||
+       (home->owner&&dp_state.homes)||home!=fixed_byte_check(e->right,op,&second,&b)||
        (first+1!=second&&second+1!=first))return 0;
     if(first>second){unsigned swap=a;a=b;b=swap;first=second;}
     if(first+2>width(home->type))return 0;
@@ -1949,11 +1646,11 @@ static void branch(Expr *e,unsigned yes,unsigned no,unsigned fallthrough)
             unsigned middle=++cg.label;
             if(e->op==TOK_LAND)branch(e->left->left,middle,no,middle);
             else branch(e->left->left,yes,middle,middle);
-            {unsigned available=cg.divmod_available;
+            {unsigned available=divmod_state.available;
                 label(middle);
                 word_range_pair(e->left->right,e->right,e->op==TOK_LOR,1);
                 flag_branch(e->op==TOK_LOR?"bcs":"bcc",e->op==TOK_LOR?"bcc":"bcs",yes,no,fallthrough);
-                cg.divmod_available&=available;
+                divmod_state.available&=available;
             }return;
         }
         if(!cg.function->uses_wide&&(branch_word_bits(e,yes,no,fallthrough)||
@@ -1962,9 +1659,9 @@ static void branch(Expr *e,unsigned yes,unsigned no,unsigned fallthrough)
            branch_shared_byte_index(e,yes,no,fallthrough,NULL)))return;
         unsigned middle=++cg.label;
         if(e->op==TOK_LAND)branch(e->left,middle,no,middle);else branch(e->left,yes,middle,middle);
-        {unsigned available=cg.divmod_available;
+        {unsigned available=divmod_state.available;
             label(middle);branch(e->right,yes,no,fallthrough);
-            cg.divmod_available&=available;
+            divmod_state.available&=available;
         }return;
     }
     if(e->kind==EX_UNARY&&e->op=='!'){branch(e->left,no,yes,fallthrough);return;}
@@ -2438,9 +2135,9 @@ static void comparison_byte_text(ByteComparison *operand)
     Expr *value=operand->value;
     if(operand->index)indexed_text(&operand->indexed);
     else if(operand->high){
-        cg.dp_byte_operand=1;
+        dp_state.byte_operand=1;
         fixed_memory_word(value,2,1,1);
-        cg.dp_byte_operand=0;
+        dp_state.byte_operand=0;
     }
     else if(value->kind==EX_INT)code("#$%02X",value->value&255);
     else{
@@ -2508,10 +2205,10 @@ static int word_compare_cursor(Expr *e)
     unsigned delta;
     InductionCursor *cursor;
     if(cg.parser->no_indexed_operands||cg.retained_index||cg.retained_second||
-       cg.affine_active||cg.scan_cursor||cg.numeric_index||cg.lftr_active||
+       cg.affine_active||cg.scan_cursor||cg.numeric_index||lftr_state.active||
        e->kind!=EX_DEREF||!word_integer(e->type)||volatile_expression(e)||
        !(cursor=strength_pointer_plan(e->left,&delta)))return 0;
-    return cursor==cg.bound?delta==cg.bound_delta:delta<=3||delta>=0xfffd;
+    return cursor==bound_state.cursor?delta==bound_state.delta:delta<=3||delta>=0xfffd;
 }
 static int word_compare_loaded(Expr *e,unsigned yes,unsigned no,unsigned fallthrough)
 {
@@ -2762,7 +2459,7 @@ static int compare_frame_pointer_offset(Expr *a,Expr *b)
 {
     unsigned offset,delta=0;
     Expr *base=a;
-    if(cg.parser->no_strength_reduction||cg.dp_homes||cg.stack_leaf||
+    if(cg.parser->no_strength_reduction||dp_state.homes||cg.stack_leaf||
        !value_type(a->type).pointers||far_pointer(value_type(a->type)))return 0;
     if(a->kind==EX_BINARY&&(a->op=='+'||a->op=='-')){
         base=a->left;
@@ -3634,7 +3331,7 @@ static void emit_call(Expr *e,int needed)
     if(e->string){
         const char *p=(char *)e->string->bytes;
         while(*p){while(isspace((unsigned char)*p))++p;if(*p){code("    %.3s\n",p);p+=3;}}
-        cg.divmod_available=0;return;
+        divmod_state.available=0;return;
     }
     if(!e->left){
         if(near_library_call(e))return;
@@ -3687,12 +3384,12 @@ static void emit_call(Expr *e,int needed)
              "    jml [__arith_rhs]\n",bytes+2);
         label(continuation);code("    ply\n");
         if(aggregate&&needed)emit_address(e->third);
-        cg.divmod_available=0;return;
+        divmod_state.available=0;return;
     }
     e->symbol->used=1;
     {
         char name[132];
-        int save_cursor=cg.bound&&!e->arg_count&&!aggregate&&!needed;
+        int save_cursor=bound_state.cursor&&!e->arg_count&&!aggregate&&!needed;
         snprintf(name,sizeof name,"_%s",e->symbol->asm_name);
         if(save_cursor){code("    phx\n");bound_mark();}
         if(e->symbol->param_count<0&&bytes&&!aggregate&&!rx&&!ra)
@@ -3712,7 +3409,7 @@ static void emit_call(Expr *e,int needed)
         /* C Boolean returns are normalized in the callee's word result */
         if(needed!=CALL_LOW_BYTE&&(!e->type.is_bool||cg.parser->no_strength_reduction))narrow_char(e->type);
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
 }
 static int word_preserves_x(Expr *e)
 {
@@ -4017,7 +3714,7 @@ static int advanced_cursor_load(Expr *e)
     uint32_t back,forward;
     unsigned bytes;
     if(cg.parser->no_strength_reduction||cg.parser->no_register_cursors||
-       cg.retained_index||cg.retained_second||cg.affine_active||cg.bound||
+       cg.retained_index||cg.retained_second||cg.affine_active||bound_state.cursor||
        cg.numeric_index||cg.scan_cursor||width(e->type)!=2||
        reg_width(e->type)!=2||e->type.banked||volatile_expression(e))return 0;
     while(address->kind==EX_CAST&&value_type(address->type).pointers&&
@@ -4081,7 +3778,7 @@ static int scalar_home_update(Expr *e,int needed)
         if(!object_volatile(s->type)||s->type.pointers||s->type.base!=TY_INT||
            width(s->type)!=2||w!=2||!basic_integer_op(e->op)||
            !integer_constant(e->right,&constant))return 0;
-        cg.divmod_available=0;
+        divmod_state.available=0;
         load_symbol(s);
         register_binary(e->op,t,e->right);
         store_symbol(s);
@@ -4272,7 +3969,7 @@ static int near_memory_update(Expr *e,int needed)
         divmod_written(target);return 1;
     }
     if(!needed&&home&&home->owner&&!home->type.banked&&!cg.stack_leaf&&!cg.scalar_leaf&&
-       !cg.dp_homes&&!cg.loop_y_borrowed&&!cg.retained_index&&!cg.retained_second&&!cg.scan_cursor){
+       !dp_state.homes&&!cg.loop_y_borrowed&&!cg.retained_index&&!cg.retained_second&&!cg.scan_cursor){
         /* RMW has an X-indexed form. Use the frame base and displacement
          * directly instead of adding the field's address into X. */
         require_frame_home(home);home->used=1;
@@ -4418,7 +4115,7 @@ static int discarded_fixed_bitfield_store(Expr *e)
         code("\n    and #$%04X\n    ora z:__arith_rhs\n",65535^(mask<<field->value));
     }
     code("    sta ");array_operand(storage,offset);code("\n");
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 static void bitfield_update(Expr *e)
@@ -4458,7 +4155,7 @@ static void bitfield_update(Expr *e)
     if(post)code("    pla\n");
     code("    plx\n");if(!storage)code("    plx\n    plx\n");
     if(plain)code("    plx\n");
-    cg.divmod_available=0;
+    divmod_state.available=0;
 }
 static int identity_binary(Expr *e)
 {
@@ -4568,7 +4265,7 @@ static HwByteOperand hw_byte_classify(Expr *e)
         return op;
     s=u->kind==EX_OBJECT?u->symbol:fixed_memory_object(u,&offset);
     if(s&&s!=cg.scalar_first&&s!=cg.numeric_index&&s!=cg.numeric_recurrence&&
-       s!=cg.retained_index&&s!=cg.retained_second&&!cg.bound){
+       s!=cg.retained_index&&s!=cg.retained_second&&!bound_state.cursor){
         op.kind=HW_BYTE_MEM;op.sym=s;op.offset=offset;return op;
     }
     if(!indexed_affine_owned(u)&&indexed_operand(u,&op.iop)){
@@ -4592,12 +4289,12 @@ static void hw_byte_emit_m8_load(const HwByteOperand *op)
     if(op->kind==HW_BYTE_IMM){
         code("    lda #$%02X\n",(unsigned)(op->imm&255u));
     }else if(op->kind==HW_BYTE_MEM){
-        cg.dp_byte_operand=1;
+        dp_state.byte_operand=1;
         code("    lda ");
         if(op->sym==cg.leaf_count)code("z:__arith_rhs");
         else array_operand(op->sym,op->offset);
         code("\n");
-        cg.dp_byte_operand=0;
+        dp_state.byte_operand=0;
     }else if(op->kind==HW_BYTE_FAR_INDEXED){
         op->sym->used=1;
         code("    lda f:_%s+$0000,x\n",op->sym->asm_name);
@@ -4612,12 +4309,12 @@ static void hw_byte_emit_m8_op(const char *opname,const HwByteOperand *op)
     if(op->kind==HW_BYTE_IMM){
         code("    %s #$%02X\n",opname,(unsigned)(op->imm&255u));
     }else if(op->kind==HW_BYTE_MEM){
-        cg.dp_byte_operand=1;
+        dp_state.byte_operand=1;
         code("    %s ",opname);
         if(op->sym==cg.leaf_count)code("z:__arith_rhs");
         else array_operand(op->sym,op->offset);
         code("\n");
-        cg.dp_byte_operand=0;
+        dp_state.byte_operand=0;
     }else{
         code("    %s ",opname);
         indexed_text(&((HwByteOperand *)op)->iop);
@@ -4898,7 +4595,7 @@ static void emit_value(Expr *e)
     if(e->kind==EX_CAST&&e->type.base==TY_VOID&&!e->type.pointers){emit_discarded(e->left);return;}
     unsigned yes,no,end,offset;Symbol *array;
     if(e->kind==EX_ASSIGN&&structure_object(e->type)&&!e->type.array){emit_aggregate_copy(e,1);return;}
-    if(volatile_expression(e))cg.divmod_available=0;
+    if(volatile_expression(e))divmod_state.available=0;
     if(known_binary_constant(e)){
         code("    lda #$%04X\n",(unsigned)e->known.min&65535);
         return;
@@ -5242,10 +4939,10 @@ static void emit_value(Expr *e)
             }
         }
         yes=++cg.label;no=++cg.label;end=++cg.label;branch(e->left,yes,no,yes);
-        {unsigned available=cg.divmod_available,right_available;
-            label(yes);emit_value(e->right);right_available=cg.divmod_available;jump(end);
-            cg.divmod_available=available;label(no);emit_value(e->third);label(end);
-            cg.divmod_available&=right_available;
+        {unsigned available=divmod_state.available,right_available;
+            label(yes);emit_value(e->right);right_available=divmod_state.available;jump(end);
+            divmod_state.available=available;label(no);emit_value(e->third);label(end);
+            divmod_state.available&=right_available;
         }break;
     case EX_COMMA:break; /* Sequenced before scalar/address selection above */
     }
@@ -5335,10 +5032,10 @@ static int fixed_shift_assignment(Expr *e)
         if(home->owner){
             unsigned at=home->offset+offset,word=(at-1)/2;
             /* Reserve the fallback's scratch while the frame layout is chosen */
-            if(cg.dp_trial)return 0;
-            if(cg.dp_homes){
-                if(!(at&1)||word+1>=cg.dp_words||!(slot=cg.dp_map[word])||
-                   cg.dp_map[word+1]!=slot+1)return 0;
+            if(dp_state.trial)return 0;
+            if(dp_state.homes){
+                if(!(at&1)||word+1>=dp_state.words||!(slot=dp_state.map[word])||
+                   dp_state.map[word+1]!=slot+1)return 0;
             }else if(!cg.stack_leaf&&frame_offset(at+1)+1!=frame_offset(at+2))return 0;
         }
         code("; shift long in its fixed home\n");
@@ -5738,7 +5435,7 @@ static Statement *indirect_long_fields(Statement *s)
     Statement *p,*last=NULL;
     unsigned count=0;
     if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||cg.parser->no_indexed_operands||
-       cg.scan_cursor||cg.bound||cg.bound_pending||cg.affine_active||cg.retained_index||
+       cg.scan_cursor||bound_state.cursor||bound_state.pending||cg.affine_active||cg.retained_index||
        cg.retained_second||cg.numeric_index||cg.scalar_leaf)return NULL;
     for(p=s;p&&p->kind==ST_EXPR;p=p->next){
         Expr *e=p->expression,*to,*from;
@@ -5771,7 +5468,7 @@ static Statement *indirect_long_fields(Statement *s)
         }
         if(p==last)break;
     }
-    code("    ply\n");cg.divmod_available=0;
+    code("    ply\n");divmod_state.available=0;
     return last;
 }
 /* An unescaped scalar home cannot alias an indirect operand. Keep the
@@ -5939,7 +5636,7 @@ static int unroll_far_doubling_sum(Statement *s)
     emit_far_doubling_span(sum,load->type,(unsigned)(descending?first-1:first)*stride,
                           descending?-(int)stride:(int)stride,count);
     code("    lda #$%04X\n    sta ",(unsigned)limit);array_operand(counter,0);code("\n");
-    cg.divmod_available=0;return 1;
+    divmod_state.available=0;return 1;
 }
 /* One private far cursor, one source read, and one recurrence per element.
  * The loop has no calls and publishes its cursor at the sentinel. */
@@ -6036,7 +5733,7 @@ static int far_sentinel_doubling_loop(Statement *s)
         code("    lda z:__arith_lhs\n    sta ");array_operand(cursor,0);
         code("\n    lda z:__arith_lhs+2\n    sta ");array_operand(cursor,2);code("\n");
     }
-    cg.divmod_available=0;return 1;
+    divmod_state.available=0;return 1;
 }
 /* Hoist a bounded pointer difference into the fixed unroll planner. The
  * cursor must start at a constant offset from the exact base in the test. */
@@ -6073,7 +5770,7 @@ static int unroll_far_pointer_sum(Statement *previous,Statement *loop)
     emit_far_doubling_span(sum,load->type,first,increment?(int)stride:-(int)stride,count);
     emit_value(to);
     code("    sta ");array_operand(cursor,0);code("\n    txa\n    sta ");array_operand(cursor,2);code("\n");
-    cg.divmod_available=0;return 1;
+    divmod_state.available=0;return 1;
 }
 static int body_discard_effect(Expr *e);
 static int body_pure_discard_call(Expr *e);
@@ -6153,7 +5850,7 @@ static int copy_fixed_long_scalar(Expr *e)
         code("    lda ");array_operand(from,source+part);
         code("\n    sta ");array_operand(to,destination+part);code("\n");
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 /* Track uses of a private word through low-byte casts and bitwise operators.
@@ -6376,14 +6073,14 @@ static Statement *carry_mask_sequence(Statement *s)
     uint32_t bits,thresholds[4],masks[4];
     unsigned count=0,word,i;
     int byte=1;
-    if(!cg.dp_homes||cg.parser->no_strength_reduction||s->kind!=ST_EXPR||
+    if(!dp_state.homes||cg.parser->no_strength_reduction||s->kind!=ST_EXPR||
        !init||init->kind!=EX_ASSIGN||init->op||init->left->kind!=EX_OBJECT||
        !integer_constant(init->right,&bits)||bits)return NULL;
     home=init->left->symbol;
     if(!home->offset||!(home->offset&1)||!body_private(home)||home->type.base!=TY_INT||
        width(home->type)!=2)return NULL;
     word=(home->offset-1)/2;
-    if(word>=cg.dp_words||!cg.dp_map[word])return NULL;
+    if(word>=dp_state.words||!dp_state.map[word])return NULL;
     for(;count<4&&next&&next->kind==ST_IF&&!next->alternate;next=next->next){
         Statement *arm=next->body;
         Expr *set,*condition=next->expression,*value;
@@ -6526,10 +6223,10 @@ static Statement *packed_read_guard(Statement *s)
          "    lda f:$%06X\n    pha\n    lda f:$%06X\n    lsr a\n    pla\n"
          "    bcs cg_%s_%u\n    cmp #$%02X\n    bcs cg_%s_%u\n    rep #$20\n.a16\n",
          low_address,high_address,cg.parser->unit,fail,limit,cg.parser->unit,fail);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     if(emit_statements(test->body))jump(done);
     label(fail);code(".a8\n    rep #$20\n.a16\n");label(done);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return test;
 }
 
@@ -6601,12 +6298,12 @@ static Statement *guarded_word_bits(Statement *first)
 static int mapped_word_home(Symbol *v)
 {
     unsigned offset=v->offset;
-    return cg.dp_homes&&offset&&(offset&1)&&(offset-1)/2<cg.dp_words&&cg.dp_map[(offset-1)/2];
+    return dp_state.homes&&offset&&(offset&1)&&(offset-1)/2<dp_state.words&&dp_state.map[(offset-1)/2];
 }
 
 static void zero_mapped_high_byte(Symbol *v)
 {
-    code("    stz z:__dp_home_%02u+1\n",cg.dp_map[(v->offset-1)/2]-1);
+    code("    stz z:__dp_home_%02u+1\n",dp_state.map[(v->offset-1)/2]-1);
 }
 
 /* Load a byte, guard its lower bound and form the decremented value without
@@ -6618,7 +6315,7 @@ static Statement *guarded_byte_decrement(Statement *s)
     Symbol *value,*result;
     uint32_t limit,one;
     unsigned pass;
-    if(cg.parser->no_strength_reduction||!cg.dp_homes||cg.switch_depth||
+    if(cg.parser->no_strength_reduction||!dp_state.homes||cg.switch_depth||
        cg.retained_index||cg.scan_cursor||!test||test->kind!=ST_IF||test->alternate||!next)return NULL;
     init=plain_assignment(s);set=plain_assignment(next);predicate=test->expression;
     if(!init||!set||predicate->kind!=EX_BINARY||(predicate->op!='<'&&predicate->op!=TOK_LE)||
@@ -6644,11 +6341,11 @@ static Statement *guarded_byte_decrement(Statement *s)
     code("; byte load, lower-bound guard and decrement\n    sep #$20\n.a8\n"
          "    lda %s:$0000,x\n    cmp #$%02X\n    bcs cg_%s_%u\n    rep #$20\n.a16\n",
          strength_wram_pointer(read->left)?"z":"a",limit,cg.parser->unit,pass);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     emit_statements(test->body);
     label(pass);code(".a8\n    dec a\n    sta ");array_operand(result,0);code("\n");
     zero_mapped_high_byte(result);
-    code("    rep #$20\n.a16\n");cg.divmod_available=0;
+    code("    rep #$20\n.a16\n");divmod_state.available=0;
     return next;
 }
 
@@ -6660,7 +6357,7 @@ static int incremented_byte_plan(Statement *s,ByteIncrement *plan)
     Expr *assign,*rhs,*read,*relation;
     Symbol *value;
     uint32_t one,limit;
-    if(cg.parser->no_strength_reduction||!cg.dp_homes||cg.retained_index||
+    if(cg.parser->no_strength_reduction||!dp_state.homes||cg.retained_index||
        cg.scan_cursor||cg.switch_depth||!test||test->kind!=ST_IF||test->alternate)return 0;
     assign=plain_assignment(s);relation=test->expression;
     if(!assign||!assign->left->type.is_unsigned||assign->left->type.base!=TY_CHAR||
@@ -6692,8 +6389,8 @@ static Statement *incremented_byte_guard(Statement *s)
     zero_mapped_high_byte(p.value);
     code("    cmp #$%02X\n    rep #$20\n.a16\n    bcs :+\n",p.limit);
     jump(skip);code(":\n");
-    cg.divmod_available=0;emit_statements(p.test->body);
-    label(skip);cg.divmod_available=0;
+    divmod_state.available=0;emit_statements(p.test->body);
+    label(skip);divmod_state.available=0;
     return p.test;
 }
 
@@ -6744,16 +6441,16 @@ static int guarded_byte_store(Statement *s)
     jump(skip);label(store);
     code(".a8\n    lda ");array_operand(g.value,0);
     code("\n    sta %s:$0000,x\n    rep #$20\n.a16\n",mode);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     if(g.tail)emit_statements(g.tail);
-    label(skip);cg.divmod_available=0;
+    label(skip);divmod_state.available=0;
     return 1;
 }
 
 static int guard_dp_home(Symbol *v)
 {
     unsigned offset=v->offset;
-    return !v->owner||(offset&&(offset&1)&&(offset-1)/2<cg.dp_words&&cg.dp_map[(offset-1)/2]);
+    return !v->owner||(offset&&(offset&1)&&(offset-1)/2<dp_state.words&&dp_state.map[(offset-1)/2]);
 }
 
 /* A group borrows Y only if every other live automatic home is in DP and
@@ -6800,7 +6497,7 @@ static void emit_byte_guard_cursor(ByteGuard *guard,const int16_t *delta,unsigne
         code("\n    sta a:0,y\n");
         if(guard[i].tail){
             code("    rep #$20\n.a16\n");
-            cg.divmod_available=0;
+            divmod_state.available=0;
             emit_statements(guard[i].tail);
             code("    sep #$20\n.a8\n");
         }
@@ -6821,8 +6518,8 @@ typedef struct {
 static int plan_byte_guard_group(Statement *s,ByteGuardGroup *g)
 {
     Statement *entry;
-    if(!cg.dp_homes||cg.stack_leaf||cg.retained_index||
-       cg.scan_cursor||cg.bound||cg.cursor_count||cg.affine_active||cg.switch_depth||
+    if(!dp_state.homes||cg.stack_leaf||cg.retained_index||
+       cg.scan_cursor||bound_state.cursor||cg.cursor_count||cg.affine_active||cg.switch_depth||
        cg.parser->no_register_cursors||cg.parser->no_strength_reduction||
        cg.parser->no_indexed_operands)return 0;
     memset(g,0,sizeof *g);g->min=32767;g->max=-32768;
@@ -6958,7 +6655,7 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
         code("    lda a:0+$%04X,y\n    bne cg_%s_%u\n    lda ",offset,cg.parser->unit,skip);
         array_operand(guard->value,0);
         code("\n    sta a:0+$%04X,y\n    rep #$20\n.a16\n",offset);
-        label(tail[i]);cg.divmod_available=0;
+        label(tail[i]);divmod_state.available=0;
         if(keep_x){
             if(ring.values[i]){
                 code("    lda ");array_operand(ring.values[i],0);code("\n");
@@ -6992,7 +6689,7 @@ static void emit_shared_wrapping_guards(ByteGuardGroup *g,const ByteIncrement *s
         array_operand(guard->value,0);
         code("\n    sta a:0,x\n    rep #$20\n.a16\n");
         if(copied[i]){
-            cg.divmod_available=0;
+            divmod_state.available=0;
             if(guard->tail)emit_statements(guard->tail);
             jump(i+1<g->count?cold[i+1]:cold_done);
         }else jump(tail[i]);
@@ -7035,7 +6732,7 @@ static Statement *byte_guard_group(Statement *s)
         emit_byte_guard_cursor(g.guards,g.delta,g.count);
     }
     if(!cg.loop_y_borrowed)code("    ply\n");
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return g.last;
 }
 
@@ -7061,7 +6758,7 @@ static Statement *byte_cursor_increment_group(Statement *s)
     emit_value(init->right);
     if(g.min)code("    clc\n    adc #$%04X\n",(unsigned)g.min&65535u);
     emit_shared_wrapping_guards(&g,&step);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return g.last;
 }
 
@@ -7099,7 +6796,7 @@ static int guarded_word_extreme(Statement *s)
     emit_value(value);code("    cmp ");compare_memory_operand(dest,1);
     code("\n    %s cg_%s_%u\n",maximum?"bcc":"bcs",cg.parser->unit,done);
     if(maximum)code("    beq cg_%s_%u\n",cg.parser->unit,done);
-    store_symbol(dest->symbol);label(done);cg.divmod_available=0;
+    store_symbol(dest->symbol);label(done);divmod_state.available=0;
     return 1;
 }
 
@@ -7212,7 +6909,7 @@ static Statement *fixed_byte_copy_region(Statement *s)
         p=last->next;
     }
     code("    rep #$20\n.a16\n");
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return last;
 }
 
@@ -7468,1391 +7165,9 @@ static int wide_condition_supported(Expr *e)
         return wide_condition_supported(e->left);
     return wide_mixed_narrow_supported(e);
 }
-static void emit_wide_value(Expr *e);
-static void emit_wide_assignment(Expr *e,int discarded);
-static void emit_wide_update(Expr *e,int discarded);
-static void emit_wide_literal(Expr *e,unsigned offset)
-{
-    uint64_t value=initializer_cast64(((uint64_t)e->value_high<<32)|e->value,e->type);
-    unsigned i,loaded=0;
-    for(i=0;i<8;i+=2){
-        unsigned word=(unsigned)(value>>(8*i))&65535;
-        if(!word)code("    stz z:__arith_lhs+%u\n",offset+i);
-        else{
-            if(loaded!=word)code("    lda #$%04X\n",word);
-            code("    sta z:__arith_lhs+%u\n",offset+i);
-            loaded=word;
-        }
-    }
-}
-static void emit_wide_operand(Expr *e)
-{
-    unsigned i;Type source=value_type(e->type),word=type(TY_LONG,0);
-    cg.arithmetic=1;
-    if(wide_scalar(source)){emit_wide_value(e);return;}
-    if(e->kind==EX_INT){emit_wide_literal(e,0);return;}
-    word.is_unsigned=source.is_unsigned;emit_value(e);convert_registers(source,word);
-    code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n");
-    if(source.is_unsigned)code("    lda #0\n");
-    else code("    txa\n    cmp #$8000\n    lda #0\n    bcc :+\n    lda #$FFFF\n:\n");
-    for(i=4;i<8;i+=2)code("    sta z:__arith_lhs+%u\n",i);
-}
-static void emit_wide_as(Expr *e,Type target)
-{
-    if(target.base==TY_DOUBLE&&value_type(e->type).base!=TY_DOUBLE){
-        Expr cast={0};cast.kind=EX_CAST;cast.type=target;cast.left=e;cast.location=e->location;
-        emit_wide_value(&cast);
-    }else emit_wide_operand(e);
-}
-static void emit_wide_rhs(Expr *right,Type target)
-{
-    unsigned i,offset;Symbol *home;
-    int same=target.base!=TY_DOUBLE||value_type(right->type).base==TY_DOUBLE;
-    if(same&&right->kind==EX_INT){emit_wide_literal(right,8);return;}
-    if(same&&wide_scalar(value_type(right->type))&&(home=wide_fixed_home(right,&offset))!=NULL){
-        for(i=0;i<8;i+=2){code("    lda ");array_operand(home,offset+i);code("\n    sta z:__arith_lhs+%u\n",i+8);}
-        return;
-    }
-    for(i=8;i;i-=2)code("    lda z:__arith_lhs+%u\n    pha\n",i-2);
-    emit_wide_as(right,target);
-    for(i=0;i<8;i+=2)code("    lda z:__arith_lhs+%u\n    sta z:__arith_lhs+%u\n",i,i+8);
-    for(i=0;i<8;i+=2)code("    pla\n    sta z:__arith_lhs+%u\n",i);
-}
-static void emit_wide_pair(Expr *left,Expr *right,Type target)
-{
-    emit_wide_as(left,target);emit_wide_rhs(right,target);
-}
-static void wide_word_bounds(Expr *e,int *low,int *high)
-{
-    Type t=value_type(e->type);
-    unsigned bits=width(t)*8;
-    int a,b;
-    *high=t.is_bool?1:(int)((1u<<(bits-!t.is_unsigned))-1);
-    *low=t.is_unsigned||t.is_bool?0:-*high-1;
-    if(e->kind==EX_INT){*low=*high=(int32_t)initializer_cast(e->value,t);return;}
-    if((e->kind!=EX_CAST&&(e->kind!=EX_UNARY||e->op!='~'))||!known_integer(value_type(e->left->type)))return;
-    wide_word_bounds(e->left,&a,&b);
-    if(a<*low||b>*high)return;
-    if(e->kind==EX_UNARY){
-        int complement=t.is_unsigned?*high:-1;
-        a=complement-a;b=complement-b;
-        *low=b;*high=a;
-    }else{*low=a;*high=b;}
-}
-static Expr *wide_word_source(Expr *e)
-{
-    while(e->kind==EX_CAST&&e->type.base==TY_LONGLONG&&!e->type.pointers)e=e->left;
-    return known_integer(value_type(e->type))&&wide_address_safe(e)?e:NULL;
-}
-static int wide_integer_literal(Expr *e)
-{
-    return e->kind==EX_INT&&numeric(e->type)&&e->type.base!=TY_FLOAT&&e->type.base!=TY_DOUBLE;
-}
-static int wide_mask_zero_flags(Expr *left,Expr *right)
-{
-    Symbol *home;
-    uint64_t bits;
-    unsigned offset,i,end=0;
-    int have=0;
-    if(wide_integer_literal(left)){Expr *swap=left;left=right;right=swap;}
-    if(!wide_integer_literal(right)||value_type(left->type).base!=TY_LONGLONG||
-       !wide_scalar(value_type(left->type))||volatile_expression(left)||!(home=wide_fixed_home(left,&offset)))return 0;
-    bits=initializer_cast64(((uint64_t)right->value_high<<32)|right->value,right->type);
-    for(i=0;i<8;i+=2){
-        unsigned word=(unsigned)(bits>>(8*i))&65535;
-        if(!word)continue;
-        if(have&&word!=65535){
-            if(!end)end=++cg.label;
-            code("    bne cg_%s_%u\n",cg.parser->unit,end);have=0;
-        }
-        code(have?"    ora ":"    lda ");array_operand(home,offset+i);code("\n");
-        if(word!=65535)code("    and #$%04X\n",word);
-        have=1;
-    }
-    if(!have)code("    lda #0\n");
-    if(end)label(end);
-    return 1;
-}
-/* Widening these operands preserves their low word. A range strictly
- * between the adjacent multiples of 65536 makes its zero test sufficient. */
-static int wide_word_zero_flags(Expr *e)
-{
-    Expr *left,*right;
-    int lmin,lmax,rmin,rmax,low,high;
-    if(cg.parser->no_strength_reduction||e->kind!=EX_BINARY||e->type.base!=TY_LONGLONG||e->type.pointers)return 0;
-    if(e->op=='&')return wide_mask_zero_flags(e->left,e->right);
-    if(e->op!='+'&&e->op!='-')return 0;
-    left=wide_word_source(e->left);right=wide_word_source(e->right);
-    if(!left||!right)return 0;
-    wide_word_bounds(left,&lmin,&lmax);
-    wide_word_bounds(right,&rmin,&rmax);
-    low=e->op=='+'?lmin+rmin:lmin-rmax;
-    high=e->op=='+'?lmax+rmax:lmax-rmin;
-    if(low<=-65536||high>=65536)return 0;
-    code("; word zero test of widened arithmetic\n");
-    emit_value(left);binary_after_left(left,right,e->op);
-    code("    cmp #0\n");
-    return 1;
-}
-static int wide_zero_compare(Expr *e,Type t,unsigned yes,unsigned no,unsigned fallthrough)
-{
-    Expr *value=e->left,*zero=e->right;
-    int op=e->op,equality=op==TOK_EQ||op==TOK_NE;
-    unsigned offset=0,middle;
-    Symbol *home;
-    if(cg.parser->no_strength_reduction)return 0;
-    if(zero->kind!=EX_INT&&value->kind==EX_INT){
-        zero=e->left;value=e->right;
-        if(!equality)op=reverse_order(op);
-    }
-    if(zero->kind!=EX_INT||zero->value||zero->value_high)return 0;
-    if(equality||(t.is_unsigned&&(op=='>'||op==TOK_LE))){
-        if(op==TOK_EQ||op==TOK_LE){unsigned swap=yes;yes=no;no=swap;}
-        branch(value,yes,no,fallthrough);
-        return 1;
-    }
-    if(t.is_unsigned){
-        unsigned target=op==TOK_GE?yes:no;
-        if(body_effect(value))emit_discarded(value);
-        if(target!=fallthrough)jump(target);
-        return 1;
-    }
-    if(op=='<'||op==TOK_GE){
-        Expr *word=wide_word_source(value);
-        if(word){
-            if(word->type.is_unsigned){
-                unsigned target=op==TOK_GE?yes:no;
-                if(!literal_integer_tree(word))emit_value(word);
-                if(target!=fallthrough)jump(target);
-            }else{
-                emit_value(word);
-                if(!accumulator_zero_flags())code("    cmp #0\n");
-                integer_relation_flags(op,1,yes,no,fallthrough);
-            }
-            return 1;
-        }
-    }
-    /* A sign test may skip the lower words of an ordinary memory operand */
-    home=volatile_expression(value)?NULL:wide_fixed_home(value,&offset);
-    if(home&&value_type(value->type).base!=TY_LONGLONG)home=NULL;
-    if(home){
-        code("    lda ");array_operand(home,offset+6);code("\n");
-    }else{
-        emit_wide_as(value,t);code("    lda z:__arith_lhs+6\n");
-    }
-    if(op=='<'||op==TOK_GE){
-        integer_relation_flags(op,1,yes,no,fallthrough);
-        return 1;
-    }
-    if(op==TOK_LE){unsigned swap=yes;yes=no;no=swap;}
-    middle=++cg.label;
-    flag_branch("bmi","bpl",no,middle,middle);label(middle);
-    for(unsigned i=0;i<6;i+=2){
-        code("    ora ");
-        if(home)array_operand(home,offset+i);
-        else code("z:__arith_lhs+%u",i);
-        code("\n");
-    }
-    flag_branch("bne","beq",yes,no,fallthrough);
-    return 1;
-}
-static int mixed_wide_equality(Expr *e,Type t,unsigned yes,unsigned no,unsigned fallthrough)
-{
-    Expr *lhs=e->left,*rhs=e->right;
-    Type narrow=value_type(rhs->type);
-    unsigned i,offset,left_offset,bytes,done;
-    Symbol *left,*right;
-    if(cg.parser->no_strength_reduction||value_type(lhs->type).base!=TY_LONGLONG||
-       !wide_scalar(value_type(lhs->type))||narrow.pointers||
-       (narrow.base!=TY_INT&&narrow.base!=TY_LONG)||volatile_expression(e)||
-       !(right=wide_fixed_home(rhs,&offset)))return 0;
-    left=wide_fixed_home(lhs,&left_offset);
-    if(!left)emit_wide_as(lhs,t);
-    bytes=width(narrow);done=++cg.label;
-    if(!narrow.is_unsigned){
-        code("    ldx #0\n    lda ");array_operand(right,offset+bytes-2);
-        code("\n    bpl :+\n    dex\n:\n");
-    }
-    for(i=8;i;i-=2){
-        unsigned part=i-2;
-        int sign=part>=bytes&&!narrow.is_unsigned;
-        code(sign?"    txa\n    cmp ":"    lda ");
-        if(left)array_operand(left,left_offset+part);else code("z:__arith_lhs+%u",part);
-        code("\n");
-        if(part<bytes){code("    cmp ");array_operand(right,offset+part);code("\n");}
-        if(part)code("    bne cg_%s_%u\n",cg.parser->unit,done);
-    }
-    label(done);
-    flag_branch(e->op==TOK_EQ?"beq":"bne",e->op==TOK_EQ?"bne":"beq",yes,no,fallthrough);
-    return 1;
-}
-static Expr *wide_word_magnitude_source(Expr *e)
-{
-    Expr *test,*negative,*positive,*word,*other;
-    while(e->kind==EX_CAST&&e->type.base==TY_LONGLONG&&!e->type.pointers)e=e->left;
-    if(e->kind!=EX_CHOOSE)return NULL;
-    test=e->left;negative=e->right;positive=e->third;
-    if(cg.parser->no_strength_reduction||e->type.base!=TY_LONGLONG||test->kind!=EX_BINARY||
-       test->op!='<'||test->right->kind!=EX_INT||test->right->value||test->right->value_high||
-       common_type(test->left->type,test->right->type).is_unsigned||
-       !(word=wide_word_source(test->left))||!literal_integer_tree(word))return NULL;
-    while(negative->kind==EX_CAST&&negative->type.base==TY_LONGLONG&&!negative->type.pointers)
-        negative=negative->left;
-    if(negative->kind!=EX_UNARY||negative->op!='-'||negative->type.base!=TY_LONGLONG||
-       !(other=wide_word_source(negative->left))||!body_equal(word,other)||
-       !(other=wide_word_source(positive))||!body_equal(word,other))return NULL;
-    return word;
-}
-static void emit_word_magnitude(Expr *word)
-{
-    emit_value(word);
-    if(!word->type.is_unsigned){
-        if(!accumulator_zero_flags())code("    cmp #0\n");
-        code("    bpl :+\n    eor #$FFFF\n    inc a\n:\n");
-    }
-}
-static int wide_word_magnitude_equal(Expr *value,Expr *other,int op,unsigned yes,unsigned no,unsigned fallthrough)
-{
-    Expr *source=wide_word_magnitude_source(value),*input;
-    Type word=type(TY_INT,0);
-    if(!source)return 0;
-    word.is_unsigned=1;
-    input=wide_word_source(other);
-    if(!input&&wide_integer_literal(other))input=other;
-    if(input&&input->kind==EX_INT&&
-       initializer_cast64(((uint64_t)input->value_high<<32)|input->value,input->type)>65535u){
-        unsigned different=op==TOK_EQ?no:yes;
-        if(different!=fallthrough)jump(different);
-        return 1;
-    }
-    if(!input||!direct_operand(input,word,0,0))return 0;
-    if(input->kind!=EX_INT&&!input->type.is_unsigned){
-        unsigned nonnegative=++cg.label;
-        code("    lda ");direct_operand(input,word,0,1);code("\n");
-        flag_branch("bmi","bpl",op==TOK_EQ?no:yes,nonnegative,nonnegative);
-        label(nonnegative);
-    }
-    emit_word_magnitude(source);
-    code("    cmp ");direct_operand(input,word,0,1);code("\n");
-    flag_branch(op==TOK_EQ?"beq":"bne",op==TOK_EQ?"bne":"beq",yes,no,fallthrough);
-    return 1;
-}
-static int fixed_wide_compare(Expr *e,unsigned yes,unsigned no,unsigned fallthrough)
-{
-    Expr *lhs=e->left,*rhs=e->right;
-    Type t=common_type(lhs->type,rhs->type);
-    unsigned offset=0,left_offset=0,i;
-    uint64_t bits=0;
-    Symbol *home=NULL,*left=NULL;
-    int op=e->op,equality=op==TOK_EQ||op==TOK_NE;
-    if(t.base!=TY_LONGLONG)return 0;
-    if(wide_zero_compare(e,t,yes,no,fallthrough))return 1;
-    if(equality&&(wide_word_magnitude_equal(lhs,rhs,op,yes,no,fallthrough)||
-                 wide_word_magnitude_equal(rhs,lhs,op,yes,no,fallthrough)))return 1;
-    if(equality&&mixed_wide_equality(e,t,yes,no,fallthrough))return 1;
-    if(!cg.parser->no_strength_reduction&&lhs->kind==EX_INT&&rhs->kind!=EX_INT){
-        lhs=e->right;rhs=e->left;
-        if(!equality)op=reverse_order(op);
-    }
-    if(!cg.parser->no_strength_reduction&&rhs->kind==EX_INT)
-        bits=initializer_cast64(((uint64_t)rhs->value_high<<32)|rhs->value,rhs->type);
-    else if(value_type(rhs->type).base!=TY_LONGLONG||!(home=wide_fixed_home(rhs,&offset)))return 0;
-    if(equality&&!cg.parser->no_strength_reduction&&wide_integer_literal(rhs)){
-        Expr *input=lhs;
-        while(input->kind==EX_CAST&&input->type.base==TY_LONGLONG&&!input->type.pointers)input=input->left;
-        Type narrow=value_type(input->type);
-        if(numeric(narrow)&&narrow.base!=TY_FLOAT&&!wide_scalar(narrow)){
-            if(initializer_cast64(bits,narrow)!=bits){
-                unsigned different=op==TOK_EQ?no:yes;
-                if(body_discard_effect(input))emit_discarded(input);
-                if(different!=fallthrough)jump(different);
-            }else{
-                Expr literal={0},test=*e;
-                literal.kind=EX_INT;literal.type=narrow;literal.value=(uint32_t)bits;
-                test.left=input;test.right=&literal;test.op=op;
-                branch(&test,yes,no,fallthrough);
-            }
-            return 1;
-        }
-    }
-    if(!cg.parser->no_strength_reduction&&value_type(lhs->type).base==TY_LONGLONG&&
-       !volatile_expression(e))
-        left=wide_fixed_home(lhs,&left_offset);
-    if(!left)emit_wide_as(lhs,t);
-    if(equality&&(left||!home)){
-        unsigned different=op==TOK_EQ?no:yes;
-        for(i=8;i;i-=2){
-            code("    lda ");
-            if(left)array_operand(left,left_offset+i-2);
-            else code("z:__arith_lhs+%u",i-2);
-            code("\n    cmp ");
-            if(home)array_operand(home,offset+i-2);
-            else code("#$%04X",(unsigned)(bits>>(8*(i-2)))&65535);
-            code("\n");
-            if(i>2){
-                unsigned same=++cg.label;
-                flag_branch("bne","beq",different,same,same);label(same);
-            }
-        }
-        flag_branch(op==TOK_EQ?"beq":"bne",op==TOK_EQ?"bne":"beq",yes,no,fallthrough);
-        return 1;
-    }
-    if(!equality&&left&&home){
-        unsigned ordered=++cg.label;
-        if(op=='>'||op==TOK_LE){
-            Symbol *swap=left;unsigned at=left_offset;
-            left=home;left_offset=offset;home=swap;offset=at;
-            op=reverse_order(op);
-        }
-        i=8;
-        if(!t.is_unsigned){
-            unsigned low=++cg.label;
-            code("    sec\n    lda ");array_operand(left,left_offset+6);
-            code("\n    sbc ");array_operand(home,offset+6);
-            code("\n    beq cg_%s_%u\n    bvc :+\n    eor #$8000\n:\n",cg.parser->unit,low);
-            integer_relation_flags(op,1,yes,no,0);
-            label(low);i=6;
-        }
-        for(;i;i-=2){
-            code("    lda ");array_operand(left,left_offset+i-2);
-            code("\n    cmp ");array_operand(home,offset+i-2);code("\n");
-            if(i>2)code("    bne cg_%s_%u\n",cg.parser->unit,ordered);
-        }
-        label(ordered);
-        integer_relation_flags(op,0,yes,no,fallthrough);
-        return 1;
-    }
-    i=0;
-    if(!equality){
-        int borrow=op=='>'||op==TOK_LE;
-        if(left&&!home){
-            /* Zero with carry set, or all ones with carry clear, preserves carry */
-            unsigned neutral=borrow?65535:0;
-            while(i<6&&((bits>>(8*i))&65535)==neutral)i+=2;
-        }
-        code(borrow?"    clc\n":"    sec\n");
-    }
-    for(;i<8;i+=2){
-        code("    lda ");
-        if(left)array_operand(left,left_offset+i);
-        else code("z:__arith_lhs+%u",i);
-        code("\n    %s ",equality?"eor":"sbc");
-        if(home)array_operand(home,offset+i);
-        else code("#$%04X",(unsigned)(bits>>(8*i))&65535);
-        code("\n");
-        if(equality&&i)code("    ora z:__arith_lhs\n");
-        if(equality&&i<6)code("    sta z:__arith_lhs\n");
-    }
-    if(equality)flag_branch(op==TOK_EQ?"beq":"bne",op==TOK_EQ?"bne":"beq",yes,no,fallthrough);
-    else{
-        if(!t.is_unsigned)code("    bvc :+\n    eor #$8000\n:\n");
-        integer_relation_flags(op,!t.is_unsigned,yes,no,fallthrough);
-    }
-    return 1;
-}
-static void emit_wide_compare(Expr *e)
-{
-    Type t=common_type(e->left->type,e->right->type);
-    unsigned yes=++cg.label,no=++cg.label,end=++cg.label;
-    if(fixed_wide_compare(e,yes,no,yes)){
-        label(yes);code("    lda #1\n");jump(end);
-        label(no);code("    lda #0\n");label(end);return;
-    }
-    emit_wide_pair(e->left,e->right,t);
-    if(t.base==TY_DOUBLE)helper(e->op==TOK_EQ||e->op==TOK_NE?"__dcmp":"__dcmp_signal");
-    else helper(t.is_unsigned?"__ucmp64":"__scmp64");
-    boolean_from_compare(e->op);
-}
-static const char *wide_word_instruction(int op)
-{
-    return op=='+'?"adc":op=='-'?"sbc":op=='&'?"and":op=='|'?"ora":"eor";
-}
-static void emit_wide_immediate_operation(int op,Expr *literal)
-{
-    uint64_t bits=initializer_cast64(((uint64_t)literal->value_high<<32)|literal->value,literal->type);
-    unsigned i=0;
-    int carry=op=='+'||op=='-';
-    if(carry){
-        if(!bits)return;
-        while(!((bits>>(8*i))&65535))i+=2;
-        code(op=='+'?"    clc\n":"    sec\n");
-    }
-    for(;i<8;i+=2){
-        unsigned word=(unsigned)(bits>>(8*i))&65535;
-        if(!carry&&word==(op=='&'?65535u:0u))continue;
-        if(op=='&'&&!word){code("    stz z:__arith_lhs+%u\n",i);continue;}
-        if(op=='|'&&word==65535u)code("    lda #$FFFF\n");
-        else code("    lda z:__arith_lhs+%u\n    %s #$%04X\n",i,wide_word_instruction(op),word);
-        code("    sta z:__arith_lhs+%u\n",i);
-    }
-}
-static void emit_wide_word_operation(int op,Symbol *left,unsigned left_offset,Symbol *right,unsigned offset)
-{
-    unsigned i;
-    if(op=='+'||op=='-')code(op=='+'?"    clc\n":"    sec\n");
-    for(i=0;i<8;i+=2){
-        code("    lda ");
-        if(left)array_operand(left,left_offset+i);else code("z:__arith_lhs+%u",i);
-        code("\n    %s ",wide_word_instruction(op));
-        if(right)array_operand(right,offset+i);
-        else code("z:__arith_lhs+%u",i+8);
-        code("\n    sta z:__arith_lhs+%u\n",i);
-    }
-}
-static void emit_wide_operation(Type t,int op)
-{
-    if(t.base==TY_DOUBLE){
-        helper(op=='+'?"__dadd":op=='-'?"__dsub":op=='*'?"__dmul":"__ddiv");return;
-    }
-    if(op=='*'||op=='/'||op=='%'||op==TOK_SHL||op==TOK_SHR){
-        const char *name=op=='*'?"__mul64":op=='/'?(t.is_unsigned?"__uquot64":"__sdiv64"):
-            op=='%'?(t.is_unsigned?"__umod64":"__smod64"):op==TOK_SHL?"__shl64":
-            t.is_unsigned?"__ushr64":"__sshr64";
-        helper(name);return;
-    }
-    emit_wide_word_operation(op,NULL,0,NULL,0);
-}
-static int wide_word_shift_bytes(Type t,int op,Expr *right)
-{
-    unsigned count;
-    if(cg.parser->no_strength_reduction||t.base!=TY_LONGLONG||
-       (op!=TOK_SHL&&op!=TOK_SHR)||!integer_constant(right,&count))return -1;
-    count&=63;
-    return count%16?-1:(int)(count/8);
-}
-static void wide_shift_slot(Symbol *home,unsigned offset,unsigned part)
-{
-    if(home)array_operand(home,offset+part);else code("z:__arith_lhs+%u",part);
-}
-static void emit_wide_word_shift(Type t,int op,unsigned bytes,Symbol *home,unsigned offset)
-{
-    unsigned i,first,end;
-    int sign_fill=op==TOK_SHR&&!t.is_unsigned;
-    int stz=!sign_fill&&(!home||(!home->owner&&!home->type.banked));
-    if(!bytes)return;
-    if(op==TOK_SHL){
-        for(i=8;i>bytes;i-=2){
-            code("    lda ");wide_shift_slot(home,offset,i-bytes-2);
-            code("\n    sta ");wide_shift_slot(home,offset,i-2);code("\n");
-        }
-        first=0;end=bytes;
-    }else{
-        for(i=0;i<8-bytes;i+=2){
-            code("    lda ");wide_shift_slot(home,offset,i+bytes);
-            code("\n    sta ");wide_shift_slot(home,offset,i);code("\n");
-        }
-        first=i;end=8;
-    }
-    if(sign_fill)code("    bmi :+\n    lda #0\n    bra :++\n:\n    lda #$FFFF\n:\n");
-    else if(!stz)code("    lda #0\n");
-    for(i=first;i<end;i+=2){
-        code(stz?"    stz ":"    sta ");wide_shift_slot(home,offset,i);code("\n");
-    }
-}
-static int wide_power_divisor(Expr *e,Expr **shift)
-{
-    uint64_t bits;
-    int count=0;
-    *shift=NULL;
-    if(e->kind==EX_BINARY&&e->op==TOK_SHL&&e->type.is_unsigned&&wide_address_safe(e->right)){
-        *shift=e->right;e=e->left;
-    }
-    if(e->kind!=EX_INT)return -1;
-    bits=initializer_cast64(((uint64_t)e->value_high<<32)|e->value,e->type);
-    if(!bits||(bits&(bits-1)))return -1;
-    while(bits>>=1)++count;
-    return count;
-}
-static unsigned wide_unsigned_size(Expr *e)
-{
-    Type t;
-    while(e->kind==EX_CAST&&!e->type.pointers&&e->type.base==TY_LONGLONG)e=e->left;
-    t=value_type(e->type);
-    if(!numeric(t)||t.pointers||t.base==TY_FLOAT||t.base==TY_DOUBLE)return 0;
-    if(e->kind==EX_INT){
-        uint64_t bits=initializer_cast64(((uint64_t)e->value_high<<32)|e->value,t);
-        return bits<=65535?2:bits<=UINT32_MAX?4:0;
-    }
-    return (t.is_unsigned||t.is_bool)&&width(t)<=4?reg_width(t):0;
-}
-static Expr *wide_signed_long_source(Expr *e)
-{
-    while(e->kind==EX_CAST&&e->type.base==TY_LONGLONG&&!e->type.pointers)e=e->left;
-    return e->type.base==TY_LONG&&!e->type.pointers&&!e->type.array&&!e->type.is_unsigned?e:NULL;
-}
-static int emit_wide_signed_long_product(Expr *left,Expr *right)
-{
-    Type t=type(TY_LONG,0);
-    left=wide_signed_long_source(left);right=wide_signed_long_source(right);
-    if(!left||!right)return 0;
-    emit_value(left);push_value(t);
-    emit_value(right);
-    code("    sta z:__arith_lhs+8\n    stx z:__arith_lhs+10\n");
-    pop_value(t);
-    code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n");
-    helper("__smul32wide");
-    return 1;
-}
-static int emit_wide_narrow_product(Expr *left,Expr *right,Type t)
-{
-    unsigned l=wide_unsigned_size(left),r=wide_unsigned_size(right);
-    if(!l||!r||(l!=2&&r!=2))return 0;
-    emit_wide_pair(left,right,t);
-    /* The word helper leaves its inputs intact, with its product in A/X */
-    if(l==4){
-        code("    lda z:__arith_lhs+2\n    sta z:__arith_lhs+12\n"
-             "    lda z:__arith_lhs\n    sta z:__arith_rhs\n"
-             "    lda z:__arith_lhs+8\n    sta z:__arith_lhs\n");
-    }else{
-        if(r==4)code("    lda z:__arith_lhs+10\n    sta z:__arith_lhs+12\n");
-        code("    lda z:__arith_lhs+8\n    sta z:__arith_rhs\n");
-    }
-    code("    stz z:__arith_lhs+2\n    stz z:__arith_rhs+2\n");
-    helper("__mul16wide");
-    if(l==2&&r==2){
-        code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n    stz z:__arith_lhs+4\n");
-    }else{
-        code("    sta z:__arith_lhs+14\n    stx z:__arith_lhs+16\n"
-             "    lda z:__arith_lhs+12\n    sta z:__arith_rhs\n");
-        helper("__mul16wide");
-        code("    clc\n    adc z:__arith_lhs+16\n    sta z:__arith_lhs+2\n"
-             "    txa\n    adc #0\n    sta z:__arith_lhs+4\n"
-             "    lda z:__arith_lhs+14\n    sta z:__arith_lhs\n");
-    }
-    code("    stz z:__arith_lhs+6\n");
-    return 1;
-}
-static int emit_wide_word_factor(Expr *left,Expr *right)
-{
-    while(right->kind==EX_CAST&&right->type.base==TY_LONGLONG&&!right->type.pointers)right=right->left;
-    Type source=value_type(right->type);
-    if(!word_integer(source)||width(source)!=2||!compare_memory_operand(right,0))return 0;
-    emit_wide_operand(left);
-    code("    lda ");compare_memory_operand(right,1);code("\n");
-    helper(source.is_unsigned?"__umul64_word":"__smul64_word");
-    return 1;
-}
-static int emit_wide_add_unsigned_word(Expr *left,Expr *right)
-{
-    Expr *input=right;
-    while(input->kind==EX_CAST&&input->type.base==TY_LONGLONG&&!input->type.pointers)input=input->left;
-    Type t=value_type(input->type);
-    if(!wide_scalar(value_type(left->type))||!known_integer(t)||!t.is_unsigned||
-       input->kind==EX_INT||body_effect(left)||body_effect(input))return 0;
-    emit_value(input);push_value(t);
-    emit_wide_operand(left);pop_value(t);
-    code("    clc\n    adc z:__arith_lhs\n    sta z:__arith_lhs\n    bcc :+\n"
-         "    inc z:__arith_lhs+2\n    bne :+\n"
-         "    inc z:__arith_lhs+4\n    bne :+\n    inc z:__arith_lhs+6\n:\n");
-    return 1;
-}
-static void emit_wide_shift_count(Expr *right,Type t)
-{
-    uint32_t count;
-    unsigned i,offset;
-    Symbol *home;
-    if(integer_constant(right,&count)){
-        code("    lda #$%04X\n    sta z:__arith_lhs+8\n",count&65535u);
-        return;
-    }
-    if(compare_memory_operand(right,0)){
-        code("    lda ");compare_memory_operand(right,1);code("\n    sta z:__arith_lhs+8\n");return;
-    }
-    if(wide_scalar(value_type(right->type))){
-        if(!(home=wide_fixed_home(right,&offset))){emit_wide_rhs(right,t);return;}
-        code("    lda ");array_operand(home,offset);code("\n    sta z:__arith_lhs+8\n");
-        if(volatile_expression(right))for(i=2;i<8;i+=2){
-            code("    lda ");array_operand(home,offset+i);code("\n");
-        }
-        return;
-    }
-    /* The shift helper consumes only the low word of the count */
-    for(i=8;i;i-=2)code("    lda z:__arith_lhs+%u\n    pha\n",i-2);
-    emit_value(right);code("    sta z:__arith_lhs+8\n");
-    for(i=0;i<8;i+=2)code("    pla\n    sta z:__arith_lhs+%u\n",i);
-}
-static int emit_wide_rotate(Expr *left,Expr *right)
-{
-    Symbol *home;
-    unsigned offset,other,i,shift,words;
-    int bits;
-    if(left->kind!=EX_BINARY||right->kind!=EX_BINARY)return 0;
-    if(left->op==TOK_SHL){Expr *swap=left;left=right;right=swap;}
-    if(left->op!=TOK_SHR||right->op!=TOK_SHL||left->type.base!=TY_LONGLONG||
-       right->type.base!=TY_LONGLONG||left->right->kind!=EX_INT||right->right->kind!=EX_INT||
-       left->right->value_high||right->right->value_high||
-       !(shift=left->right->value)||shift>=64||right->right->value!=64-shift||
-       volatile_expression(left)||volatile_expression(right)||
-       !(home=wide_fixed_home(left->left,&offset))||
-       wide_fixed_home(right->left,&other)!=home||offset!=other)return 0;
-    words=(shift+8)/16;
-    bits=(int)shift-(int)words*16;
-    for(i=0;i<8;i+=2){
-        code("    lda ");array_operand(home,offset+(i+2*words)%8);
-        code("\n    sta z:__arith_lhs+%u\n",i);
-    }
-    if(bits){
-        unsigned count=(unsigned)(bits>0?bits:-bits);
-        if(count>1)code("    ldx #%u\n:\n",count);
-        if(bits>0){
-            code("    lda z:__arith_lhs\n    lsr a\n");
-            for(i=8;i;i-=2)code("    ror z:__arith_lhs+%u\n",i-2);
-        }else{
-            code("    lda z:__arith_lhs+6\n    asl a\n");
-            for(i=0;i<8;i+=2)code("    rol z:__arith_lhs+%u\n",i);
-        }
-        if(count>1)code("    dex\n    bne :-\n");
-    }
-    if(!left->type.is_unsigned){
-        /* The original sign now sits immediately below the sign-fill bits */
-        unsigned sign=63-shift,mask=1u<<(sign%16);
-        i=2*(sign/16);
-        code("    lda z:__arith_lhs+%u\n    bit #$%04X\n    beq :+\n",i,mask);
-        if(mask!=0x8000)code("    ora #$%04X\n    sta z:__arith_lhs+%u\n",(0u-2*mask)&65535u,i);
-        if(i<6){
-            code("    lda #$FFFF\n");
-            for(i+=2;i<8;i+=2)code("    sta z:__arith_lhs+%u\n",i);
-        }
-        code(":\n");
-    }
-    return 1;
-}
-static void emit_wide_binary(Expr *left,Expr *right,int op)
-{
-    int shift=op==TOK_SHL||op==TOK_SHR;
-    Type t=shift?promoted(left->type):common_type(left->type,right->type);
-    int bytes=wide_word_shift_bytes(t,op,right);
-    unsigned offset;
-    Symbol *home;
-    if(!cg.parser->no_strength_reduction&&op=='|'&&t.base==TY_LONGLONG&&emit_wide_rotate(left,right))return;
-    if(!cg.parser->no_strength_reduction&&!cg.function->symbol->interrupt&&
-       t.base==TY_LONGLONG&&op=='*'&&
-       (emit_wide_signed_long_product(left,right)||emit_wide_narrow_product(left,right,t)||
-        emit_wide_word_factor(left,right)))return;
-    if(!cg.parser->no_strength_reduction&&t.base==TY_LONGLONG&&op=='+'&&
-       (emit_wide_add_unsigned_word(left,right)||emit_wide_add_unsigned_word(right,left)))return;
-    if(!cg.parser->no_strength_reduction&&op=='/'&&t.base==TY_LONGLONG&&t.is_unsigned){
-        Expr *shift_count;
-        int power=wide_power_divisor(right,&shift_count);
-        if(power>=0){
-            Expr count={0},sum={0},input={0};
-            count.kind=EX_INT;count.type=type(TY_INT,1);count.value=(unsigned)power;
-            input.kind=EX_CAST;input.type=t;input.left=left;
-            sum.kind=EX_BINARY;sum.op='+';sum.left=shift_count;sum.right=&count;
-            if(shift_count)sum.type=common_type(shift_count->type,count.type);
-            emit_wide_binary(&input,shift_count?(power?&sum:shift_count):&count,TOK_SHR);
-            return;
-        }
-    }
-    if(bytes>=0){
-        emit_wide_as(left,t);emit_wide_word_shift(t,op,(unsigned)bytes,NULL,0);return;
-    }
-    if(shift){
-        emit_wide_as(left,t);emit_wide_shift_count(right,t);emit_wide_operation(t,op);return;
-    }
-    if(!cg.parser->no_strength_reduction&&t.base==TY_LONGLONG&&basic_integer_op(op)){
-        if(op!='-'&&wide_integer_literal(left)){Expr *swap=left;left=right;right=swap;}
-        if(wide_integer_literal(right)){
-            emit_wide_as(left,t);emit_wide_immediate_operation(op,right);return;
-        }
-    }
-    if(t.base==TY_LONGLONG&&value_type(right->type).base==TY_LONGLONG&&basic_integer_op(op)&&
-       (home=wide_fixed_home(right,&offset))!=NULL){
-        Symbol *left_home=NULL;unsigned left_offset=0;
-        if(!cg.parser->no_strength_reduction&&value_type(left->type).base==TY_LONGLONG&&
-           !volatile_expression(left)&&!volatile_expression(right))left_home=wide_fixed_home(left,&left_offset);
-        if(!left_home)emit_wide_as(left,t);
-        emit_wide_word_operation(op,left_home,left_offset,home,offset);return;
-    }
-    emit_wide_pair(left,right,t);emit_wide_operation(t,op);
-}
-/* A/X contain the already-read narrow destination. Compute at the usual
- * wide arithmetic type, then convert the result back to that destination. */
-static void emit_narrow_wide_operation_loaded(Expr *e)
-{
-    Type source=value_type(e->left->type),word=type(TY_LONG,0);
-    Type common=common_type(e->left->type,e->right->type);
-    unsigned i;
-    cg.arithmetic=1;
-    word.is_unsigned=source.is_unsigned;
-    convert_registers(source,word);
-    code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n");
-    if(source.is_unsigned)code("    lda #0\n");
-    else code("    txa\n    cmp #$8000\n    lda #0\n    bcc :+\n    lda #$FFFF\n:\n");
-    for(i=4;i<8;i+=2)code("    sta z:__arith_lhs+%u\n",i);
-    if(common.base==TY_DOUBLE)
-        helper(source.is_unsigned?"__ufloat64_64":"__sfloat64_64");
-    emit_wide_rhs(e->right,common);
-    emit_wide_operation(common,e->op);
-    if(common.base==TY_DOUBLE)
-        helper(e->type.is_unsigned?"__ufix64_32":"__fix64_32");
-    code("    lda z:__arith_lhs\n");
-    if(reg_width(e->type)==4)code("    ldx z:__arith_lhs+2\n");
-    narrow_char(e->type);
-}
-static void emit_narrow_wide_compound(Expr *e)
-{
-    int far=e->left->type.banked;
-    int wram=e->left->kind==EX_DEREF&&strength_wram_pointer(e->left->left);
-    emit_address(e->left);
-    if(far){
-        Type address=far_type(type(TY_CHAR,1));
-        push_value(address);far_load(e->left->type);
-    }else{
-        code("    pha\n    tax\n");
-        load_indirect(e->left->type,wram);
-    }
-    emit_narrow_wide_operation_loaded(e);
-    if(far){far_store(e->type,0);cleanup(4,e->type);}
-    else store_saved_address(e->type,wram,0);
-    divmod_written(e->left);
-}
-/* Address is in A (near) or A/X (far). Transfer four words without
- * borrowing Y across expression evaluation or overlapping the value slot. */
-static void emit_wide_indirect_load(int far)
-{
-    unsigned i;cg.arithmetic=1;
-    if(far){
-        code("    sta z:__arith_lhs+28\n    stx z:__arith_lhs+30\n    phy\n");
-        for(i=0;i<8;i+=2)code("    ldy #$%04X\n    lda [__arith_lhs+28],y\n    sta z:__arith_lhs+%u\n",i,i);
-        code("    ply\n");
-    }else{
-        code("    tax\n");
-        for(i=0;i<8;i+=2)code("    lda a:$%04X,x\n    sta z:__arith_lhs+%u\n",i,i);
-    }
-}
-static void emit_wide_save_address(Expr *e)
-{
-    emit_address(e);
-    if(e->type.banked)code("    phx\n");
-    code("    pha\n");
-}
-static void emit_wide_store_saved(int far)
-{
-    unsigned i;
-    if(far){
-        code("    pla\n    sta z:__arith_lhs+28\n    pla\n    sta z:__arith_lhs+30\n    phy\n");
-        for(i=0;i<8;i+=2)code("    ldy #$%04X\n    lda z:__arith_lhs+%u\n    sta [__arith_lhs+28],y\n",i,i);
-        code("    ply\n");
-    }else{
-        code("    plx\n");
-        for(i=0;i<8;i+=2)code("    lda z:__arith_lhs+%u\n    sta a:$%04X,x\n",i,i);
-    }
-}
-static void emit_wide_value(Expr *e)
-{
-    unsigned i,offset;Symbol *home;
-    if(!wide_scalar(value_type(e->type))){emit_wide_operand(e);return;}
-    cg.arithmetic=1;
-    switch(e->kind){
-    case EX_INT:emit_wide_literal(e,0);return;
-    case EX_OBJECT:case EX_MEMBER:case EX_DEREF:
-        home=wide_fixed_home(e,&offset);
-        if(!home){emit_address(e);emit_wide_indirect_load(e->type.banked);return;}
-        for(i=0;i<8;i+=2){code("    lda ");array_operand(home,offset+i);code("\n    sta z:__arith_lhs+%u\n",i);}return;
-    case EX_CAST:{
-        Type source=value_type(e->left->type);
-        if(e->type.base==TY_LONGLONG&&source.pointers){
-            emit_value(e->left);
-            code("    sta z:__arith_lhs\n");
-            if(far_pointer(source))code("    stx z:__arith_lhs+2\n");
-            else code("    stz z:__arith_lhs+2\n");
-            code("    stz z:__arith_lhs+4\n    stz z:__arith_lhs+6\n");
-            return;
-        }
-        if(e->type.base==TY_LONGLONG&&source.base==TY_FLOAT){
-            emit_value(e->left);code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n");
-            helper("__fext32_64");helper(e->type.is_unsigned?"__ufix64_64":"__fix64_64");return;
-        }
-        if(e->type.base==TY_DOUBLE&&source.base==TY_FLOAT){
-            emit_value(e->left);code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n");
-            helper("__fext32_64");return;
-        }
-        if(e->type.base==TY_DOUBLE&&source.base!=TY_DOUBLE){
-            if(wide_scalar(source)){
-                emit_wide_operand(e->left);helper(source.is_unsigned?"__ufloat64_64":"__sfloat64_64");
-            }else{
-                Type word=type(TY_LONG,0);word.is_unsigned=source.is_unsigned;
-                emit_value(e->left);convert_registers(source,word);
-                code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n");
-                helper(source.is_unsigned?"__ufloat64_32":"__sfloat64_32");
-            }
-            return;
-        }
-        emit_wide_operand(e->left);
-        if(source.base==TY_DOUBLE&&e->type.base==TY_LONGLONG)
-            helper(e->type.is_unsigned?"__ufix64_64":"__fix64_64");
-        return;
-    }
-    case EX_CALL:emit_call(e,1);return;
-    case EX_ASSIGN:emit_wide_assignment(e,0);return;
-    case EX_PRE:case EX_POST:emit_wide_update(e,0);return;
-    case EX_CHOOSE:{
-        Expr *word=wide_word_magnitude_source(e);
-        if(word){
-            emit_word_magnitude(word);
-            code("    sta z:__arith_lhs\n    stz z:__arith_lhs+2\n    stz z:__arith_lhs+4\n    stz z:__arith_lhs+6\n");
-            return;
-        }
-        unsigned yes=++cg.label,no=++cg.label,end=++cg.label;
-        branch(e->left,yes,no,yes);label(yes);emit_wide_operand(e->right);
-        jump(end);label(no);emit_wide_operand(e->third);label(end);return;
-    }
-    case EX_COMMA:emit_discarded(e->left);emit_wide_operand(e->right);return;
-    case EX_UNARY:
-        if(!cg.parser->no_strength_reduction&&e->type.base==TY_LONGLONG&&e->op=='-'){
-            Expr *word=wide_word_source(e->left);
-            if(word){
-                emit_value(word);
-                code("    tax\n    lda #0\n    cpx #1\n    bcc :+\n");
-                if(!word->type.is_unsigned)code("    cpx #$8000\n    bcs :+\n");
-                code("    dec a\n:\n    sta z:__arith_lhs+2\n    sta z:__arith_lhs+4\n"
-                     "    sta z:__arith_lhs+6\n    txa\n    eor #$FFFF\n    inc a\n    sta z:__arith_lhs\n");
-                return;
-            }
-        }
-        if(!cg.parser->no_strength_reduction&&e->type.base==TY_LONGLONG&&e->op!='+'&&
-           !volatile_expression(e->left)&&(home=wide_fixed_home(e->left,&offset))!=NULL){
-            if(e->op=='-')code("    sec\n");
-            for(i=0;i<8;i+=2){
-                code(e->op=='-'?"    lda #0\n    sbc ":"    lda ");
-                array_operand(home,offset+i);code("\n");
-                if(e->op=='~')code("    eor #$FFFF\n");
-                code("    sta z:__arith_lhs+%u\n",i);
-            }
-            return;
-        }
-        emit_wide_operand(e->left);
-        if(e->op=='+')return;
-        if(e->type.base==TY_DOUBLE){code("    lda z:__arith_lhs+6\n    eor #$8000\n    sta z:__arith_lhs+6\n");return;}
-        if(e->op=='-')code("    sec\n");
-        for(i=0;i<8;i+=2){
-            if(e->op=='-')code("    lda #0\n    sbc z:__arith_lhs+%u\n",i);
-            else code("    lda z:__arith_lhs+%u\n    eor #$FFFF\n",i);
-            code("    sta z:__arith_lhs+%u\n",i);
-        }
-        return;
-    case EX_BINARY:emit_wide_binary(e->left,e->right,e->op);return;
-    default:error_at(e->location,"unsupported 64-bit runtime expression");
-    }
-}
-/* The left operand is already in the wide result slot. Compound assignment
- * performs the usual arithmetic conversions before converting back. */
-static void emit_wide_compound_loaded(Expr *e)
-{
-    Type t=(e->op==TOK_SHL||e->op==TOK_SHR)?promoted(e->left->type):common_type(e->left->type,e->right->type);
-    int integer_destination=e->type.base==TY_LONGLONG;
-    int bytes=wide_word_shift_bytes(t,e->op,e->right);
-    if(integer_destination&&t.base==TY_FLOAT){
-        Type single=type(TY_FLOAT,0);
-        helper(e->type.is_unsigned?"__ufloat32_64":"__sfloat32_64");
-        code("    lda z:__arith_lhs\n    ldx z:__arith_lhs+2\n");
-        push_value(single);
-        emit_value(e->right);
-        stage(1,single);pop_value(single);stage(0,single);
-        binary_loaded(e->op,single,0);
-        code("    sta z:__arith_lhs\n    stx z:__arith_lhs+2\n");
-        helper("__fext32_64");
-        helper(e->type.is_unsigned?"__ufix64_64":"__fix64_64");
-        return;
-    }
-    if(integer_destination&&t.base==TY_DOUBLE)
-        helper(e->type.is_unsigned?"__ufloat64_64":"__sfloat64_64");
-    if(bytes>=0){emit_wide_word_shift(t,e->op,(unsigned)bytes,NULL,0);return;}
-    if(!cg.parser->no_strength_reduction&&t.base==TY_LONGLONG&&
-       basic_integer_op(e->op)&&wide_integer_literal(e->right)){
-        emit_wide_immediate_operation(e->op,e->right);return;
-    }
-    if(e->op==TOK_SHL||e->op==TOK_SHR)emit_wide_shift_count(e->right,t);
-    else emit_wide_rhs(e->right,t);
-    emit_wide_operation(t,e->op);
-    if(integer_destination&&t.base==TY_DOUBLE)
-        helper(e->type.is_unsigned?"__ufix64_64":"__fix64_64");
-}
-static Symbol *vr_base(Expr *e);
-static int add_fixed_wide_shift(Expr *e,Symbol *home,unsigned offset)
-{
-    Expr *shift=e->right,*input;
-    Type source;
-    int bytes;
-    if((e->op!='+'&&e->op!='-')||e->type.base!=TY_LONGLONG||volatile_expression(e)||
-       shift->kind!=EX_BINARY||shift->op!=TOK_SHL||
-       (bytes=wide_word_shift_bytes(shift->type,shift->op,shift->right))<=0||
-       body_effect(shift->left))return 0;
-    input=shift->left;
-    while(input->kind==EX_CAST&&input->type.base==TY_LONGLONG&&!input->type.pointers)
-        input=input->left;
-    source=value_type(input->type);
-    if(bytes>=4&&numeric(source)&&source.base!=TY_FLOAT&&!wide_scalar(source)){
-        Type retained=type(bytes==6?TY_INT:TY_LONG,source.is_unsigned);
-        cg.arithmetic=1;
-        emit_value(input);convert_registers(source,retained);
-        code("    sta z:__arith_lhs\n");
-        if(bytes==4)code("    stx z:__arith_lhs+2\n");
-    }else emit_wide_operand(shift->left);
-    code(e->op=='+'?"    clc\n":"    sec\n");
-    for(unsigned i=(unsigned)bytes;i<8;i+=2){
-        code("    lda ");array_operand(home,offset+i);
-        code("\n    %s z:__arith_lhs+%u\n    sta ",wide_word_instruction(e->op),i-(unsigned)bytes);
-        array_operand(home,offset+i);code("\n");
-    }
-    return 1;
-}
-static int update_fixed_wide_mask(Expr *e,Symbol *home,unsigned offset)
-{
-    Expr *literal=e->right;
-    uint64_t bits;
-    unsigned i,source_offset;
-    int op=e->op;
-    if(cg.parser->no_strength_reduction||e->type.base!=TY_LONGLONG||volatile_expression(e))return 0;
-    if(!op&&literal->kind==EX_CAST&&literal->left->type.base==TY_LONGLONG&&
-       wide_scalar(value_type(literal->left->type)))literal=literal->left;
-    if(!op&&literal->kind==EX_BINARY&&wide_fixed_home(literal->left,&source_offset)==home&&source_offset==offset){
-        op=literal->op;literal=literal->right;
-    }
-    if((op!='&'&&op!='|'&&op!='^')||!wide_integer_literal(literal))return 0;
-    bits=initializer_cast64(((uint64_t)literal->value_high<<32)|literal->value,literal->type);
-    for(i=0;i<8;i+=2){
-        unsigned word=(unsigned)(bits>>(8*i))&65535;
-        if(word==(op=='&'?65535u:0u))continue;
-        if(op=='&'&&!word&&!home->owner&&!home->type.banked){
-            code("    stz ");array_operand(home,offset+i);code("\n");continue;
-        }
-        if((op=='&'&&!word)||(op=='|'&&word==65535u))code("    lda #$%04X\n",word);
-        else{
-            code("    lda ");array_operand(home,offset+i);
-            code("\n    %s #$%04X\n",wide_word_instruction(op),word);
-        }
-        code("    sta ");array_operand(home,offset+i);code("\n");
-    }
-    return 1;
-}
-enum { WIDEN_FULL, WIDEN_HIGH, WIDEN_LOW };
-static int store_widened_integer(Expr *e,Symbol *home,unsigned offset,int part)
-{
-    Expr *input=e->right;
-    Type source,word=type(TY_LONG,0);
-    unsigned i,start=part==WIDEN_HIGH?4:0;
-    if(cg.parser->no_strength_reduction||e->op||e->type.base!=TY_LONGLONG||volatile_expression(e))return 0;
-    while(input->kind==EX_CAST&&input->type.base==TY_LONGLONG&&!input->type.pointers)input=input->left;
-    source=value_type(input->type);
-    if(!numeric(source)||source.base==TY_FLOAT||wide_scalar(source))return 0;
-    word.is_unsigned=source.is_unsigned;
-    emit_value(input);convert_registers(source,word);
-    code("    sta ");array_operand(home,offset+start);code("\n    txa\n    sta ");array_operand(home,offset+start+2);code("\n");
-    if(part!=WIDEN_FULL||source.is_unsigned)code("    lda #0\n");
-    else code("    asl a\n    lda #0\n    bcc :+\n    dec a\n:\n");
-    for(i=0;i<4;i+=2){code("    sta ");array_operand(home,offset+4-start+i);code("\n");}
-    return 1;
-}
-static int adjacent_widened_store(Statement *s)
-{
-    Expr *store=s->expression,*update;
-    Symbol *home;
-    unsigned offset;
-    int part;
-    uint64_t value;
-    if(cg.parser->no_strength_reduction||!store||store->kind!=EX_ASSIGN||store->op||
-       store->type.base!=TY_LONGLONG||!store->type.is_unsigned||store->type.pointers||
-       !s->next||s->next->kind!=ST_EXPR||!(update=s->next->expression)||update->kind!=EX_ASSIGN||
-       !wide_integer_literal(update->right)||!body_equal(store->left,update->left)||
-       !(home=wide_fixed_home(store->left,&offset)))return 0;
-    value=initializer_cast64(((uint64_t)update->right->value_high<<32)|update->right->value,update->right->type);
-    if(update->op==TOK_SHL&&value==32)part=WIDEN_HIGH;
-    else if(update->op=='&'&&value==UINT32_MAX)part=WIDEN_LOW;
-    else return 0;
-    if(!store_widened_integer(store,home,offset,part))return 0;
-    divmod_written(store->left);return 1;
-}
-static int copy_disjoint_wide_assignment(Expr *e,Symbol *home,unsigned offset)
-{
-    Expr *input=e->right;
-    unsigned i,source_offset;
-    Symbol *source;
-    if(cg.parser->no_strength_reduction||e->op||input->type.base!=e->type.base||
-       !wide_scalar(value_type(input->type))||volatile_expression(e))return 0;
-    source=wide_fixed_home(input,&source_offset);
-    if(source==home)return 0;
-    if(!source){
-        Symbol *base;
-        if(input->kind!=EX_DEREF||far_pointer(value_type(input->left->type))||
-           !(base=vr_base(input->left))||base==home)return 0;
-        emit_address_x(input);
-    }
-    for(i=0;i<8;i+=2){
-        code("    lda ");
-        if(source)array_operand(source,source_offset+i);else code("a:$%04X,x",i);
-        code("\n    sta ");array_operand(home,offset+i);code("\n");
-    }
-    return 1;
-}
-static int discarded_fixed_wide_assignment(Expr *e,Symbol *home,unsigned offset)
-{
-    Expr *value=e->right,*input=value;
-    Symbol *source,*right=NULL;
-    unsigned i,source_offset,right_offset=0;
-    int base=e->left->type.base,unary=0;
-    if(e->op||home->owner||home->type.banked||value->type.base!=base||!wide_scalar(value_type(value->type)))return 0;
-    if(value->kind==EX_UNARY&&(value->op=='-'||value->op=='~')){
-        unary=value->op;
-        input=value->left;
-    }else if(value->kind==EX_BINARY&&base==TY_LONGLONG&&basic_integer_op(value->op)){
-        if(value->right->type.base!=base||!wide_scalar(value_type(value->right->type))||
-           !(right=wide_fixed_home(value->right,&right_offset)))return 0;
-        input=value->left;
-    }
-    if(!wide_scalar(value_type(input->type))||input->type.base!=base||!(source=wide_fixed_home(input,&source_offset)))return 0;
 
-    /* Keep all reads in operand order before any destination writes.
-     * The last result word stays in A while X stores the first three. */
-    cg.arithmetic=1;
-    if(unary=='-'&&base==TY_LONGLONG)code("    sec\n");
-    for(i=0;i<8;i+=2){
-        if(unary=='-'&&base==TY_LONGLONG)code("    lda #0\n    sbc ");
-        else if(right&&i==6&&!source->owner&&!source->type.banked)code("    ldx ");
-        else code("    lda ");
-        array_operand(source,source_offset+i);code("\n");
-        if(unary=='~')code("    eor #$FFFF\n");
-        if(unary=='-'&&base==TY_DOUBLE&&i==6)code("    eor #$8000\n");
-        if(i<6)code("    sta z:__arith_lhs+%u\n",i);
-        else if(right&&(source->owner||source->type.banked))code("    tax\n");
-    }
-    if(right){
-        if(value->op=='+'||value->op=='-')code(value->op=='+'?"    clc\n":"    sec\n");
-        for(i=0;i<8;i+=2){
-            if(i<6)code("    lda z:__arith_lhs+%u\n",i);
-            else code("    txa\n");
-            code("    %s ",wide_word_instruction(value->op));
-            array_operand(right,right_offset+i);code("\n");
-            if(i<6)code("    sta z:__arith_lhs+%u\n",i);
-        }
-    }
-    for(i=0;i<6;i+=2){
-        code("    ldx z:__arith_lhs+%u\n    stx ",i);array_operand(home,offset+i);code("\n");
-    }
-    code("    sta ");array_operand(home,offset+6);code("\n");
-    return 1;
-}
-static int store_wide_integer_literal(Expr *e,Symbol *home,unsigned offset)
-{
-    Expr *literal=e->right;
-    unsigned loaded=65536;
-    uint64_t bits;
-    if(cg.parser->no_strength_reduction||e->op||e->type.base!=TY_LONGLONG||
-       !wide_integer_literal(literal)||volatile_expression(e))return 0;
-    if(!home){
-        if(e->left->type.banked)return 0;
-        emit_address_x(e->left);
-    }
-    bits=initializer_cast64(((uint64_t)literal->value_high<<32)|literal->value,literal->type);
-    for(unsigned i=0;i<8;i+=2){
-        unsigned word=(unsigned)(bits>>(8*i))&65535;
-        if(!word&&(!home||(!home->owner&&!home->type.banked)))code("    stz ");
-        else{
-            if(word!=loaded){code("    lda #$%04X\n",word);loaded=word;}
-            code("    sta ");
-        }
-        if(home){array_operand(home,offset+i);code("\n");}
-        else code("a:$%04X,x\n",i);
-    }
-    return 1;
-}
-static void emit_wide_assignment(Expr *e,int discarded)
-{
-    unsigned i,offset;
-    Symbol *home=wide_fixed_home(e->left,&offset);
-    if(!home){
-        if(discarded&&store_wide_integer_literal(e,NULL,0))return;
-        if(discarded&&!cg.parser->no_strength_reduction&&!e->op&&
-           e->left->kind==EX_DEREF&&!e->left->type.banked&&
-           e->left->left->kind==EX_OBJECT&&!volatile_expression(e)&&!body_effect(e->right)){
-            emit_wide_as(e->right,e->type);
-            emit_address_x(e->left);
-            for(i=0;i<8;i+=2)code("    lda z:__arith_lhs+%u\n    sta a:$%04X,x\n",i,i);
-            return;
-        }
-        emit_wide_save_address(e->left);
-        if(e->op){
-            emit_wide_indirect_load(e->left->type.banked);emit_wide_compound_loaded(e);
-        }else emit_wide_as(e->right,e->type);
-        emit_wide_store_saved(e->left->type.banked);return;
-    }
-    if(discarded&&!volatile_expression(e)){
-        Type t=promoted(e->type);
-        int bytes=wide_word_shift_bytes(t,e->op,e->right);
-        if(bytes>=0){emit_wide_word_shift(t,e->op,(unsigned)bytes,home,offset);return;}
-    }
-    if(discarded&&(add_fixed_wide_shift(e,home,offset)||update_fixed_wide_mask(e,home,offset)||
-                   store_wide_integer_literal(e,home,offset)||copy_disjoint_wide_assignment(e,home,offset)||
-                   store_widened_integer(e,home,offset,WIDEN_FULL)||discarded_fixed_wide_assignment(e,home,offset)))return;
-    if(e->op){emit_wide_operand(e->left);emit_wide_compound_loaded(e);}
-    else emit_wide_as(e->right,e->type);
-    for(i=0;i<8;i+=2){code("    lda z:__arith_lhs+%u\n    sta ",i);array_operand(home,offset+i);code("\n");}
-}
-static void emit_wide_update(Expr *e,int discarded)
-{
-    unsigned i,offset;Symbol *home=wide_fixed_home(e->left,&offset);
-    if(!cg.parser->no_strength_reduction&&home&&e->type.base==TY_LONGLONG&&!volatile_expression(e->left)){
-        int inc=e->op==TOK_INC,post=e->kind==EX_POST;
-        unsigned done=discarded?++cg.label:0;
-        if(!discarded)cg.arithmetic=1;
-        code(inc?"    clc\n":"    sec\n");
-        for(i=0;i<8;i+=2){
-            code("    lda ");array_operand(home,offset+i);code("\n");
-            if(!discarded&&post)code("    sta z:__arith_lhs+%u\n",i);
-            code("    %s #$%04X\n    sta ",inc?"adc":"sbc",i?0:1);
-            array_operand(home,offset+i);code("\n");
-            if(!discarded&&!post)code("    sta z:__arith_lhs+%u\n",i);
-            if(discarded&&i<6)code("    %s cg_%s_%u\n",inc?"bcc":"bcs",cg.parser->unit,done);
-        }
-        if(discarded)label(done);
-        return;
-    }
-    if(home)emit_wide_operand(e->left);
-    else{emit_wide_save_address(e->left);emit_wide_indirect_load(e->left->type.banked);}
-    if(e->type.base==TY_DOUBLE){
-        int post=e->kind==EX_POST,far=e->left->type.banked;
-        if(post)for(i=8;i;i-=2)code("    lda z:__arith_lhs+%u\n    pha\n",i-2);
-        code("    stz z:__arith_lhs+8\n    stz z:__arith_lhs+10\n"
-             "    stz z:__arith_lhs+12\n    lda #$3FF0\n    sta z:__arith_lhs+14\n");
-        helper(e->op==TOK_INC?"__dadd":"__dsub");
-        if(home){
-            for(i=0;i<8;i+=2){code("    lda z:__arith_lhs+%u\n    sta ",i);array_operand(home,offset+i);code("\n");}
-        }else if(!post)emit_wide_store_saved(far);
-        else if(far){
-            code("    lda 9,s\n    sta z:__arith_lhs+28\n    lda 11,s\n    sta z:__arith_lhs+30\n    phy\n");
-            for(i=0;i<8;i+=2)code("    ldy #$%04X\n    lda z:__arith_lhs+%u\n    sta [__arith_lhs+28],y\n",i,i);
-            code("    ply\n");
-        }else{
-            code("    lda 9,s\n    tax\n");
-            for(i=0;i<8;i+=2)code("    lda z:__arith_lhs+%u\n    sta a:$%04X,x\n",i,i);
-        }
-        if(post){
-            for(i=0;i<8;i+=2)code("    pla\n    sta z:__arith_lhs+%u\n",i);
-            if(!home){code("    plx\n");if(far)code("    plx\n");}
-        }
-        return;
-    }
-    if(e->kind==EX_POST)
-        for(i=0;i<8;i+=2)code("    lda z:__arith_lhs+%u\n    sta z:__arith_lhs+%u\n",i,i+8);
-    code(e->op==TOK_INC?"    clc\n":"    sec\n");
-    for(i=0;i<8;i+=2)code("    lda z:__arith_lhs+%u\n    %s #$%04X\n    sta z:__arith_lhs+%u\n",
-        i,e->op==TOK_INC?"adc":"sbc",i?0:1,i);
-    if(!home)emit_wide_store_saved(e->left->type.banked);
-    else for(i=0;i<8;i+=2){code("    lda z:__arith_lhs+%u\n    sta ",i);array_operand(home,offset+i);code("\n");}
-    if(e->kind==EX_POST)
-        for(i=0;i<8;i+=2)code("    lda z:__arith_lhs+%u\n    sta z:__arith_lhs+%u\n",i+8,i);
-}
-static void emit_wide_narrow(Expr *e)
-{
-    Expr *source=e->left;
-    unsigned offset=0;
-    int bytes=-1,byte_result=!e->type.pointers&&e->type.base==TY_CHAR;
-    unsigned result_bytes=byte_result?1:reg_width(e->type);
-    uint32_t mask,needed=result_bytes==4?UINT32_MAX:(1u<<(8*result_bytes))-1u;
-    if(e->type.is_bool&&!e->type.pointers){
-        unsigned yes=++cg.label,no=++cg.label,end=++cg.label;
-        branch(e->left,yes,no,yes);label(yes);code("    lda #1\n");jump(end);
-        label(no);code("    lda #0\n");label(end);return;
-    }
-    if(!cg.parser->no_strength_reduction&&!e->type.pointers&&e->type.base!=TY_FLOAT&&
-       source->kind==EX_BINARY&&source->op=='&'&&
-       integer_constant(source->right,&mask)&&(mask&needed)==needed)source=source->left;
-    if(source->kind==EX_BINARY&&source->op==TOK_SHR&&e->type.base!=TY_FLOAT){
-        Type t=promoted(source->left->type);
-        bytes=wide_word_shift_bytes(t,TOK_SHR,source->right);
-        if(bytes<0&&!cg.parser->no_strength_reduction&&!cg.parser->no_byte_shuffles&&
-           t.base==TY_LONGLONG&&integer_constant(source->right,&mask)&&!(mask&7))
-            bytes=(int)((mask&63)/8);
-    }
-    if(bytes>=0&&bytes+(int)result_bytes<=8){
-        Expr *input=source->left;
-        Symbol *home=volatile_expression(input)?NULL:wide_fixed_home(input,&offset);
-        int last_byte=byte_result&&bytes==7;
-        offset+=(unsigned)bytes;
-        if(home){
-            if(reg_width(e->type)==4){
-                code("    lda ");array_operand(home,offset+2);code("\n    tax\n");
-            }
-            if(last_byte)code("    sep #$20\n.a8\n");
-            code("    lda ");array_operand(home,offset);code("\n");
-        }else{
-            emit_wide_operand(input);
-            if(last_byte)code("    sep #$20\n.a8\n");
-            code("    lda z:__arith_lhs+%u\n",offset);
-            if(reg_width(e->type)==4)code("    ldx z:__arith_lhs+%u\n",offset+2);
-        }
-        if(last_byte)code("    rep #$20\n.a16\n");
-    }else{
-        emit_wide_operand(source);
-        if(source->type.base==TY_DOUBLE)
-            helper(e->type.base==TY_FLOAT?"__ftrunc64_32":e->type.is_unsigned?"__ufix64_32":"__fix64_32");
-        else if(!e->type.pointers&&e->type.base==TY_FLOAT)
-            helper(source->type.is_unsigned?"__ufloat32_64":"__sfloat32_64");
-        code("    lda z:__arith_lhs\n");
-        if(reg_width(e->type)==4)code("    ldx z:__arith_lhs+2\n");
-    }
-    if(e->type.pointers&&far_pointer(e->type))
-        code("    pha\n    txa\n    and #$00FF\n    tax\n    pla\n");
-    narrow_char(e->type);
-}
-static int narrow_statements(Statement *s,int allow_return)
-{
-    for(;s;s=s->next){
-        if((s->kind==ST_RETURN&&!allow_return)||!wide_address_safe(s->expression)||!wide_address_safe(s->step)||
-           !narrow_statements(s->initial,allow_return)||!narrow_statements(s->body,allow_return)||
-           !narrow_statements(s->alternate,allow_return))return 0;
-    }
-    return 1;
-}
-static int body_step_direction(Expr *e,Symbol *v);
-static int body_asm_statements(Statement *s);
-static int body_direct_integer_stores(Statement *s,Symbol *index,int literals);
-static Symbol *bounded_wide_induction(Statement *s,uint32_t *begin,uint32_t *end)
-{
-    Statement *initial=body_single(s->initial);
-    Expr *test=s->expression,*init;
-    Symbol *index;
-    if(cg.parser->no_strength_reduction||cg.function->jump_label_count||cg.switch_depth||
-       s->kind!=ST_FOR||!test||test->kind!=EX_BINARY||(test->op!='<'&&test->op!=TOK_LE)||
-       test->left->kind!=EX_OBJECT||test->left->type.pointers||test->left->type.base!=TY_LONGLONG||
-       !initial||initial->next||initial->kind!=ST_EXPR||!(init=initial->expression)||
-       init->kind!=EX_ASSIGN||init->op||!body_equal(init->left,test->left))return NULL;
-    index=test->left->symbol;
-    if(object_volatile(index->type)||(!loop_private(index)&&
-       (index->owner||!body_direct_integer_stores(s->body,index,0)))||
-       body_step_direction(s->step,index)!=1||
-       dp_counter_modified(s->body,index)||body_asm_statements(s->body)||
-       wide_unsigned_size(init->right)!=2||!integer_constant(init->right,begin)||*begin>65535||
-       wide_unsigned_size(test->right)!=2||!integer_constant(test->right,end)||*end>65535)return NULL;
-    *end+=test->op==TOK_LE;
-    return *end<=65535?index:NULL;
-}
-static Expr *wide_loop_signed_count_bound(Statement *s)
-{
-    Statement *initial=body_single(s->initial);
-    Expr *test=s->expression,*init;
-    Symbol *index,*bound;
-    uint32_t zero;
-    if(cg.parser->no_strength_reduction||cg.parser->no_register_loops||cg.function->jump_label_count||
-       cg.switch_depth||cg.function->symbol->interrupt||s->kind!=ST_FOR||!test||
-       test->kind!=EX_BINARY||test->op!='<'||test->left->kind!=EX_OBJECT||
-       test->right->kind!=EX_OBJECT||!initial||initial->next||initial->kind!=ST_EXPR||
-       !(init=initial->expression)||init->kind!=EX_ASSIGN||init->op||
-       !body_equal(init->left,test->left)||!integer_constant(init->right,&zero)||zero)return NULL;
-    index=test->left->symbol;bound=test->right->symbol;
-    if(index==bound||!word_integer(index->type)||!word_integer(bound->type)||
-       width(index->type)!=2||width(bound->type)!=2||
-       index->type.is_unsigned||bound->type.is_unsigned||object_volatile(index->type)||
-       object_volatile(bound->type)||!loop_private(index)||!loop_private(bound)||
-       body_step_direction(s->step,index)!=1||dp_counter_modified(s->body,index)||
-       dp_counter_modified(s->body,bound)||body_asm_statements(s->body)||
-       !compare_memory_operand(test->right,0))return NULL;
-    return test->right;
-}
-static int emit_wide_loop(Statement *s)
-{
-    /* Complete narrow loops have no live wide temporary at either boundary */
-    if(!cg.function->jump_label_count&&wide_address_safe(s->expression)&&wide_address_safe(s->step)&&
-       narrow_statements(s->initial,0)&&narrow_statements(s->body,0))return emit_loop_statement(s);
-    unsigned start=++cg.label,body=++cg.label,end=++cg.label,step;int falls;
-    uint32_t begin,bound=0;
-    Symbol *index=bounded_wide_induction(s,&begin,&bound);
-    Expr *signed_bound=wide_loop_signed_count_bound(s);
-    if(s->initial)emit_statements(s->initial);
-    step=s->kind==ST_WHILE?start:++cg.label;
-    if(cg.loop_count==64)error_at(s->location,"too many nested loops");
-    cg.loop_start[cg.loop_count]=step;cg.loop_end[cg.loop_count++]=end;
-    label(start);
-    if(index){
-        code("; bounded wide induction: low word only\n    lda ");
-        array_operand(index,0);code("\n    cmp #$%04X\n",bound);
-        flag_branch("bcc","bcs",body,end,body);
-    }else if(signed_bound){
-        unsigned nonzero=++cg.label;
-        code("; signed count with unsigned back edge\n");
-        emit_value(signed_bound);
-        if(!accumulator_zero_flags())code("    cmp #0\n");
-        flag_branch("beq","bne",end,nonzero,nonzero);label(nonzero);
-        flag_branch("bmi","bpl",end,body,body);
-    }else if(s->kind!=ST_DO&&s->expression)branch(s->expression,body,end,body);
-    label(body);falls=emit_statements(s->body);
-    if(s->kind!=ST_WHILE)label(step);
-    if(index){
-        code("    lda ");array_operand(index,0);
-        code("\n    inc a\n    sta ");array_operand(index,0);code("\n");
-    }else if(signed_bound){
-        Symbol *counter=s->expression->left->symbol;
-        load_symbol(counter);code("    inc a\n");store_symbol(counter);
-        code("    cmp ");compare_memory_operand(signed_bound,1);code("\n");
-        flag_branch("bcc","bcs",body,end,end);
-    }else if(s->step){
-        if(wide_assignment_supported(s->step))emit_wide_assignment(s->step,1);
-        else if(wide_update_supported(s->step))emit_wide_update(s->step,1);
-        else if(wide_narrow_assignment(s->step)){emit_wide_narrow(s->step->right);store_symbol(s->step->left->symbol);}
-        else if(!volatile_expression(s->step)&&strength_update(s->step,0)){}
-        else emit_discarded(s->step);
-    }
-    if(s->kind==ST_DO)branch(s->expression,start,end,end);
-    else if(!signed_bound&&(falls||s->kind==ST_FOR))jump(start);
-    --cg.loop_count;cg.divmod_available=0;label(end);
-    if(s->kind!=ST_DO&&!s->expression&&!contains_break(s->body)&&!cg.switch_depth)return 0;
-    return 1;
-}
-static int shifted_bit_update(Statement *s)
-{
-    Statement *a=body_single(s->body),*b=body_single(s->alternate);
-    Expr *test=s->expression,*yes,*no,*value,*bits,*shift;
-    uint32_t mask,count;
-    int invert=0;
-    Type t;
-    if(cg.parser->no_strength_reduction||cg.function->jump_label_count||
-       !a||!b||a->next||b->next||a->kind!=ST_EXPR||b->kind!=ST_EXPR||
-       !(yes=a->expression)||!(no=b->expression)||yes->kind!=EX_ASSIGN||no->kind!=EX_ASSIGN)
-        return 0;
-    if(test->kind==EX_BINARY&&(test->op==TOK_EQ||test->op==TOK_NE)&&
-       integer_constant(test->right,&mask)&&!mask){
-        invert=test->op==TOK_EQ;test=test->left;
-    }
-    if(invert){Expr *swap=yes;yes=no;no=swap;}
-    value=yes->left;t=value_type(value->type);
-    if(value->kind!=EX_OBJECT||t.pointers||t.base!=TY_LONG||!t.is_unsigned||
-       volatile_expression(value)||!body_equal(value,no->left)||
-       test->kind!=EX_BINARY||test->op!='&'||!body_equal(test->left,value)||
-       !integer_constant(test->right,&mask)||mask!=1)return 0;
-    bits=yes->right;
-    if(yes->op||bits->kind!=EX_BINARY||bits->op!='^'||!integer_constant(bits->right,&mask))return 0;
-    shift=bits->left;
-    if(shift->kind!=EX_BINARY||shift->op!=TOK_SHR||!body_equal(shift->left,value)||
-       !integer_constant(shift->right,&count)||count!=1)return 0;
-    if(no->op==TOK_SHR){
-        if(!integer_constant(no->right,&count)||count!=1)return 0;
-    }else if(no->op||!body_equal(no->right,shift))return 0;
-    code("; shift carry selects the XOR mask\n");
-    if(direct_operand(value,t,0,0)&&direct_operand(value,t,1,0)){
-        code("    lda ");direct_operand(value,t,1,1);
-        code("\n    lsr a\n    tax\n    lda ");direct_operand(value,t,0,1);
-        code("\n    ror a\n");
-        if(mask>>16){
-            if(mask&65535u)code("    bcc :+\n    eor #$%04X\n:\n",mask&65535u);
-            code("    sta ");array_operand(value->symbol,0);
-            code("\n    txa\n    bcc :+\n    eor #$%04X\n:\n    sta ",mask>>16);
-            array_operand(value->symbol,2);code("\n");
-            cg.divmod_available=0;
-            return 1;
-        }
-    }else{
-        load_symbol(value->symbol);constant_shift32(TOK_SHR,t,1);
-    }
-    if(mask){
-        code("    bcc :+\n");
-        if(mask&65535u)code("    eor #$%04X\n",mask&65535u);
-        if(mask>>16)code("    pha\n    txa\n    eor #$%04X\n    tax\n    pla\n",mask>>16);
-        code(":\n");
-    }
-    store_symbol(value->symbol);cg.divmod_available=0;
-    return 1;
-}
+#include "wide_emit.inc"
+
 static int discarded_near_double(Expr *e)
 {
     Expr *target=e->left;
@@ -8889,9 +7204,9 @@ static int emit_statements(Statement *s)
         }
         switch(s->kind){
         case ST_EMPTY:break;
-        case ST_GOTO:jump(cg.jump_base+s->jump_label);cg.divmod_available=0;break;
+        case ST_GOTO:jump(cg.jump_base+s->jump_label);divmod_state.available=0;break;
         case ST_LABEL:
-            cg.divmod_available=0;label(cg.jump_base+s->jump_label);
+            divmod_state.available=0;label(cg.jump_base+s->jump_label);
             if(!far_sentinel_doubling_loop(s))emit_statements(s->body);
             break;
         case ST_BLOCK:
@@ -8938,7 +7253,7 @@ static int emit_statements(Statement *s)
             break;
         case ST_SWITCH:emit_switch(s);break;
         case ST_CASE:
-            cg.divmod_available=0;label(s->case_label);emit_statements(s->body);break;
+            divmod_state.available=0;label(s->case_label);emit_statements(s->body);break;
         case ST_RETURN:
             if(s->expression){
                 if(wide_scalar(value_type(cg.function->symbol->type)))emit_wide_operand(s->expression);
@@ -8949,7 +7264,7 @@ static int emit_statements(Statement *s)
             if (!cg.switch_depth) {
                 return 0;
             }
-            cg.divmod_available = 0;
+            divmod_state.available = 0;
             break;
         case ST_IF:
             if(shifted_bit_update(s))break;
@@ -8967,12 +7282,12 @@ static int emit_statements(Statement *s)
             }
             {unsigned available,body_available;
                 body=++cg.label;end=++cg.label;step=++cg.label;branch(s->expression,body,step,body);
-                available=cg.divmod_available;label(body);a=emit_statements(s->body);
-                body_available=cg.divmod_available;if(a)jump(end);
-                cg.divmod_available=available;label(step);b=s->alternate?emit_statements(s->alternate):1;label(end);
+                available=divmod_state.available;label(body);a=emit_statements(s->body);
+                body_available=divmod_state.available;if(a)jump(end);
+                divmod_state.available=available;label(step);b=s->alternate?emit_statements(s->alternate):1;label(end);
                 if(!a&&!b)return 0;
-                if(a&&b)cg.divmod_available&=body_available;
-                else if(a)cg.divmod_available=body_available;
+                if(a&&b)divmod_state.available&=body_available;
+                else if(a)divmod_state.available=body_available;
             }break;
         case ST_WHILE:case ST_FOR:case ST_DO:
             if(!cg.function->uses_wide)dot_emit_loop_setup(s);
@@ -8990,2474 +7305,14 @@ static int emit_statements(Statement *s)
             if (!cg.switch_depth) {
                 return 0;
             }
-            cg.divmod_available = 0;
+            divmod_state.available = 0;
             break;
         }
     }
     return 1;
 }
-/* Emit one loop statement. Returns 0 when control cannot fall through */
-/* A promoted region spans everything the loop statement emits: its
- * initializers and entry test as well, so every path to the end label,
- * including a zero-trip entry test, has copied the homes in. */
-static int emit_loop_body(Statement *s,int select_copy);
-static int bound_scan(void);
-static int body_private(Symbol *v);
-static int body_address_pure(Expr *e);
-static int body_has_deref(Expr *e);
-static Expr *guard_mismatch_call(Statement *body,Expr **comparison)
-{
-    Statement *guard=body_single(body),*failure;
-    Expr *call;
-    if(!guard||guard->next||guard->kind!=ST_IF||guard->alternate||
-       !(*comparison=guard->expression)||(*comparison)->kind!=EX_BINARY||(*comparison)->op!=TOK_NE||
-       !word_integer(common_type((*comparison)->left->type,(*comparison)->right->type)))return NULL;
-    failure=body_single(guard->body);
-    if(!failure||failure->next||failure->kind!=ST_EXPR||!(call=failure->expression)||
-       call->kind!=EX_CALL||!call->symbol||call->arg_count)return NULL;
-    return call;
-}
 
-/* Keep the counter and byte width across matching elements. Only the
- * mismatch edge crosses the calling convention and needs to save X. */
-static int counted_indexed_guard_loop(Statement *s)
-{
-    DpCounter counter;
-    IndexedOperand operand;
-    Statement *init;
-    Expr *assignment,*comparison,*load,*expected,*call;
-    uint32_t first,end,value;
-    unsigned scale,offset,loop,next,mismatch,done;
-    int in,out;
-    if(cg.parser->no_register_loops||cg.parser->no_register_cursors||cg.parser->no_loop_index_retention||
-       cg.switch_depth||cg.bound||cg.bound_pending||cg.stack_leaf||cg.scalar_leaf||
-       cg.retained_index||cg.retained_second||cg.scan_cursor||cg.affine_active||cg.lftr_active||
-       cg.loop_y_borrowed||cg.function->symbol->interrupt||
-       !dp_counter_ascending(s,NULL,&counter,s->expression&&s->expression->op==TOK_LE)||
-       counter.wide||!integer_constant(counter.bound,&end))return 0;
-    end+=counter.inclusive;
-    init=body_single(s->initial);
-    if(!init||init->next||init->kind!=ST_EXPR||!(assignment=init->expression)||
-       assignment->kind!=EX_ASSIGN||assignment->op||assignment->left->kind!=EX_OBJECT||
-       assignment->left->symbol!=counter.index||!integer_constant(assignment->right,&first)||
-       first>=end||end>(counter.index->type.is_unsigned?65535u:32767u))return 0;
-    if(!(call=guard_mismatch_call(s->body,&comparison)))return 0;
-    load=comparison->left;expected=comparison->right;
-    if(!integer_constant(expected,&value)){load=comparison->right;expected=comparison->left;}
-    if(load->kind==EX_CAST&&word_integer(load->type)&&!load->type.is_unsigned&&
-       !load->left->type.pointers&&load->left->type.base==TY_CHAR)load=load->left;
-    if(load->type.pointers||load->type.base!=TY_CHAR||load->type.is_bool||
-       !integer_constant(expected,&value)||value!=initializer_cast(value,load->type)||
-       !indexed_operand(load,&operand)||operand.scale!=1||
-       !retained_affine_for(operand.index,counter.index,&scale,&offset)||scale!=1||
-       operand.offset+offset+end>width(operand.base->type))return 0;
-    operand.offset+=offset;operand.reg='x';
-    loop=++cg.label;next=++cg.label;mismatch=++cg.label;done=++cg.label;
-    code("    ldx #$%04X\n    sep #$20\n.a8\n",(unsigned)first);
-    label(loop);code("    lda ");indexed_text(&operand);code("\n");
-    if(value)code("    cmp #$%02X\n",(unsigned)value&255);
-    flag_branch("bne","beq",mismatch,0,0);
-    label(next);code("    inx\n    cpx #$%04X\n",(unsigned)end);
-    flag_branch("bne","beq",loop,0,0);code("    rep #$20\n.a16\n");
-    region_home_liveness(cg.function,s,counter.index->offset,&in,&out);
-    if(out){code("    txa\n");store_symbol(counter.index);strength_sync(counter.index,NULL);}
-    jump(done);
-    label(mismatch);code("    rep #$20\n.a16\n    phx\n");
-    emit_discarded(call);code("    plx\n    sep #$20\n.a8\n");jump(next);
-    code(".a16\n");label(done);cg.divmod_available=0;
-    return 1;
-}
-/* The mismatch call is the only edge that can clobber the cursor registers.
- * Keep the full promoted comparison unless its constant fits in a byte. */
-static int counted_pointer_guard_loop(Statement *s)
-{
-    Statement *init;
-    Statement shape=*s;
-    Expr *step=s->step,*test=s->expression,*comparison,*load,*expected,*call,*zero;
-    Symbol *cursor;
-    DpCounter counter;
-    Type count_type;
-    unsigned loop,match,done;
-    uint32_t value;
-    int literal,byte,in,out;
-    if(cg.parser->no_register_loops||cg.parser->no_register_cursors||
-       cg.switch_depth||cg.bound||cg.bound_pending||cg.stack_leaf||cg.scalar_leaf||
-       cg.retained_index||cg.scan_cursor||cg.affine_active||cg.loop_y_borrowed||
-       cg.function->symbol->interrupt||s->kind!=ST_FOR||!step||step->kind!=EX_COMMA||
-       !test||volatile_statement(s))return 0;
-    shape.step=step->left;
-    if(!dp_counter_shape(&shape,NULL,&counter)){
-        shape.step=step->right;
-        if(!dp_counter_shape(&shape,NULL,&counter))return 0;
-    }
-    init=body_single(s->initial);
-    if(!init||init->next||init->kind!=ST_EXPR||!(zero=init->expression)||
-       zero->kind!=EX_ASSIGN||zero->op||zero->left->kind!=EX_OBJECT||
-       zero->left->symbol!=counter.index||!integer_constant(zero->right,&value)||value)return 0;
-    count_type=common_type(test->left->type,counter.bound->type);
-    if(counter.wide||counter.index->type.is_bool||(!counter.index->type.is_unsigned&&count_type.is_unsigned&&
-       (!integer_constant(counter.bound,&value)||value>32767)))return 0;
-    if(!(call=guard_mismatch_call(s->body,&comparison)))return 0;
-    load=comparison->left;expected=comparison->right;
-    if(load->kind==EX_CAST&&load->type.base==TY_INT&&!load->type.is_unsigned)load=load->left;
-    if(load->kind!=EX_DEREF){
-        load=comparison->right;expected=comparison->left;
-        if(load->kind==EX_CAST&&load->type.base==TY_INT&&!load->type.is_unsigned)load=load->left;
-    }
-    if(load->kind!=EX_DEREF||load->type.pointers||load->type.base!=TY_CHAR||load->type.is_bool||
-       load->left->kind!=EX_OBJECT||far_pointer(load->left->type))return 0;
-    cursor=load->left->symbol;
-    if(!body_private(cursor)||body_step_direction(shape.step==step->left?step->right:step->left,cursor)!=1||
-       increment_step(cursor->type)!=1)return 0;
-    literal=integer_constant(expected,&value);
-    if(!literal&&(expected->kind!=EX_OBJECT||!known_integer(expected->type)||
-       !body_private(expected->symbol)||expected->symbol==counter.index))return 0;
-    byte=literal&&(load->type.is_unsigned?value<=255:(int32_t)value>=-128&&(int32_t)value<=127);
-    loop=++cg.label;match=++cg.label;done=++cg.label;
-    emit_value(counter.bound);
-    flag_branch("beq","bne",done,0,0);
-    if(!count_type.is_unsigned)flag_branch("bmi","bpl",done,0,0);
-    code("    phy\n    pha\n");
-    if(!literal){emit_value(expected);code("    pha\n");}
-    emit_value_x(load->left);
-    code("    lda %u,s\n    tay\n",literal?1u:3u);
-    if(byte)code("    sep #$20\n.a8\n");
-    label(loop);
-    code("    lda a:$0000,x\n");
-    if(!byte)narrow_char(load->type);
-    if(literal)code("    cmp #$%0*X\n",byte?2:4,value&(byte?255u:65535u));
-    else code("    cmp 1,s\n");
-    flag_branch("beq","bne",match,0,0);
-    if(byte)code("    rep #$20\n.a16\n");
-    code("    phx\n    phy\n");
-    emit_discarded(call);
-    code("    ply\n    plx\n");
-    if(byte)code("    sep #$20\n.a8\n");
-    label(match);
-    code("    inx\n    dey\n");
-    flag_branch("bne","beq",loop,0,0);
-    if(byte)code("    rep #$20\n.a16\n");
-    if(!literal)code("    pla\n");
-    code("    pla\n    ply\n");
-    region_home_liveness(cg.function,s,counter.index->offset,&in,&out);
-    if(out)store_symbol(counter.index);
-    region_home_liveness(cg.function,s,cursor->offset,&in,&out);
-    if(out){code("    txa\n");store_symbol(cursor);}
-    label(done);cg.divmod_available=0;
-    return 1;
-}
-/* A private near cursor can stay in X while testing each element. A returning
- * call on a hit saves X; a return from the function uses the normal home.
- * Trial emission rejects predicates that need X for any other purpose. */
-static int pointer_scan_loop(Statement *s)
-{
-    Expr *test=s->expression,*end,*advance;
-    Statement *guard,*hit;
-    Symbol *cursor;
-    Codegen *saved;
-    unsigned start,done,match,next,stride,in_range=0;
-    int call_hit;
-    if(cg.parser->no_register_loops||cg.parser->no_register_cursors||cg.switch_depth||
-       cg.bound_pending||cg.bound||cg.scan_cursor||cg.scalar_leaf||
-       (s->kind!=ST_WHILE&&s->kind!=ST_FOR)||!test||test->kind!=EX_BINARY||
-       (test->op!=TOK_NE&&test->op!='<'&&test->op!=TOK_LE)||test->left->kind!=EX_OBJECT)return 0;
-    cursor=test->left->symbol;end=test->right;
-    if(!cursor->type.pointers||far_pointer(cursor->type)||!body_private(cursor)||
-       end->kind!=EX_OBJECT||end->symbol==cursor||end->type.array||
-       !end->type.pointers||far_pointer(end->type)||object_volatile(end->type)||
-       (end->symbol->owner&&!compare_memory_operand(end,0)))return 0;
-    guard=body_single(s->body);
-    if(!guard||guard->kind!=ST_IF||guard->alternate||body_effect(guard->expression))return 0;
-    if(s->kind==ST_FOR){if(guard->next)return 0;advance=s->step;}
-    else{
-        Statement *step=guard->next;
-        if(!step||step->next||step->kind!=ST_EXPR)return 0;
-        advance=step->expression;
-    }
-    if(!advance||body_step_direction(advance,cursor)!=1)return 0;
-    hit=body_single(guard->body);
-    call_hit=hit&&hit->kind==ST_EXPR&&!hit->next&&hit->expression&&hit->expression->kind==EX_CALL&&
-        hit->expression->symbol&&!statement_references(guard->body,cursor);
-    if(!call_hit){
-        for(;hit&&hit->kind==ST_EXPR;hit=hit->next){}
-        if(!hit||hit->kind!=ST_RETURN||hit->next)return 0;
-    }
-    stride=increment_step(cursor->type);
-    if(!stride||stride>65535)return 0;
-
-    saved=allocate(sizeof *saved);*saved=cg;
-    start=++cg.label;done=++cg.label;match=++cg.label;next=++cg.label;
-    if(test->op==TOK_LE)in_range=++cg.label;
-    code("; register pointer scan\n");
-    emit_value_x(test->left);label(start);
-    if(end->symbol->owner||end->symbol->type.banked)code("    txa\n    cmp ");
-    else code("    cpx ");
-    array_operand(end->symbol,0);code("\n");
-    if(in_range)code("    beq cg_%s_%u\n",cg.parser->unit,in_range);
-    if(test->op==TOK_NE)flag_branch("beq","bne",done,0,0);
-    else flag_branch("bcs","bcc",done,0,0);
-    if(in_range)label(in_range);
-    cg.divmod_available=0;
-    cg.scan_cursor=cursor;cg.scan_failed=0;
-    cg.bound_start=cg.length;cg.bound_mark_count=0;
-    branch(guard->expression,match,next,next);
-    cg.bound_end=cg.length;
-    if(cg.scan_failed||!bound_scan()){
-        char *assembly=cg.assembly;size_t capacity=cg.capacity;
-        cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.assembly[cg.length]=0;
-        free(saved);return 0;
-    }
-    cg.scan_cursor=NULL;
-    cg.bound_start=saved->bound_start;cg.bound_end=saved->bound_end;
-    cg.bound_mark_count=saved->bound_mark_count;
-    free(saved);
-    label(next);
-    if(stride<=3){unsigned i;for(i=0;i<stride;++i)code("    inx\n");}
-    else code("    txa\n    clc\n    adc #$%04X\n    tax\n",stride);
-    jump(start);
-    label(match);cg.divmod_available=0;
-    if(call_hit){
-        code("    phx\n");if(cg.stack_leaf)cg.stack_bias+=2;
-        emit_discarded(hit->expression);
-        if(cg.stack_leaf)cg.stack_bias-=2;
-        code("    plx\n");jump(next);
-    }else{
-        code("    txa\n");store_symbol(cursor);emit_statements(guard->body);
-    }
-    label(done);cg.divmod_available=0;code("    txa\n");store_symbol(cursor);
-    return 1;
-}
-#include "index_retention.inc"
-typedef struct {
-    Symbol *index,*array;
-    unsigned mask,updates,accesses;
-} ScaledRing;
-typedef struct {
-    ScaledRing rings[4];
-    unsigned count,edits,casts;
-    Expr cast[16];
-    struct { Expr *node,original,replacement; } edit[48];
-} RingLoop;
-
-static Expr *ring_step(Expr *e,Symbol **index,unsigned *mask)
-{
-    Expr *rhs,*step;
-    uint32_t bits,one;
-    if(!e||e->kind!=EX_ASSIGN||e->op||e->left->kind!=EX_OBJECT||
-       e->left->type.base!=TY_INT||e->left->type.pointers||!e->left->type.is_unsigned||
-       !body_private(e->left->symbol))return NULL;
-    rhs=word_bits(e->right);
-    if(rhs->kind!=EX_BINARY||rhs->op!='&'||!integer_constant(rhs->right,&bits)||
-       !bits||bits>=0x8000||((bits+1)&bits))return NULL;
-    step=word_bits(rhs->left);
-    if(step->kind!=EX_BINARY||step->op!='+'||
-       !lftr_object(word_bits(step->left),e->left->symbol)||
-       !integer_constant(step->right,&one)||one!=1)return NULL;
-    *index=e->left->symbol;*mask=(unsigned)bits;
-    return rhs;
-}
-
-static ScaledRing *ring_find(RingLoop *p,Symbol *index)
-{
-    unsigned i;
-    for(i=0;i<p->count;++i)if(p->rings[i].index==index)return &p->rings[i];
-    return NULL;
-}
-
-static int ring_collect(RingLoop *p,Statement *s)
-{
-    for(;s;s=s->next){
-        Symbol *index;unsigned mask;
-        if(s->kind!=ST_BLOCK&&s->kind!=ST_EXPR&&s->kind!=ST_IF&&
-           s->kind!=ST_EMPTY&&s->kind!=ST_BREAK&&s->kind!=ST_CONTINUE&&s->kind!=ST_RETURN)return 0;
-        if(s->kind==ST_EXPR&&ring_step(s->expression,&index,&mask)){
-            ScaledRing *r=ring_find(p,index);
-            if(!r){
-                if(p->count==sizeof p->rings/sizeof *p->rings)return 0;
-                r=&p->rings[p->count++];r->index=index;r->mask=mask;
-            }else if(r->mask!=mask)return 0;
-        }
-        if(!ring_collect(p,s->body)||!ring_collect(p,s->alternate))return 0;
-    }
-    return 1;
-}
-
-static int ring_edit(RingLoop *p,Expr *node,Expr replacement)
-{
-    unsigned i;
-    for(i=0;i<p->edits;++i)if(p->edit[i].node==node)return 0;
-    if(p->edits==sizeof p->edit/sizeof *p->edit)return 0;
-    p->edit[i].node=node;p->edit[i].original=*node;p->edit[i].replacement=replacement;
-    ++p->edits;
-    return 1;
-}
-
-/* Only recurrence updates, equality between encoded indices, and indexed
- * accesses to fixed two-byte arrays observe the representation. A valid
- * subscript in those arrays has bit 15 clear. Rotating the word on entry
- * retains that bit for an equality check or an exit without an access. */
-static int ring_uses(RingLoop *p,Expr *e,int discarded)
-{
-    ScaledRing *r;Symbol *index;unsigned mask,i;
-    Expr *rhs,*a,*b;
-    if(!e)return 1;
-    if(discarded&&(rhs=ring_step(e,&index,&mask))!=NULL&&(r=ring_find(p,index))!=NULL){
-        Expr *step=word_bits(rhs->left);
-        Expr two=*step->right,scaled_mask=*rhs->right;
-        if(two.kind!=EX_INT||scaled_mask.kind!=EX_INT)return 0;
-        two.value=2;scaled_mask.value=mask*2;
-        ++r->updates;
-        return ring_edit(p,step->right,two)&&ring_edit(p,rhs->right,scaled_mask);
-    }
-    if(e->kind==EX_BINARY&&(e->op==TOK_EQ||e->op==TOK_NE)){
-        a=word_bits(e->left);b=word_bits(e->right);
-        if(a->kind==EX_OBJECT&&b->kind==EX_OBJECT&&ring_find(p,a->symbol)&&ring_find(p,b->symbol))return 1;
-    }
-    if(e->kind==EX_DEREF&&e->left->kind==EX_BINARY&&e->left->op=='+'){
-        Expr *address=e->left,*base=address->left,*subscript=word_bits(address->right);
-        if(subscript->kind==EX_OBJECT&&(r=ring_find(p,subscript->symbol))!=NULL){
-            Expr byte_base={0},byte_address=*address;
-            if(base->kind!=EX_OBJECT||!base->type.array||base->symbol->owner||
-               !base->symbol->defined||base->symbol->dpage||base->type.banked||
-               width(base->type)>65536||width(pointed_type(value_type(base->type)))!=2||
-               width(e->type)!=2||width(base->type)<(r->mask+1)*2||
-               (r->array&&r->array!=base->symbol))return 0;
-            r->array=base->symbol;++r->accesses;
-            byte_base.kind=EX_CAST;byte_base.type=type(TY_CHAR,1);
-            byte_base.left=base;byte_base.location=base->location;
-            if(p->casts==sizeof p->cast/sizeof *p->cast)return 0;
-            p->cast[p->casts]=byte_base;
-            byte_address.type=byte_base.type;
-            byte_address.left=&p->cast[p->casts++];
-            return ring_edit(p,address,byte_address);
-        }
-    }
-    if(e->kind==EX_CALL||(e->kind==EX_OBJECT&&ring_find(p,e->symbol)))return 0;
-    if(!ring_uses(p,e->left,0)||!ring_uses(p,e->right,0)||!ring_uses(p,e->third,0))return 0;
-    for(i=0;i<e->arg_count;++i)if(!ring_uses(p,e->args[i],0))return 0;
-    return 1;
-}
-
-static int ring_check_body(RingLoop *p,Statement *s)
-{
-    for(;s;s=s->next)
-        if(s->kind==ST_FOR||s->kind==ST_WHILE||s->kind==ST_DO||
-           !ring_uses(p,s->expression,s->kind==ST_EXPR)||
-           !ring_check_body(p,s->body)||!ring_check_body(p,s->alternate))return 0;
-    return 1;
-}
-
-static int guard_loop_y_operand(Expr *e)
-{
-    unsigned i;
-    if(!e)return 1;
-    if(e->kind==EX_CALL)return 0;
-    if(e->kind==EX_OBJECT&&e->symbol->owner&&
-       (e->type.array||reg_width(e->type)>2||!guard_dp_home(e->symbol)))return 0;
-    if(!guard_loop_y_operand(e->left)||!guard_loop_y_operand(e->right)||
-       !guard_loop_y_operand(e->third))return 0;
-    for(i=0;i<e->arg_count;++i)if(!guard_loop_y_operand(e->args[i]))return 0;
-    return 1;
-}
-
-static int guard_loop_y_region(Statement *s,int *has_group)
-{
-    for(;s;s=s->next){
-        ByteGuardGroup group;
-        switch(s->kind){
-        case ST_EMPTY:case ST_BLOCK:case ST_IF:case ST_EXPR:case ST_BREAK:case ST_CONTINUE:
-            break;
-        default:return 0;
-        }
-        if(!guard_loop_y_operand(s->expression)||
-           !guard_loop_y_region(s->body,has_group)||
-           !guard_loop_y_region(s->alternate,has_group))return 0;
-        if(!*has_group&&s->kind==ST_IF&&plan_byte_guard_group(s,&group))*has_group=1;
-    }
-    return 1;
-}
-
-/* An innermost guard region can save the caller's Y once. The ordinary
- * loop end handles both the test and break exits before restoring it. */
-static int emit_guard_y_loop(Statement *s,int *result)
-{
-    int has_group=0;
-    if(!cg.dp_homes||cg.loop_y_borrowed||cg.cursor_count||cg.switch_depth||
-       cg.function->jump_label_count||cg.parser->no_register_cursors||
-       cg.parser->no_strength_reduction||cg.parser->no_indexed_operands||
-       volatile_statement(s)||statement_inline_markers(s)||
-       !guard_loop_y_operand(s->expression)||!guard_loop_y_operand(s->step)||
-       !guard_loop_y_region(s->initial,&has_group)||
-       !guard_loop_y_region(s->body,&has_group)||!has_group)return 0;
-    code("; borrow Y across near byte guard loop\n    phy\n");
-    cg.loop_y_borrowed=1;
-    *result=emit_loop_body(s,1);
-    cg.loop_y_borrowed=0;
-    code("    ply\n");
-    return 1;
-}
-
-static Symbol *find_guard_ring_tail(Statement *s)
-{
-    for(;s;s=s->next){
-        ByteGuardGroup group;
-        GuardRingTail tail={0};
-        if(s->kind==ST_IF&&plan_byte_guard_group(s,&group)&&
-           fixed_guard_displacements(&group)&&guard_ring_tail(&group,&tail))return tail.index;
-        if(s->kind==ST_BLOCK){
-            Symbol *nested=find_guard_ring_tail(s->body);
-            if(nested)return nested;
-        }
-    }
-    return NULL;
-}
-
-static int carried_ring_home_unused(size_t start,const char *home)
-{
-    const char *line=cg.assembly+start;
-    int owned=0;
-    while(*line){
-        const char *end=strchr(line,'\n'),*use;
-        if(!end)end=line+strlen(line);
-        if(!strncmp(line,"; retained scratch begin\n",25))owned=1;
-        else if(!strncmp(line,"; retained scratch end\n",23))owned=0;
-        else if(!owned&&*line==' '&&(use=strstr(line,home))!=NULL&&use<end)return 0;
-        line=*end?end+1:end;
-    }
-    return 1;
-}
-
-/* Y addresses the popped element and its byte guards. X holds the tail
- * until a wrapping path needs both registers. Validate the remaining loop
- * before committing the binding, including all exits and continue edges */
-static int emit_carried_ring_loop(Statement *s,RingLoop *rings,int *result)
-{
-    Symbol *tail,*head;
-    Codegen *saved;
-    Statement *previous=loop_previous,*current=loop_current;
-    size_t start=cg.length,body;
-    unsigned slot,home;
-    char operand[32];
-    int kept;
-    if(rings->count!=2||cg.scaled_ring_tail||body_asm_statements(s->body)||
-       !(tail=find_guard_ring_tail(s->body)))return 0;
-    head=rings->rings[rings->rings[0].index==tail?1:0].index;
-    slot=(tail->offset-1)/2;
-    home=cg.dp_map[slot];
-    for(unsigned i=0;i<cg.dp_words;++i)if(i!=slot&&cg.dp_map[i]==home)return 0;
-    snprintf(operand,sizeof operand,"%s",frame_operand(tail->offset));
-    saved=allocate(sizeof *saved);
-    *saved=cg;
-    cg.scaled_ring_head=head;cg.scaled_ring_tail=tail;
-    cg.scaled_ring_x_guards=cg.scaled_ring_x_tests=0;
-    code("; keep scaled ring tail in X across loop\n    ldx %s\n",operand);
-    body=cg.length;
-    kept=emit_guard_y_loop(s,result)&&cg.scaled_ring_x_guards==1&&cg.scaled_ring_x_tests&&
-         retained_scan(body,cg.length,0,0)&&carried_ring_home_unused(body,operand);
-    loop_previous=previous;loop_current=current;
-    if(kept){
-        code("    stx %s\n",operand);
-        cg.scaled_ring_head=cg.scaled_ring_tail=NULL;
-        cg.scaled_ring_x_guards=cg.scaled_ring_x_tests=0;
-    }else{
-        char *assembly=cg.assembly;
-        size_t capacity=cg.capacity;
-        cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=start;cg.assembly[start]=0;
-    }
-    free(saved);
-    return kept;
-}
-
-static int emit_scaled_ring_loop(Statement *s,int *result)
-{
-    RingLoop p={0};unsigned i;
-    if(s->kind!=ST_DO||!cg.dp_homes||cg.parser->no_strength_reduction||
-       cg.parser->no_indexed_operands||cg.bound||cg.affine_active||cg.retained_index||
-       cg.switch_depth||cg.function->jump_label_count||
-       volatile_statement(s)||!ring_collect(&p,s->body)||!p.count||
-       !ring_check_body(&p,s->body)||!ring_uses(&p,s->expression,0))return 0;
-    for(i=0;i<p.count;++i){
-        ScaledRing *r=&p.rings[i];unsigned offset=r->index->offset;
-        if(!r->updates||!r->accesses||!offset||!(offset&1)||
-           (offset-1)/2>=cg.dp_words||!cg.dp_map[(offset-1)/2])return 0;
-    }
-    for(i=0;i<p.edits;++i)*p.edit[i].node=p.edit[i].replacement;
-    code("; scaled ring indices within loop\n");
-    for(i=0;i<p.count;++i){
-        load_symbol(p.rings[i].index);
-        code("    asl a\n    adc #$0000\n");
-        store_symbol(p.rings[i].index);
-    }
-    for(i=0;i<p.count;++i)cg.scaled_ring_indices[i]=p.rings[i].index;
-    if(!emit_carried_ring_loop(s,&p,result)&&!emit_guard_y_loop(s,result))*result=emit_loop_body(s,1);
-    memset(cg.scaled_ring_indices,0,sizeof cg.scaled_ring_indices);
-    for(i=0;i<p.count;++i){
-        load_symbol(p.rings[i].index);
-        code("    lsr a\n    bcc :+\n    ora #$8000\n:\n");
-        store_symbol(p.rings[i].index);
-    }
-    for(i=p.edits;i;--i)*p.edit[i-1].node=p.edit[i-1].original;
-    return 1;
-}
-
-static int while_peel_cost(const Expr *e,int *budget)
-{
-    if(!e)return 1;
-    if(--(*budget)<0||e->kind==EX_CALL||e->kind==EX_ASSIGN||
-       e->kind==EX_PRE||e->kind==EX_POST||
-       (e->type.base==TY_LONG&&!e->type.pointers)||
-       e->type.base==TY_FLOAT||e->type.base==TY_DOUBLE)return 0;
-    if(!while_peel_cost(e->left,budget)||!while_peel_cost(e->right,budget)||
-       !while_peel_cost(e->third,budget))return 0;
-    for(unsigned i=0;i<e->arg_count;++i)
-        if(!while_peel_cost(e->args[i],budget))return 0;
-    return 1;
-}
-static int while_peel_entry(Expr *e)
-{
-    int budget=16;
-    return e&&!volatile_expression(e)&&while_peel_cost(e,&budget);
-}
-static int while_entry_true(Statement *previous,Expr *test)
-{
-    unsigned o1,o2;
-    Symbol *s1,*s2;
-    if(!previous||previous->kind!=ST_EXPR||!previous->expression||
-       previous->expression->kind!=EX_ASSIGN||previous->expression->op||
-       previous->expression->left->kind!=EX_OBJECT)return 0;
-    if(!test||test->kind!=EX_BINARY||(test->op!=TOK_NE&&test->op!=TOK_EQ)||
-       test->left->kind!=EX_OBJECT||
-       test->left->symbol!=previous->expression->left->symbol)return 0;
-    s1=near_object_address(previous->expression->right,&o1);
-    s2=near_object_address(test->right,&o2);
-    if(!s1||s1!=s2)return 0;
-    return test->op==TOK_NE?(o1!=o2):(o1==o2);
-}
-static int emit_loop(Statement *s)
-{
-    int result;
-    region_enter(s);
-    if(emit_scaled_ring_loop(s,&result))code("; loop lowering: scaled ring indices\n");
-    else if(!emit_guard_y_loop(s,&result))result=emit_loop_body(s,1);
-    region_exit(s);
-    return result;
-}
-static int reduction_statements(Statement *s,Statement **out,unsigned *count,unsigned limit);
-static int reduction_object(Expr *e,Symbol *s);
-static int reduction_zero(Expr *e);
-typedef struct {
-    Expr *word,*count;
-    Symbol *home;
-    unsigned mask,shift,offset;
-    int op,direction,while_zero,byte;
-} WordShiftScan;
-
-static int word_shift_scan_plan(Statement *s,WordShiftScan *scan)
-{
-    Statement *parts[2];
-    Expr *test=s->expression,*update,*step,*value;
-    uint32_t mask,shift;
-    unsigned n=0;
-    int direction;
-    if(cg.parser->no_strength_reduction||cg.parser->no_register_cursors||
-       cg.parser->no_body_optimizations||s->kind!=ST_WHILE||!test||
-       volatile_statement(s)||!reduction_statements(s->body,parts,&n,2)||n!=2||
-       parts[0]->kind!=ST_EXPR||parts[1]->kind!=ST_EXPR)return 0;
-    update=parts[0]->expression;step=parts[1]->expression;
-    if(update->kind!=EX_ASSIGN||(update->op!=TOK_SHR&&update->op!=TOK_SHL)){
-        update=parts[1]->expression;step=parts[0]->expression;
-    }
-    if(update->kind!=EX_ASSIGN||(update->op!=TOK_SHR&&update->op!=TOK_SHL)||
-       !integer_constant(update->right,&shift)||!shift||shift>4||
-       !step->left||step->left->kind!=EX_OBJECT||!word_integer(step->left->type)||
-       !(direction=body_step_direction(step,step->left->symbol)))return 0;
-    scan->while_zero=0;
-    if(test->kind==EX_UNARY&&test->op=='!'){test=test->left;scan->while_zero=1;}
-    else if(test->kind==EX_BINARY&&(test->op==TOK_EQ||test->op==TOK_NE)){
-        scan->while_zero=test->op==TOK_EQ;
-        if(reduction_zero(test->right))test=test->left;
-        else if(reduction_zero(test->left))test=test->right;
-        else return 0;
-    }
-    if(test->kind!=EX_BINARY||test->op!='&'||reg_width(test->type)!=2)return 0;
-    value=test->left;
-    if(!integer_constant(test->right,&mask)){
-        if(!integer_constant(test->left,&mask))return 0;
-        value=test->right;
-    }
-    if(!body_equal(word_uncast(word_bits(value)),update->left)||
-       !compare_memory_operand(step->left,0)||!(mask&65535))return 0;
-    scan->byte=update->left->type.base==TY_CHAR;
-    if(scan->byte){
-        if((mask&65535)>255||
-           !(scan->home=fixed_byte_home(update->left,0,&scan->offset))||scan->home->type.banked)return 0;
-    }else if(!word_integer(update->left->type)||!compare_memory_operand(update->left,0)||
-             !(scan->home=direct_memory_object(update->left,&scan->offset)))return 0;
-    if(scan->home==step->left->symbol)return 0;
-    scan->word=update->left;scan->count=step->left;
-    scan->mask=mask&65535;scan->shift=shift;scan->op=update->op;scan->direction=direction;
-    return 1;
-}
-
-static void emit_word_shift_scan(WordShiftScan *scan)
-{
-    unsigned start=++cg.label,done=++cg.label;
-    code(scan->byte?"    bit #$%02X\n":"    bit #$%04X\n",scan->mask);
-    flag_branch(scan->while_zero?"bne":"beq",scan->while_zero?"beq":"bne",done,0,0);
-    label(start);
-    for(unsigned i=0;i<scan->shift;++i){
-        if(scan->op==TOK_SHL)code("    asl a\n");
-        else if(scan->word->type.is_unsigned)code("    lsr a\n");
-        else code(scan->byte?"    cmp #$80\n    ror a\n":"    cmp #$8000\n    ror a\n");
-    }
-    code("    %s\n",scan->direction>0?"inx":"dex");
-    code(scan->byte?"    bit #$%02X\n":"    bit #$%04X\n",scan->mask);
-    flag_branch(scan->while_zero?"beq":"bne",scan->while_zero?"bne":"beq",start,done,done);
-    label(done);
-    cg.divmod_available=0;
-}
-
-static int word_shift_scan_loop(Statement *s)
-{
-    WordShiftScan scan;
-    if(cg.switch_depth||cg.retained_index||cg.retained_second||cg.affine_active||
-       cg.scan_cursor||cg.bound||cg.bound_pending||cg.numeric_index||cg.lftr_active||
-       !word_shift_scan_plan(s,&scan))return 0;
-    code("; register word shift scan\n");
-    emit_value_x(scan.count);
-    if(scan.byte)code("    sep #$20\n.a8\n");
-    code("    lda ");array_operand(scan.home,scan.offset);code("\n");
-    emit_word_shift_scan(&scan);
-    code("    sta ");array_operand(scan.home,scan.offset);code("\n");
-    if(scan.byte)code("    rep #$20\n.a16\n");
-    code("    txa\n");
-    store_symbol(scan.count->symbol);
-    return 1;
-}
-
-static int word_shift_scan_leaf(Function *f)
-{
-    WordShiftScan scan;
-    Statement *parts[4];
-    Symbol *arg,*count;
-    Expr *word_init,*count_init,*seed;
-    uint32_t initial;
-    unsigned n=0;
-    if(f->symbol->param_count!=1||!word_integer(f->symbol->type)||
-       !reduction_statements(f->body,parts,&n,4)||n!=4||
-       parts[0]->kind!=ST_EXPR||parts[1]->kind!=ST_EXPR||
-       parts[3]->kind!=ST_RETURN||!word_shift_scan_plan(parts[2],&scan))return 0;
-    count=scan.count->symbol;arg=leaf_parameter(f,0);
-    word_init=parts[0]->expression;count_init=parts[1]->expression;
-    if(word_init->kind!=EX_ASSIGN||word_init->op||count_init->kind!=EX_ASSIGN||count_init->op)return 0;
-    if(reduction_object(word_init->left,count)){
-        Expr *swap=word_init;word_init=count_init;count_init=swap;
-    }
-    seed=word_bits(word_init->right);
-    if(scan.byte&&seed->kind==EX_CAST&&seed->type.base==TY_CHAR&&!seed->type.is_bool&&
-       !seed->type.pointers)seed=word_bits(seed->left);
-    if(!arg||arg==count||!word_integer(arg->type)||!register_parameter(0,arg->type)||
-       !body_private(count)||scan.home->owner!=f->id||loop_escapes(f->body,scan.home)||
-       !body_equal(word_init->left,scan.word)||!reduction_object(seed,arg)||
-       !reduction_object(count_init->left,count)||!integer_constant(count_init->right,&initial)||
-       !reduction_object(word_bits(parts[3]->expression),count))return 0;
-    code(".segment \"CODE\"\n.export _%s\n_%s:\n; frameless word shift scan\n    txa\n    ldx #$%04X\n",
-         f->symbol->asm_name,f->symbol->asm_name,initial&65535);
-    if(scan.byte)code("    sep #$20\n.a8\n");
-    emit_word_shift_scan(&scan);
-    if(scan.byte)code("    rep #$20\n.a16\n");
-    code("    txa\n    rts\n__size_%s = * - _%s\n",f->symbol->asm_name,f->symbol->asm_name);
-    f->frame=0;return 1;
-}
-
-/* An unobserved fixed-word shift recurrence and its termination counter
- * can live in A and X for the whole loop. Publish both final values. */
-static int fixed_shift_loop(Statement *s)
-{
-    Statement *body=s->body;
-    Expr *test=s->expression,*update,*step,*value,*operand,*literal;
-    Symbol *data,*counter;
-    uint32_t shift,limit;
-    unsigned at=0,index=0,again,done,i;
-    if(cg.parser->no_register_cursors||cg.parser->no_strength_reduction||cg.switch_depth||
-       cg.retained_index||cg.retained_second||cg.affine_active||cg.scan_cursor||s->kind!=ST_DO||
-       !test||test->kind!=EX_BINARY||test->op!=TOK_NE||volatile_expression(test))return 0;
-    operand=test->left;literal=test->right;
-    if(!integer_constant(literal,&limit)){
-        if(!integer_constant(operand,&limit))return 0;
-        operand=test->right;literal=test->left;
-    }
-    while(body&&body->kind==ST_BLOCK&&!body->next&&!body->inline_callee)body=body->body;
-    if(!body||body->kind!=ST_EXPR||body->inline_callee)return 0;
-    step=operand;
-    if(body->next){
-        Statement *tail=body->next;
-        if(tail->kind!=ST_EXPR||tail->next||tail->inline_callee)return 0;
-        step=tail->expression;
-        if(!step||(step->kind!=EX_PRE&&step->kind!=EX_POST)||
-           !body_equal(step->left,operand)||volatile_expression(step))return 0;
-    }else if(step->kind!=EX_PRE)return 0;
-    if((step->op!=TOK_INC&&step->op!=TOK_DEC)||width(step->type)!=2||
-       step->type.base!=TY_INT||step->type.pointers)return 0;
-    update=body->expression;
-    if(!update||update->kind!=EX_ASSIGN||(update->op!=TOK_SHR&&update->op!=TOK_SHL)||
-       !integer_constant(update->right,&shift)||!shift||shift>4||volatile_expression(update))return 0;
-    value=update->left;
-    if(width(value->type)!=2||value->type.base!=TY_INT||value->type.pointers||!value->type.is_unsigned)return 0;
-    data=value->kind==EX_OBJECT?value->symbol:fixed_memory_object(value,&at);
-    counter=step->left->kind==EX_OBJECT?step->left->symbol:fixed_memory_object(step->left,&index);
-    if(!data||!counter||data->owner||counter->owner||data->type.banked||counter->type.banked||
-       (data==counter&&at<index+2&&index<at+2)||reg_width(common_type(operand->type,literal->type))!=2)return 0;
-    again=++cg.label;done=++cg.label;
-    code("; register-resident fixed word shift loop\n    lda ");array_operand(data,at);
-    code("\n    ldx ");array_operand(counter,index);code("\n");
-    label(again);
-    for(i=0;i<shift;++i)code("    %s a\n",update->op==TOK_SHR?"lsr":"asl");
-    code("    %s\n    cpx #$%04X\n",step->op==TOK_INC?"inx":"dex",limit&65535);
-    flag_branch("bne","beq",again,done,done);label(done);
-    code("    sta ");array_operand(data,at);code("\n    stx ");array_operand(counter,index);code("\n");
-    cg.divmod_available=0;
-    return 1;
-}
-static int empty_loop_body(Statement *s)
-{
-    for(;s;s=s->next){
-        if(s->kind==ST_EMPTY)continue;
-        if(s->kind==ST_CONTINUE&&!s->next)return 1;
-        if(s->kind==ST_IF){
-            Expr *test=s->expression;
-            if(test->kind!=EX_BINARY||!comparison(test->op)||test->left->kind!=EX_OBJECT||
-               !known_integer(test->left->type)||test->right->kind!=EX_INT||!known_integer(test->right->type)||
-               volatile_expression(test)||!empty_loop_body(s->body)||!empty_loop_body(s->alternate))return 0;
-            continue;
-        }
-        if(s->kind!=ST_BLOCK||!empty_loop_body(s->body))return 0;
-    }
-    return 1;
-}
-static int fold_fixed_update_loop(Statement *s)
-{
-    Statement *initial=body_single(s->initial),*body=body_single(s->body);
-    Expr *test=s->expression,*step=s->step,*init,*update;
-    unsigned off,init_off,step_off,update_off,width_bits;
-    uint32_t begin,end,delta=1,limit;
-    int op;
-    Symbol *index,*value;
-    if(cg.parser->no_strength_reduction||cg.parser->no_loop_unroll||cg.function->jump_label_count||
-       s->kind!=ST_FOR||!initial||initial->kind!=ST_EXPR||initial->next||
-       !step||!test||
-       test->kind!=EX_BINARY||test->op!='<'||
-       (step->kind!=EX_PRE&&step->kind!=EX_POST)||step->op!=TOK_INC||
-       !word_integer(test->left->type)||width(test->left->type)!=2||volatile_statement(s))return 0;
-    init=initial->expression;
-    if(!init||init->kind!=EX_ASSIGN||init->op||
-       !(index=fixed_byte_home(test->left,0,&off))||
-       fixed_byte_home(init->left,0,&init_off)!=index||init_off!=off||
-       fixed_byte_home(step->left,0,&step_off)!=index||step_off!=off||
-       !same_type(test->left->type,init->left->type)||!same_type(test->left->type,step->left->type)||
-       !integer_constant(init->right,&begin)||!integer_constant(test->right,&end))return 0;
-    limit=test->left->type.is_unsigned?65535u:32767u;
-    if(begin>=end||end-begin<2||end>limit)return 0;
-    if(!empty_loop_body(s->body)){
-        if(!body||body->kind!=ST_EXPR||body->next||!(update=body->expression))return 0;
-        if(update->kind==EX_PRE||update->kind==EX_POST)op=update->op==TOK_INC?'+':'-';
-        else if(update->kind==EX_ASSIGN&&(update->op=='+'||update->op=='-')&&
-                integer_constant(update->right,&delta))op=update->op;
-        else return 0;
-        if(!known_integer(update->type)||!update->type.is_unsigned||update->type.is_bool||
-           !(value=fixed_byte_home(update->left,0,&update_off))||value==index)return 0;
-        width_bits=width(update->type)*8;
-        delta=(delta*(end-begin))&((1u<<width_bits)-1);
-        if(delta){
-            if(width_bits==8)code("    sep #$20\n.a8\n");
-            code("    lda ");array_operand(value,update_off);
-            code("\n    %s\n    %s ",op=='+'?"clc":"sec",op=='+'?"adc":"sbc");
-            code(width_bits==8?"#$%02X\n":"#$%04X\n",delta);
-            code("    sta ");array_operand(value,update_off);code("\n");
-            if(width_bits==8)code("    rep #$20\n.a16\n");
-        }
-    }
-    code("    lda #$%04X\n    sta ",end);array_operand(index,off);code("\n");
-    cg.divmod_available=0;
-    return 1;
-}
-#include "shift_recurrence.inc"
-static int emit_loop_body(Statement *s,int select_copy)
-{
-    unsigned start,end,body,step;int a,infinite,counted,rotated_while;DpCounter counter={0};unsigned done;AffineLoop *affine,*saved_affine;
-    Statement *previous=loop_previous;
-    if(fold_fixed_update_loop(s)){code("; loop lowering: folded fixed update\n");return 1;}
-    if(unroll_far_doubling_sum(s)){code("; loop lowering: unrolled far doubling sum\n");return 1;}
-    if(far_sentinel_doubling_loop(s)){code("; loop lowering: far sentinel doubling sum\n");return 1;}
-    if(shift_recurrence_loop(s)||low_bit_sum_loop(s))return 1;
-    if(select_copy&&counted_byte_copy_loop(s))return 1;
-    if(fixed_byte_sum_loop(s))return 1;
-    if(runtime_byte_sum_loop(s))return 1;
-    if(strided_byte_store_loop(s))return 1;
-    if(packed_byte_mask_loop(s))return 1;
-    affine=cg.switch_depth?NULL:affine_find(s);
-    if(!cg.function->jump_label_count&&!affine&&counted_indexed_guard_loop(s)){code("; loop lowering: counted indexed byte guard\n");return 1;}
-    if(!affine&&!cg.switch_depth&&s->kind==ST_FOR&&s->initial&&!s->initial->next&&s->initial->kind==ST_EXPR&&
-       retained_countdown_for_loop(s,1)){code("; loop lowering: register countdown\n");return 1;}
-    if(affine&&affine->dead_index){
-        code("; eliminated induction home: %s\n",affine->index->name);
-        affine_initialize_dead_index(affine);
-    }else if(s->initial)emit_statements(s->initial);
-    if(fixed_byte_copy_loop(s)){code("; loop lowering: fixed byte copy\n");return 1;}
-    if(affine_pair_loop(s)){code("; loop lowering: paired affine stores\n");return 1;}
-    if(!cg.switch_depth&&affine_register_loop(s,affine)){
-        code("; loop lowering: %s register cursor\n",affine?"affine":"explicit");
-        return 1;
-    }
-    if(!cg.function->jump_label_count&&fixed_shift_loop(s)){code("; loop lowering: fixed word shift\n");return 1;}
-    if(!cg.function->jump_label_count&&word_shift_scan_loop(s)){code("; loop lowering: word shift scan\n");return 1;}
-    if(!cg.switch_depth&&!volatile_statement(s)&&register_loop(s)){code("; loop lowering: register loop\n");return 1;}
-    if(!affine&&retained_countdown_loop(s)){code("; loop lowering: register countdown\n");return 1;}
-    if(!cg.function->jump_label_count&&!affine&&counted_pointer_guard_loop(s)){code("; loop lowering: counted pointer guard\n");return 1;}
-    if(!cg.function->jump_label_count&&!affine&&pointer_scan_loop(s)){code("; loop lowering: register pointer scan\n");return 1;}
-    if(!cg.switch_depth&&numeric_loop(s)){code("; loop lowering: numeric loop\n");return 1;}
-    if(structured_byte_loop(s)){code("; loop lowering: structured byte loop\n");return 1;}
-    if(!(affine&&affine->dead_index)&&retained_loop(s)){code("; loop lowering: retained index\n");return 1;}
-    if(!affine&&dp_counter_word_fill(s)){code("; loop lowering: fixed-array DP word fill\n");return 1;}
-    if(!cg.switch_depth&&s->kind!=ST_DO&&s->expression&&s->expression->kind==EX_INT&&!s->expression->value){code("; loop lowering: zero-trip elimination\n");return 1;}
-    counted=(!cg.switch_depth||(cg.switch_depth==1&&cg.function->jump_label_count&&
-             !dp_counter_has_jump_edge(s->initial)&&!dp_counter_has_jump_edge(s->body)))&&
-            !volatile_statement(s)&&dp_counter_plan(s,affine,&counter);
-    rotated_while=!counted&&!affine&&s->kind==ST_WHILE&&s->expression&&
-        s->expression->kind!=EX_INT&&!divmod_test_produces(s->expression);
-    code("; loop lowering: %s\n",counted?(affine?"affine cursor and DP counter":"DP counter"):
-         affine?"affine frame cursor":cg.bound_pending?"bound register cursor":"generic fallback");
-    start=++cg.label;body=++cg.label;end=++cg.label;done=counted?++cg.label:end;step=s->kind==ST_WHILE?start:++cg.label;
-    if(cg.loop_count==64)error_at(s->location,"too many nested loops");
-    cg.loop_start[cg.loop_count]=step;cg.loop_end[cg.loop_count++]=end;
-    if(counted){
-        if(!counter.countdown){
-            unsigned enter=++cg.label;
-            Expr entry=*s->expression,zero={0};
-            counter.starts_zero=!affine&&dp_counter_starts_zero(s,&counter,previous);
-            if(counter.starts_zero){
-                zero.kind=EX_INT;zero.type=counter.index->type;zero.location=entry.location;
-                entry.left=&zero;
-                if(counter.bound->kind==EX_INT){
-                    entry.value=initializer_constant(&entry,1);
-                    entry.kind=EX_INT;
-                }
-            }
-            if(counter.starts_zero&&counter.bound->kind!=EX_INT&&!body_effect(counter.bound)&&!counter.wide){
-                /* The successful entry test already leaves the trip count in A */
-                Type compare=common_type(entry.left->type,counter.bound->type);
-                truth(counter.bound);
-                flag_branch("beq","bne",done,0,0);
-                if(!compare.is_unsigned)flag_branch("bmi","bpl",done,0,0);
-                counter.bound_loaded=1;
-            }else branch(&entry,enter,done,enter);
-            label(enter);
-        }else if(counter.entry_test){
-            unsigned enter=++cg.label;
-            branch(s->expression,enter,done,enter);
-            label(enter);
-        }
-        if(affine)affine_initialize(affine);
-        dp_counter_enter(&counter);bound_enter();
-        if(!counter.countdown||counter.entry_test)jump(body);
-    }else if(affine){
-        unsigned enter=++cg.label;
-        branch(s->expression,enter,end,enter);label(enter);affine_initialize(affine);bound_enter();jump(body);
-    }
-    if(!counted&&!affine)bound_enter();
-    cg.divmod_available=0;
-    if(rotated_while){
-        if(!while_entry_true(previous,s->expression)){
-            if(while_peel_entry(s->expression)){
-                branch(s->expression,body,end,body);
-                cg.divmod_available=0;
-            }else jump(start);
-        }
-    }else{
-        label(start);
-        if(!counted){
-            if(s->kind!=ST_DO&&s->expression&&s->expression->kind!=EX_INT)branch(s->expression,body,end,body);
-            else if(s->kind!=ST_DO&&s->expression&&!s->expression->value)jump(end);
-        }
-    }
-    label(body);
-    saved_affine=cg.affine_active;
-    if(affine)cg.affine_active=affine;
-    a=emit_statements(s->body);
-    if(s->kind!=ST_WHILE){cg.divmod_available=0;label(step);}
-    if(s->step){
-        if(counted&&!counter.update_index){
-            strength_update_cursors_only(s->step);
-        }else if(!strength_update(s->step,0)){
-            if(scalar_home_update(s->step,0)||(!volatile_expression(s->step)&&discarded_far_update(s->step)))divmod_written(s->step->left);else emit_discarded(s->step);
-        }
-    }
-    if(affine)affine_advance(affine);
-    cg.affine_active=saved_affine;
-    if(counted){
-        if(!affine&&!counter.countdown&&!counter.descending&&!counter.wide&&
-           !counter.recover_index&&s->expression->left->type.is_unsigned&&
-           !cg.parser->no_line_passes&&!cg.parser->no_index_elimination&&
-           !cg.function->jump_label_count&&dp_counter_word_prefix(s->body,counter.index))
-            code("; word-array loop distance fits 32768\n");
-        dp_counter_step(&counter,body);
-    }
-    else if(s->kind==ST_DO)branch(s->expression,start,end,end);
-    else if(rotated_while){
-        cg.divmod_available=0;label(start);branch(s->expression,body,end,end);
-    }else if(a||s->kind==ST_FOR)jump(start);
-    --cg.loop_count;cg.divmod_available=0;label(end);bound_exit();
-    if(counted){dp_counter_exit(&counter);label(done);}
-    infinite=s->kind!=ST_DO&&(!s->expression||(s->expression->kind==EX_INT&&s->expression->value));
-    if(infinite&&!contains_break(s->body)&&!cg.switch_depth)return 0;
-    return 1;
-}
-#include "bound_cursors.inc"
-#include "region_homes.inc"
-/* A leading scalar guard can return without ever allocating a frame. Limit
- * inputs to one word parameter in X and a constant so the continuation keeps
- * all incoming arguments intact and no local initializer is bypassed. */
-static void entry_guard(Function *f,Statement **body)
-{
-    Statement *s=*body,*ret;Expr *e,*value;Symbol *parameter;unsigned yes,no;
-    if(f->symbol->param_count!=1||f->symbol->params[0].base!=TY_INT||
-       f->symbol->params[0].pointers||f->symbol->type.base!=TY_INT||f->symbol->type.pointers)return;
-    while(s&&(s->kind==ST_EMPTY||(s->kind==ST_BLOCK&&!s->body)))s=s->next;
-    if(!s||s->kind!=ST_IF||s->alternate||!word_comparison(s->expression))return;
-    e=s->expression;parameter=leaf_parameter(f,0);
-    if(e->left->kind!=EX_OBJECT||e->left->symbol!=parameter||e->right->kind!=EX_INT)return;
-    ret=s->body;
-    if(ret&&ret->kind==ST_BLOCK)ret=ret->body;
-    if(!ret||ret->next||ret->kind!=ST_RETURN||!ret->expression)return;
-    value=ret->expression;
-    if(value->kind!=EX_INT&&(value->kind!=EX_OBJECT||value->symbol!=parameter))return;
-    if(reg_width(value->type)!=2)return;
-    yes=++cg.label;no=++cg.label;
-    code("; entry guard before frame allocation\n    txa\n");
-    word_compare_loaded(e,yes,no,yes);label(yes);
-    if(value->kind==EX_INT)emit_value(value);else code("    txa\n");
-    code("    rts\n");label(no);*body=s->next;
-}
-#include "counted_reductions.inc"
-#include "recursive_products.inc"
-#include "bank_calls.inc"
-#include "guarded_updates.inc"
-#include "range_scans.inc"
-/* Inspect complete emitted instructions, including operands assembled through
- * multiple code() calls. This covers selected inline paths and frame cleanup,
- * rather than predicting scratch use from the unselected expression tree. */
-static unsigned interrupt_scratch_writes(size_t start)
-{
-    const char *line=cg.assembly+start;unsigned mask=cg.interrupt_scratch;
-    while(*line){
-        char op[16],operand[192];const char *end=strchr(line,'\n');
-        if(sscanf(line," %15s %191[^\r\n]",op,operand)==2&&
-           (!strcmp(op,"sta")||!strcmp(op,"stx")||!strcmp(op,"sty")||!strcmp(op,"stz")||
-            !strcmp(op,"inc")||!strcmp(op,"dec")||!strcmp(op,"asl")||!strcmp(op,"lsr")||
-            !strcmp(op,"rol")||!strcmp(op,"ror")||!strcmp(op,"trb")||!strcmp(op,"tsb"))){
-            char *comment=strchr(operand,';'),*symbol;
-            if(comment)*comment=0;
-            symbol=operand;
-            if(!strncmp(symbol,"z:",2)||!strncmp(symbol,"a:",2)||!strncmp(symbol,"f:",2))symbol+=2;
-            if(strncmp(symbol,"__arith_",8))symbol=NULL;
-            if(symbol){
-                char *suffix;unsigned base,offset=0;
-                if(!strncmp(symbol,"__arith_lhs",11))base=0;
-                else if(!strncmp(symbol,"__arith_rhs",11))base=4;
-                else error_at(here(cg.parser),"unknown interrupt scratch operand '%s'",operand);
-                suffix=symbol+11;
-                if(*suffix=='+'){
-                    char *next;unsigned long n;int radix=10;
-                    ++suffix;if(*suffix=='$'){++suffix;radix=16;}
-                    n=strtoul(suffix,&next,radix);
-                    if(next==suffix||n>30)error_at(here(cg.parser),"invalid interrupt scratch offset");
-                    offset=(unsigned)n;suffix=next;
-                }
-                while(isspace((unsigned char)*suffix))++suffix;
-                if((*suffix&&*suffix!=';')||base+offset>30)
-                    error_at(here(cg.parser),"unsupported interrupt scratch addressing '%s'",operand);
-                /* Scratch instructions use 16-bit A/X/Y. Include both words
-                 * if a future unaligned access straddles a word boundary. */
-                mask|=(1u<<((base+offset)/2))|(1u<<((base+offset+1)/2));
-            }
-        }
-        if (!end) {
-            break;
-        }
-        line = end + 1;
-    }
-    return mask;
-}
-static void insert_interrupt_scratch(size_t start,size_t save,size_t restore)
-{
-    unsigned mask=interrupt_scratch_writes(start);int word;
-    size_t size=cg.length-save,middle=restore-save;char *tail;
-    if(!mask)return;
-    tail=allocate(size+1);memcpy(tail,cg.assembly+save,size+1);
-    cg.length=save;cg.assembly[save]=0;
-    for(word=0;word<16;++word)if(mask&(1u<<word))code("    pei ($%02X)\n",DP_SCRATCH_BASE+word*2);
-    code("%.*s",(int)middle,tail);
-    for(word=15;word>=0;--word)if(mask&(1u<<word))code("    pla\n    sta z:$%02X\n",DP_SCRATCH_BASE+word*2);
-    code("%s",tail+middle);free(tail);
-}
-static unsigned stack_reservation_offset(unsigned offset,unsigned *holes,unsigned *bytes,unsigned count)
-{
-    unsigned i,result=offset;
-    for(i=0;i<count;++i)if(holes[i]<offset)result-=bytes[i];
-    return result;
-}
-/* Specialized leaves have already selected their independent ABI lowering.
- * Ordinary entry-cursor dependencies must be included before omitting an
- * incoming register value, even if the body overwrites it before any C read. */
-static int parameter_entry_cursor(Symbol *v)
-{
-    unsigned i;
-    for(i=0;i<cg.cursor_count;++i){
-        InductionCursor *c=&cg.cursors[i];
-        if(!c->index->scope&&parameter_incoming_live(c->index)&&(c->base==v||c->index==v))return 1;
-    }
-    return 0;
-}
-/* Backward may-liveness of a scalar value. A full plain write kills it;
- * reads and address formation generate it. Expression sequencing beyond such
- * writes remains conservative. Escapes after a definite write need a home,
- * but do not require the old incoming contents in that home. */
-static int scalar_live_expr(Expr *e,Symbol *v,int after)
-{
-    if(!e)return after;
-    if(e->kind==EX_ASSIGN&&!e->op&&e->left->kind==EX_OBJECT&&e->left->symbol==v)
-        return loop_mentions(e->right,v);
-    return after||loop_mentions(e,v);
-}
-static unsigned scalar_live_budget;
-static Statement *scalar_live_target;
-static int scalar_live_captured,scalar_live_after;
-static int body_private(Symbol *v);
-static int body_address_pure(Expr *e);
-static int body_has_deref(Expr *e);
-static void body_drop_expr(Expr **at,Symbol *v);
-static int scalar_live_statements(Statement *s,Symbol *v,int after,int breaking,int continuing,int rewrite)
-{
-    int next,head,body,step,again;
-    if(!s)return after;
-    if(!scalar_live_budget)return 1;
-    --scalar_live_budget;
-    next=scalar_live_statements(s->next,v,after,breaking,continuing,rewrite);
-    if(s==scalar_live_target){scalar_live_captured=1;scalar_live_after|=next;}
-    switch(s->kind){
-    case ST_SWITCH:case ST_CASE:return 1; /* Multiple entry labels: keep the input */
-    case ST_EMPTY:return next;
-    case ST_EXPR:
-        if(rewrite&&!next){
-            body_drop_expr(&s->expression,v);
-            if(!s->expression)s->kind=ST_EMPTY;
-        }
-        return scalar_live_expr(s->expression,v,next);
-    case ST_RETURN:return scalar_live_expr(s->expression,v,0);
-    case ST_BREAK:return breaking;
-    case ST_CONTINUE:return continuing;
-    case ST_BLOCK:return scalar_live_statements(s->body,v,next,breaking,continuing,rewrite);
-    case ST_IF:
-        body=scalar_live_statements(s->body,v,next,breaking,continuing,rewrite);
-        step=scalar_live_statements(s->alternate,v,next,breaking,continuing,rewrite);
-        return scalar_live_expr(s->expression,v,body||step);
-    case ST_WHILE:case ST_FOR:case ST_DO:
-        head=0;
-        do{
-            again=head;
-            if(s->kind==ST_DO){
-                step=scalar_live_expr(s->expression,v,next||head);
-                body=scalar_live_statements(s->body,v,step,next,step,0);
-                head=body;
-            }else{
-                step=scalar_live_expr(s->step,v,head);
-                body=scalar_live_statements(s->body,v,step,next,step,0);
-                head=scalar_live_expr(s->expression,v,next||body);
-            }
-        }while(head!=again);
-        if(rewrite&&scalar_live_budget){
-            if(s->kind==ST_DO)step=scalar_live_expr(s->expression,v,next||head);
-            else{
-                if(!head)body_drop_expr(&s->step,v);
-                step=scalar_live_expr(s->step,v,head);
-            }
-            scalar_live_statements(s->body,v,step,next,step,1);
-        }
-        return scalar_live_statements(s->initial,v,head,breaking,continuing,rewrite);
-    }
-    return 1;
-}
-
-/* Capture a private scalar's loop continuation during backward may-liveness,
- * including enclosing loop backedges and break/continue paths. */
-static int dot_reserved_symbol(const Symbol *v);
-static void region_home_liveness(Function *f,Statement *s,unsigned offset,int *in,int *out)
-{
-    unsigned i;Symbol *v=NULL;Statement single=*s;
-    *in=*out=1;
-    if(cg.parser->no_private_regions||cg.parser->no_body_optimizations)return;
-    for(i=0;i<cg.parser->symbol_count;++i){Symbol *candidate=&cg.parser->symbols[i];
-        if(candidate->owner==f->id&&loop_private(candidate)&&!object_volatile(candidate->type)&&
-           !structure_object(candidate->type)&&!candidate->type.array&&width(candidate->type)<=4&&
-           (candidate->offset==offset||(reg_width(candidate->type)==4&&candidate->offset+2==offset))){v=candidate;break;}
-    }
-    if(!v||dot_reserved_symbol(v))return;
-    scalar_live_target=s;scalar_live_after=scalar_live_captured=0;scalar_live_budget=100000;
-    scalar_live_statements(f->body,v,0,1,1,0);
-    scalar_live_target=NULL;
-    if(!scalar_live_captured||!scalar_live_budget)return;
-    *out=scalar_live_after;
-    single.next=NULL;scalar_live_budget=100000;
-    *in=scalar_live_statements(&single,v,*out,1,1,0);
-}
-static int parameter_incoming_live(Symbol *v)
-{
-    scalar_live_budget=4096;
-    return scalar_live_statements(cg.function->body,v,0,1,1,0);
-}
-static unsigned plan_register_homes(Function *f)
-{
-    unsigned i,possible=0;cg.register_homes=cg.register_spills=0;
-    for(i=0;i<(unsigned)(f->symbol->param_count<0?0:f->symbol->param_count);++i){
-        Symbol *v=leaf_parameter(f,i);int cursor;
-        if(!v)error_at(here(cg.parser),"internal parameter layout failure");
-        if(!register_parameter(i,v->type))continue;
-        possible|=1u<<i;cursor=parameter_entry_cursor(v);
-        if(f->jump_label_count||object_volatile(v->type)){cg.register_homes|=1u<<i;cg.register_spills|=1u<<i;continue;}
-        if(!statement_references(f->body,v)&&!cursor)continue;
-        cg.register_homes|=1u<<i;
-        if(cursor||parameter_incoming_live(v))
-            cg.register_spills|=1u<<i;
-    }
-    return possible;
-}
-static unsigned compact_parameter_reservations(Function *f)
-{
-    /* Stack arguments retain their incoming homes. Unreferenced register
-     * parameters need no storage; written/read parameters retain their homes. */
-    Symbol *parameters[MAX_PARAMETERS];unsigned holes[MAX_PARAMETERS],bytes[MAX_PARAMETERS],count=0,total=0,stacked=0,i,j;
-    for(i=0;i<(unsigned)(f->symbol->param_count<0?0:f->symbol->param_count);++i){
-        Symbol *v=leaf_parameter(f,i);
-        if(!v)error_at(here(cg.parser),"internal parameter layout failure");
-        if(register_parameter(i,v->type)){
-            if(cg.register_homes&(1u<<i))continue;
-            cg.omitted_parameters[cg.omitted_parameter_count++]=v;
-        }else ++stacked;
-        parameters[count]=v;holes[count]=v->offset;bytes[count]=(width(v->type)+1)&~1u;
-        total+=bytes[count++];
-    }
-    if(!count)return 0;
-    for(i=0;i<cg.parser->symbol_count;++i){
-        Symbol *v=&cg.parser->symbols[i];
-        if(v->owner!=f->id)continue;
-        for(j=0;j<count;++j)if(parameters[j]==v)break;
-        v->offset=j<count?0:stack_reservation_offset(v->offset,holes,bytes,count);
-    }
-    for(i=0;i<cg.cursor_count;++i)
-        cg.cursors[i].offset=stack_reservation_offset(cg.cursors[i].offset,holes,bytes,count);
-    for(i=0;i<cg.affine_count;++i)for(j=0;j<cg.affine[i].count;++j)
-        cg.affine[i].accesses[j].offset=stack_reservation_offset(cg.affine[i].accesses[j].offset,holes,bytes,count);
-    for(i=0;i<cg.divmod_count;++i)
-        cg.divmod[i].offset=stack_reservation_offset(cg.divmod[i].offset,holes,bytes,count);
-    f->slots-=total;return stacked;
-}
-#include "scalar_values.inc"
-#include "body_opt.inc"
-#include "value_reuse.inc"
-#include "known_values.inc"
-#include "loop_fusion.inc"
-static int function_uses_wide(Function *f);
-#include "inline.inc"
-#include "static_ipa.inc"
-#include "value_recurrence.inc"
-#include "dot_products.inc"
-#include "dp_homes.inc"
-#include "frame_packing.inc"
-#include "byte_loop_regions.inc"
-/* Recycle a consumed private DP home for an accumulated word value. A scalar
- * read here must be completely consumed on the left and dead afterward; a
- * previously consumed scalar must be dead on entry and exit. Continuations
- * include loop backedges. Pure operands cannot observe its replacement. */
-static int dp_home_shared(unsigned word)
-{
-    unsigned i;
-    unsigned char mapped;
-    if(word>=cg.dp_words||!cg.dp_map[word])return 0;
-    mapped=cg.dp_map[word];
-    for(i=0;i<cg.dp_words;++i)if(i!=word&&cg.dp_map[i]==mapped)return 1;
-    return 0;
-}
-static Symbol *last_use_home_at(Expr *e,unsigned depth)
-{
-    Symbol *v,*found;int in,out;
-    if(!e)return NULL;
-    if(!depth&&e->kind==EX_OBJECT){
-        v=e->symbol;
-        if(!body_private(v)||dot_reserved_symbol(v)||v->owner!=cg.function->id||!v->offset||width(v->type)!=2||
-           !cg.dp_map[(v->offset-1)/2]||dp_home_shared((v->offset-1)/2)||
-           expression_references(loop_current->expression,v)!=1||
-           !direct_operand(e,v->type,0,0))return NULL;
-        region_home_liveness(cg.function,loop_current,v->offset,&in,&out);
-        return out?NULL:v;
-    }
-    if(!depth)return NULL;
-    if((found=last_use_home_at(e->left,depth-1)))return found;
-    if((found=last_use_home_at(e->right,depth-1)))return found;
-    return last_use_home_at(e->third,depth-1);
-}
-static Symbol *recent_dead_home(void)
-{
-    Symbol *best=NULL;size_t latest=0,begin=cg.length>4096?cg.length-4096:0;unsigned i;
-    for(i=0;i<cg.parser->symbol_count;++i){
-        Symbol *v=&cg.parser->symbols[i];char name[32];const char *p;size_t read=0;int in,out;
-        if(!body_private(v)||dot_reserved_symbol(v)||v->owner!=cg.function->id||!v->offset||width(v->type)!=2||
-           !cg.dp_map[(v->offset-1)/2]||dp_home_shared((v->offset-1)/2)||
-           expression_references(loop_current->expression,v))continue;
-        snprintf(name,sizeof name,"__dp_home_%02u",cg.dp_map[(v->offset-1)/2]-1u);
-        for(p=cg.assembly+begin;(p=strstr(p,name))!=NULL;++p){
-            const char *line=p;while(line>cg.assembly&&line[-1]!='\n')--line;
-            if(!strncmp(line,"    lda ",8)||!strncmp(line,"    ora ",8)||!strncmp(line,"    and ",8)||
-               !strncmp(line,"    eor ",8)||!strncmp(line,"    adc ",8)||!strncmp(line,"    sbc ",8))read=(size_t)(p-cg.assembly);
-        }
-        if(read<=latest)continue;
-        region_home_liveness(cg.function,loop_current,v->offset,&in,&out);
-        if(!in&&!out){best=v;latest=read;}
-    }
-    return best;
-}
-static int last_use_binary_home(Expr *left,Expr *right,int op,Type t)
-{
-    Symbol *home=NULL;Expr operand={0};unsigned depth;
-    if(cg.parser->no_body_optimizations||!cg.dp_homes||!loop_current||
-       !loop_current->expression||t.pointers||t.base==TY_FLOAT||reg_width(t)!=2||
-       (op!='+'&&op!='&'&&op!='|'&&op!='^')||!indexed_pure(left)||!indexed_pure(right))return 0;
-    /* Prefer an already consumed home from the preceding expression. Its
-     * last emitted read ranks candidates; IR liveness establishes safety. */
-    home=recent_dead_home();
-    for(depth=0;depth<16&&!home;++depth)home=last_use_home_at(left,depth);
-    if(!home)return 0;
-    operand.kind=EX_OBJECT;operand.symbol=home;operand.type=home->type;
-    if(!direct_operand(&operand,t,0,0))return 0;
-    code("; last-use home accumulation: %s\n",home->name);
-    convert_registers(value_type(left->type),t);store_symbol(home);
-    emit_value(right);convert_registers(value_type(right->type),t);
-    register_binary(op,t,&operand);return 1;
-}
-static void forward_rebuilt_record(Function *f)
-{
-    Type t=f->symbol->type;
-    Statement *first,*s,*ret;
-    Expr *result;
-    Symbol *destination,*source=NULL;
-    if(cg.parser->no_copy_selection||cg.parser->no_body_optimizations||
-       !structure_object(t)||t.structure->is_union||volatile_type(t)||f->jump_label_count)return;
-    first=body_single(f->body);
-    for(ret=first;ret&&ret->kind!=ST_RETURN;ret=ret->next){}
-    if(!ret||ret->next||!(result=ret->expression)||result->kind!=EX_ASSIGN||
-       result->right->kind!=EX_OBJECT)return;
-    destination=result->right->symbol;
-    if(destination->owner!=f->id||!destination->scope||!destination->offset)return;
-    s=first;
-    for(Member *m=t.structure->members;m;m=m->next,s=s->next){
-        Expr *copy,*to,*from;
-        while(s!=ret&&(s->kind==ST_EMPTY||(s->kind==ST_BLOCK&&!s->body)))s=s->next;
-        if(s==ret||s->kind!=ST_EXPR||s->inline_callee||
-           !(copy=s->expression)||copy->kind!=EX_ASSIGN||copy->op||
-           m->bit_width||m->type.array)return;
-        to=copy->left;from=copy->right;
-        if(to->kind!=EX_MEMBER||from->kind!=EX_MEMBER||to->op!='.'||from->op!='.'||
-           to->value!=m->offset||from->value!=m->offset||
-           to->left->kind!=EX_OBJECT||to->left->symbol!=destination||
-           from->left->kind!=EX_OBJECT||(source&&source!=from->left->symbol)||
-           !same_type(unqualified_value(from->left->type),unqualified_value(t))||
-           volatile_expression(copy))return;
-        source=from->left->symbol;
-    }
-    while(s!=ret&&(s->kind==ST_EMPTY||(s->kind==ST_BLOCK&&!s->body)))s=s->next;
-    if(s!=ret||!source||source->owner!=f->id||source->scope)return;
-    /* Every field came from the same by-value argument. Return it directly */
-    for(s=first;s!=ret;s=s->next){
-        free_expression(s->expression);s->expression=NULL;s->kind=ST_EMPTY;
-    }
-    result->right->symbol=source;
-    result->right->type=source->type;
-    body_remove_local(f,destination);
-}
-static int literal_record_return(Function *f)
-{
-    Symbol *fn=f->symbol,*record;
-    Type t=fn->type;
-    Statement *parts[9];
-    Expr *result;
-    unsigned base,n=0,size=width(t),expected=0,written=0;
-    uint64_t packed=0;
-    if(cg.parser->no_copy_selection||!structure_object(t)||t.banked||t.structure->is_union||
-       volatile_type(t)||size<2||size>8||(size&1)||statement_inline_markers(f->body)||
-       !reduction_statements(f->body,parts,&n,9)||n<2||parts[n-1]->kind!=ST_RETURN)return 0;
-    result=parts[n-1]->expression;
-    if(!result||result->kind!=EX_ASSIGN||volatile_expression(result->right))return 0;
-    record=direct_memory_object(result->right,&base);
-    if(!record||record->owner!=f->id||!record->scope||!record->offset||
-       base>width(record->type)||size>width(record->type)-base)return 0;
-    for(Member *m=t.structure->members;m;m=m->next){
-        unsigned bytes=width(m->type);
-        if(m->bit_width||m->type.array||!bytes||m->offset+bytes>size)return 0;
-        expected|=((1u<<bytes)-1)<<m->offset;
-    }
-    for(unsigned i=0;i+1<n;++i){
-        Expr *store=parts[i]->expression;
-        unsigned offset,bytes,mask;
-        uint32_t value;
-        uint64_t bits;
-        if(parts[i]->kind!=ST_EXPR||!store||store->kind!=EX_ASSIGN||store->op||
-           store->left->kind!=EX_MEMBER||volatile_expression(store)||
-           fixed_memory_object(store->left,&offset)!=record||offset<base||
-           !integer_constant(store->right,&value))return 0;
-        offset-=base;
-        bytes=width(store->left->type);
-        if(!bytes||bytes>4||offset+bytes>size)return 0;
-        mask=((1u<<bytes)-1)<<offset;
-        if((expected&mask)!=mask)return 0;
-        bits=(UINT64_C(1)<<(8*bytes))-1;
-        packed=(packed&~(bits<<(8*offset)))|((initializer_cast(value,store->left->type)&bits)<<(8*offset));
-        written|=mask;
-    }
-    if(written!=expected)return 0;
-    /* The hidden result pointer is the first stack argument */
-    code(".segment \"%s\"\n.export _%s\n_%s:\n; literal aggregate return\n",
-         code_segment(),fn->asm_name,fn->asm_name);
-    code("    lda %u,s\n    tax\n",3u+cg.parser->long_return);
-    for(unsigned offset=0;offset<size;offset+=2){
-        unsigned word=(unsigned)(packed>>(8*offset))&65535;
-        if(word)code("    lda #$%04X\n    sta a:$%04X,x\n",word,offset);
-        else code("    stz a:$%04X,x\n",offset);
-    }
-    code("    txa\n    rts\n__size_%s = * - _%s\n",fn->asm_name,fn->asm_name);
-    f->frame=0;
-    return 1;
-}
-static void emit_function(Function *f)
-{
-    Symbol *s=f->symbol;cg.function=f;cg.loop_count=0;cg.switch_depth=0;
-    int frame_base,stacked;unsigned possible_registers;
-    size_t start=cg.length;cg.interrupt_scratch=0;cg.dead_index_count=0;cg.omitted_parameter_count=0;
-    memset(cg.frame_map,0,sizeof cg.frame_map);cg.frame_saved=0;
-    forward_rebuilt_record(f);
-    if(!cg.parser->no_body_optimizations&&!cg.parser->no_strength_reduction&&
-       !f->jump_label_count&&!s->interrupt&&!body_asm_statements(f->body)&&
-       !find_symbol(cg.parser,"$basic_asm")&&f->body->kind==ST_BLOCK)
-        body_project_switch_strings(f->body->body);
-    body_drop_unused_homes(f);
-    if(!cg.parser->no_body_optimizations&&!cg.parser->no_strength_reduction&&!cg.parser->no_loop_unroll&&
-       !f->jump_label_count&&!body_asm_statements(f->body))body_drop_empty_loops(f->body);
-    if(f->uses_wide&&!s->interrupt&&!cg.parser->no_body_optimizations&&!cg.parser->no_strength_reduction&&
-       !f->jump_label_count&&!statement_has_case(f->body)&&!body_asm_statements(f->body)){
-        BodyFacts *facts=allocate(sizeof *facts);
-        unsigned slots=f->slots;
-        body_entry_values(f);
-        scalar_refold(f->body);
-        body_flow(f->body,facts);body_clear(facts);
-        body_dead_locals(f);
-        if(body_terminal_return_stores(f->body)){
-            body_flow(f->body,facts);body_clear(facts);
-            body_dead_locals(f);
-        }
-        if(f->slots!=slots){
-            body_flow(f->body,facts);body_clear(facts);
-            body_drop_unused_homes(f);
-        }
-        free(facts);
-        if(narrow_statements(f->body,1))f->uses_wide=function_uses_wide(f);
-    }
-    if(!cg.parser->no_body_optimizations&&!f->symbol->interrupt)
-        body_simplify_branches(f->body,f->symbol->type);
-    /* Unstructured entries prevent path-dependent liveness, but a private
-     * scalar that is never read on any path still needs no frame slot. */
-    if(f->jump_label_count&&!f->uses_wide&&!f->uses_varargs&&!f->aggregate_abi&&!f->uses_bitfields&&
-       !s->interrupt&&!cg.parser->no_body_optimizations&&!cg.parser->no_strength_reduction&&
-       !body_asm_statements(f->body)&&!find_symbol(cg.parser,"$basic_asm"))body_dead_locals(f);
-    copy_prepare(f,f->body);
-    if(f->uses_wide){
-        unsigned i;possible_registers=0;cg.register_homes=cg.register_spills=0;
-        cg.cursor_count=cg.affine_count=cg.divmod_count=cg.divmod_available=cg.lftr_count=0;
-        if(!f->jump_label_count&&!f->uses_varargs&&!f->aggregate_abi&&!f->uses_bitfields)strength_prepare(f);
-        for(i=0;i<(unsigned)(s->param_count<0?0:s->param_count);++i)
-            if(register_parameter(i,s->params[i]))possible_registers|=1u<<i;
-        cg.register_homes=cg.register_spills=possible_registers;
-        stacked=compact_parameter_reservations(f)!=0;
-        f->frame=f->slots;
-        emit_function_frame(f,stacked||f->slots!=0||f->uses_varargs||f->aggregate_abi,possible_registers,start);
-        return;
-    }
-    if(f->jump_label_count||f->uses_varargs||f->aggregate_abi||f->uses_bitfields){
-        /* Labels can enter structured regions from outside. Variadic access
-         * also needs a stable frame so the incoming cursor remains valid. */
-        cg.cursor_count=cg.affine_count=cg.divmod_count=cg.divmod_available=cg.lftr_count=0;
-        if(!f->jump_label_count&&!s->interrupt&&
-           !cg.parser->no_body_optimizations&&!cg.parser->no_strength_reduction&&
-           !statement_has_case(f->body)&&!body_asm_statements(f->body)&&
-           (f->aggregate_abi||f->uses_bitfields||(f->uses_varargs&&body_discarded_loads(f->body)))){
-            BodyFacts *facts=allocate(sizeof *facts);
-            if(f->aggregate_abi)body_dead_locals(f);
-            if(f->uses_bitfields)body_narrow_far_locals(f);
-            body_flow(f->body,facts);body_clear(facts);free(facts);
-            body_dead_locals(f);
-            if(f->aggregate_abi){
-                body_drop_unused_homes(f);
-                if(!cg.parser->no_loop_unroll&&body_drop_empty_loops(f->body))body_dead_locals(f);
-            }
-            if(literal_record_return(f))return;
-        }
-        possible_registers=plan_register_homes(f);
-        stacked=compact_parameter_reservations(f)!=0;
-        f->frame=f->slots+(reg_width(s->type)==4&&f->slots>4?2:0);
-        emit_function_frame(f,stacked||f->slots||f->uses_varargs||f->aggregate_abi,possible_registers,start);
-        return;
-    }
-    if(!s->interrupt&&!volatile_statements(f->body)&&!statement_inline_markers(f->body)&&
-       (word_shift_scan_leaf(f)||range_scan_leaf(f)||guarded_update_leaf(f)||guarded_byte_lookup_leaf(f)||counted_reduction(f)))return;
-    scalar_propagate(f);
-    body_optimize(f);
-    if(!cg.parser->no_body_optimizations&&!cg.parser->no_strength_reduction&&
-       !cg.parser->no_value_reuse&&!s->interrupt&&!body_asm_statements(f->body))
-        body_keep_clamps(f->body);
-    if(!cg.parser->no_body_optimizations&&!cg.parser->no_strength_reduction&&
-       !cg.parser->no_loop_unroll&&!s->interrupt&&!body_asm_statements(f->body))
-        body_split_xor_loops(f->body);
-    loop_fusion_prepare(f);
-    body_shared_selections(f);
-    value_reuse_prepare(f);
-    body_reuse_addresses(f);
-    body_order_homes(f);
-    value_recurrences_prepare(f);
-    body_byte_ranges(f);
-    if (!volatile_statements(f->body)) {
-        forward_return(f, f->body);
-    }
-    f->frame = f->slots ? f->slots + 4 : 0;
-    if(recursive_word_product(f))return;
-    strength_prepare(f);
-    affine_prepare(f);
-    affine_prune_function_cursors(f);
-    affine_compact_indices(f);
-    lftr_prepare(f);
-    divmod_prepare(f);
-    known_prepare(f);
-    dot_products_prepare(f);
-    if(!s->interrupt&&!volatile_statements(f->body)&&(statement_inline_markers(f->body)?word_expression_leaf(f):
-        (far_loop_leaf(f)||predicate_loop_leaf(f)||indexed_loop_leaf(f)||register_loop_leaf(f)||word_leaf(f)||word_expression_leaf(f)||wide_leaf(f)||entry_cursor_leaf(f)||entry_cursor_nested_leaf(f))))return;
-    if(scalar_leaf(f))return;
-    /* Word results can survive stack restoration in caller-clobbered X.
-     * Wide results keep X untouched and need only one saved word for A. */
-    possible_registers=plan_register_homes(f);
-    stacked=compact_parameter_reservations(f)!=0;frame_base=stacked||f->slots!=0;
-    pack_private_frame(f);
-    f->frame=f->slots-cg.frame_saved+(reg_width(s->type)==4&&f->slots>4?2:0);
-    if(cg.lftr_count){
-        /* Speculative index elimination: any read or write of an eliminated
-         * home re-emits the function with every index kept. */
-        Codegen *saved=malloc(sizeof *saved);unsigned frame=f->frame;
-        if(!saved){fputs("out of memory emitting assembly\n",stderr);exit(EXIT_FAILURE);}
-        *saved=cg;cg.lftr_active=1;cg.lftr_failed=0;
-        if(!(frame_base&&dp_homes_function(f,possible_registers)))emit_function_frame(f,frame_base,possible_registers,start);
-#ifdef LFTR_DRYRUN
-        cg.lftr_failed=1;
-#endif
-        if(!cg.lftr_failed){cg.lftr_active=0;free(saved);return;}
-        {char *assembly=cg.assembly;size_t capacity=cg.capacity;
-         cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.length=start;cg.assembly[start]=0;}
-        free(saved);f->frame=frame;cg.lftr_active=0;
-    }
-    if(frame_base&&dp_homes_function(f,possible_registers))return;
-    emit_function_frame(f,frame_base,possible_registers,start);
-}
-static void emit_function_frame(Function *f,int frame_base,unsigned possible_registers,size_t start)
-{
-    Symbol *s=f->symbol;Statement *body=f->body;unsigned i,stack_offset=structure_object(s->type)?2:0;size_t save=0,restore=0;
-    cg.loop_count=0;cg.switch_depth=f->jump_label_count!=0;cg.interrupt_scratch=0;
-    cg.jump_base=cg.label;cg.label+=f->jump_label_count;
-    code(".segment \"%s\"\n.export _%s\n_%s:\n",code_segment(),s->asm_name,s->asm_name);
-    if(s->interrupt){
-        static const char *const names[]={"","nmi","irq","brk","cop"};
-        code(".export __vector_%s := _%s\n",names[s->interrupt],s->asm_name);
-        if(s->interrupt==INT_NMI)code(".export __nmi_entry := _%s\n",s->asm_name);
-        code("    jml interrupt_body_%s\ninterrupt_body_%s:\n",s->asm_name,s->asm_name);
-        code("    rep #$30\n    pha\n    phx\n    phy\n    phd\n    pea $0000\n    pld\n    phb\n    sep #$20\n.a8\n    lda #$7E\n    pha\n    plb\n    rep #$20\n.a16\n");
-        if(f->uses_wide)code("    cld\n");
-        save=cg.length;
-    }
-    if(body->kind==ST_BLOCK)body=body->body;
-    if(!f->uses_wide&&!f->jump_label_count&&!f->uses_varargs&&!f->aggregate_abi&&!f->uses_bitfields&&
-       !s->interrupt&&!volatile_statements(f->body)){
-        entry_guard(f,&body);
-        zero_argument_entry(f);
-        zero_mask_entry(f);
-    }
-    dp_home_parameters(f);
-    if(frame_base){
-        if(f->frame<=4){
-            unsigned offset;Symbol *first=s->param_count>0?leaf_parameter(f,0):NULL;
-            code("    phy\n");
-            /* Push high homes first. A holds parameter 1, X parameter 0;
-             * unused homes may contain arbitrary values until initialized. */
-            for(offset=f->frame;offset;offset-=2)
-                code("    %s\n",first&&(cg.register_spills&1)&&first->offset==offset-1?"phx":"pha");
-            code("    tsc\n    tay\n");
-        }else{
-            if((cg.register_spills&2)&&!dp_parameter_home(f,1)){cg.arithmetic=1;code("    sta z:__arith_rhs\n");}
-            code("    phy\n    tsc\n    sec\n    sbc #$%04X\n    tcs\n    tay\n",f->frame);
-        }
-        for(i=0;i<(unsigned)(s->param_count<0?0:s->param_count);++i){
-            Symbol *v=NULL;unsigned j;
-            for(j=0;j<cg.parser->symbol_count;++j)if(cg.parser->symbols[j].owner==f->id&&cg.parser->symbols[j].scope==0&&
-                !strcmp(cg.parser->symbols[j].name,s->param_names[i])){v=&cg.parser->symbols[j];break;}
-            if(!v)error_at(here(cg.parser),"internal parameter layout failure");
-            if(register_parameter(i,v->type)){
-                if(f->frame>4&&(cg.register_spills&(1u<<i))&&!dp_parameter_home(f,i)){
-                    if(!i)code("    txa\n");else code("    lda z:__arith_rhs\n");code("    sta %s\n",frame_operand(v->offset));
-                }
-            }else{
-                /* Incoming stack arguments already are private writable homes.
-                 * Address them in place instead of copying every word. */
-                v->offset=cg.dp_zero_stack?cg.dp_incoming_base+stack_offset:f->frame+cg.frame_saved+5+stack_offset+cg.parser->long_return;
-                stack_offset+=argument_width(v->type);
-            }
-        }
-    }
-    if(cg.register_homes!=possible_registers||cg.register_spills!=possible_registers)
-        code("; register entry: homes $%02X, spills $%02X\n",cg.register_homes,cg.register_spills);
-    strength_parameters();
-    if(emit_statements(body)&&(s->type.base!=TY_VOID||s->type.pointers||!strcmp(s->name,"main")))
-        code("    lda #0\n    ldx #0\n");
-    code("return_%s = *\n",s->asm_name);
-    if(frame_base){
-        if(f->frame<=4){
-            unsigned offset;
-            for(offset=0;offset<f->frame;offset+=2)code("    %s\n",reg_width(s->type)==4?"ply":"plx");
-            code("    ply\n");
-        }else if(reg_width(s->type)==4)
-            code("    sta %s\n    tya\n    clc\n    adc #$%04X\n    tcs\n    pla\n    ply\n",frame_operand(f->frame-1),f->frame-2);
-        else
-            code("    tax\n    tya\n    clc\n    adc #$%04X\n    tcs\n    txa\n    ply\n",f->frame);
-    }
-    if(s->interrupt){
-        if(s->interrupt==INT_NMI){
-            code("__size_%s = * - _%s\n.segment \"NMI_END\"\n",s->asm_name,s->asm_name);
-        }
-        restore=cg.length;
-        code("    plb\n    pld\n    ply\n    plx\n    pla\n    rti\n");
-        if(s->interrupt!=INT_NMI)code("__size_%s = * - _%s\n",s->asm_name,s->asm_name);
-        insert_interrupt_scratch(start,save,restore);
-    }else{
-        if(!strcmp(s->name,"main"))code("    rtl\n");else code("    rts\n");
-        code("__size_%s = * - _%s\n",s->asm_name,s->asm_name);
-    }
-}
-/* A near call whose next instruction, past label-only lines, is RTS. With
- * nothing between them the callee takes no stack arguments and sees the same
- * registers, flags and workspace; its return then reaches our caller. */
-static int tail_call(const char *p)
-{
-    int adjacent=1;
-    p=strchr(p,'\n');
-    while(p&&*++p){
-        const char *eol=strchr(p,'\n');size_t n=eol?(size_t)(eol-p):strlen(p);
-        if(n==7&&!strncmp(p,"    rts",7))return adjacent&&eol?2:1;
-        adjacent=0;
-        if(!eol||!n||*p==' '||*p==';'||*p=='.')return 0;
-        /* Labels: "name:" or "name = *" */
-        if(!((p[n-1]==':'&&!memchr(p,' ',n))||(n>4&&!strncmp(p+n-4," = *",4))))return 0;
-        p=eol;
-    }
-    return 0;
-}
-/* Materialize copy data after the function's return, in its code segment.
- * Until then the assembly passes only see the copy instructions. */
-static void emit_block_copy_payloads(size_t at)
-{
-    static const char marker[]="; block copy payload ";
-    const char *start=cg.assembly+at,*p=strstr(start,marker);
-    char *payloads;
-    if(!p)return;
-    payloads=allocate(strlen(p)+1);
-    strcpy(payloads,p);
-    for(p=payloads;p;p=strstr(p,marker)){
-        char *bytes;
-        unsigned id=(unsigned)strtoul(p+sizeof marker-1,&bytes,10);
-        code("cg_%s_%u_data:\n",cg.parser->unit,id);
-        for(++bytes;*bytes!='\n';bytes+=2)code("    .byte $%.2s\n",bytes);
-        p=bytes;
-    }
-    free(payloads);
-}
-
-static void near_relocations(void)
-{
-    char *original=cg.assembly;const char *p=original;int tail,frame_visible=0;
-    cg.assembly=NULL;cg.length=cg.capacity=0;
-    while(*p){
-        if(p==original||p[-1]=='\n'){
-            if(!strncmp(p,"; allocation function ",sizeof "; allocation function "-1))frame_visible=0;
-            if(!strncmp(p,frame_address_marker,sizeof frame_address_marker-1))frame_visible=1;
-        }
-        if(!frame_visible&&!cg.parser->long_return&&(p==original||p[-1]=='\n')&&!strncmp(p,"    jsr ",8)&&p[8]!='('&&(tail=tail_call(p))!=0){
-            /* The callee's RTS returns straight to our caller. An adjacent RTS
-             * is unreachable afterwards; one behind a label stays a target. */
-            const char *eol=strchr(p,'\n');
-            code("    jmp%.*s\n",(int)(eol-p-7),p+7);p=eol+1;
-            if(tail==2)p+=8;
-        }
-        else if(cg.parser->long_return&&!strncmp(p,"    rts\n",8)){code("    rtl\n");p+=8;}
-        else if(!strncmp(p,"a:_",3)){
-            const char *end=p+2;
-            while(*end&&*end!=','&&*end!='\n'&&!isspace((unsigned char)*end))++end;
-            code("a:.loword(%.*s)",(int)(end-p-2),p+2);p=end;
-        }else{code("%c",*p);++p;}
-    }
-    free(original);
-}
-/* Instruction mnemonic of an assembly line, or NULL for a comment, label or
- * directive. */
-static const char *reload_op(const char *line,const char *eol)
-{
-    if(eol-line<5||strncmp(line,"    ",4)||line[4]==';'||line[4]==' ')return NULL;
-    return line+4;
-}
-/* N/Z after a removed reload: 1 if they are written before being read, 0 if
- * something may read them (branches, calls, returns, labels, flag pushes). */
-static int reload_flags_dead(const char *p)
-{
-    static const char *const writers[]={"lda","ldx","ldy","cmp","cpx","cpy","and","ora","eor","adc","sbc",
-        "tax","tay","txa","tya","tsx","tdc","tcd","xba","inc","dec","inx","dex","iny","dey","asl","lsr","rol","ror","pla","plx","ply"};
-    static const char *const neutral[]={"sta","stx","sty","stz","pha","phx","phy","phb","phd","clc","sec","nop","tcs","txs"};
-    while(*p){
-        const char *eol=strchr(p,'\n'),*op;unsigned i;
-        if(!eol)return 0;
-        if(*p==';'){p=eol+1;continue;}
-        if(*p=='.'&&(!strncmp(p,".a8\n",4)||!strncmp(p,".a16\n",5)||!strncmp(p,".i8\n",4)||!strncmp(p,".i16\n",5))){p=eol+1;continue;}
-        if(!(op=reload_op(p,eol)))return 0;
-        for(i=0;i<sizeof writers/sizeof *writers;++i)if(!strncmp(op,writers[i],3)&&(op[3]==' '||op[3]=='\n'))return 1;
-        for(i=0;i<sizeof neutral/sizeof *neutral;++i)if(!strncmp(op,neutral[i],3)&&(op[3]==' '||op[3]=='\n'))break;
-        if(i==sizeof neutral/sizeof *neutral){
-            /* REP/SEP leave N/Z alone unless they name those status bits */
-            if((!strncmp(op,"rep #$",6)||!strncmp(op,"sep #$",6))&&!(strtoul(op+6,NULL,16)&0x82u)){p=eol+1;continue;}
-            return 0;
-        }
-        p=eol+1;
-    }
-    return 0;
-}
-/* Drop "lda X" after "sta X" with only comments between: A still holds the
- * stored value. X is restricted to private, non-volatile storage (frame and
- * stack slots, arithmetic scratch) and the load's N/Z must be dead. */
-static void drop_reloads(size_t at)
-{
-    char *p=cg.assembly+at,*w=p;
-    while(*p){
-        char *eol=strchr(p,'\n'),*next,*q;size_t n;
-        if(!eol)break;
-        n=(size_t)(eol-p);
-        if(n>8&&!strncmp(p,"    sta ",8)&&
-           ((n>10&&!strncmp(p+n-2,",y",2)&&!strncmp(p+8,"a:$",3))||!strncmp(p+n-2,",s",2)||!strncmp(p+8,"z:__arith_",10))){
-            q=eol+1;
-            while(*q==';'&&(next=strchr(q,'\n')))q=next+1;
-            next=strchr(q,'\n');
-            if(next&&(size_t)(next-q)==n&&!strncmp(q,"    lda ",8)&&!strncmp(q+8,p+8,n-8)&&reload_flags_dead(next+1)){
-                /* Keep the store and the comments; skip the load */
-                size_t keep=(size_t)(q-p);memmove(w,p,keep);w+=keep;p=next+1;continue;
-            }
-        }
-        memmove(w,p,n+1);w+=n+1;p=eol+1;
-    }
-    {size_t rest=strlen(p);memmove(w,p,rest+1);w+=rest;}
-    cg.length=(size_t)(w-cg.assembly);
-}
-static int op_is(const char *op,const char *name){return !strncmp(op,name,3)&&(op[3]==' '||op[3]=='\n');}
-/* Accumulator effect of one instruction inside a PHA/PLA window: 0 leaves A
- * alone, 1 overwrites A, -1 is not allowed in a window (stack, control,
- * width or block-move effects). */
-static int window_effect(const char *op,const char *end)
-{
-    static const char *const keep[]={"ldx","ldy","stx","sty","sta","stz","tax","tay","txy","tyx","inx","dex","iny","dey","cpx","cpy","cmp","clc","sec","bit"};
-    static const char *const write[]={"lda","txa","tya","adc","sbc","and","ora","eor","xba"};
-    static const char *const shifts[]={"asl","lsr","rol","ror","inc","dec"};
-    const char *comma;unsigned i;
-    for(comma=op;comma<end;){
-        comma=memchr(comma,',',(size_t)(end-comma));
-        if(!comma)break;
-        if(++comma<end&&*comma=='s')return -1;
-    }
-    for(i=0;i<sizeof keep/sizeof *keep;++i)if(op_is(op,keep[i]))return 0;
-    for(i=0;i<sizeof write/sizeof *write;++i)if(op_is(op,write[i]))return 1;
-    for(i=0;i<sizeof shifts/sizeof *shifts;++i)if(op_is(op,shifts[i]))return op[3]=='\n'||!strncmp(op+3," a\n",3);
-    return -1;
-}
-/* Remove PHA ... PLA when the window cannot observe the stack and either
- * preserves A or A is overwritten (without being read) right after PLA. The
- * PLA's N/Z must be dead too; calls count as overwriting them because no
- * callee reads its entry flags. */
-static void drop_push_pairs(size_t at)
-{
-    char *p=cg.assembly+at,*w=p;
-    while(*p){
-        char *eol=strchr(p,'\n');
-        if(!eol)break;
-        if(!strncmp(p,"    pha\n",8)){
-            char *q=eol+1,*pull=NULL,*after;int writes=0,ok=1;
-            while(*q&&ok){
-                char *end=strchr(q,'\n');const char *op;int effect;
-                if(!end){ok=0;break;}
-                if(*q==';'){q=end+1;continue;}
-                if(!(op=reload_op(q,end))){ok=0;break;}
-                if(!strncmp(q,"    pla\n",8)){pull=q;break;}
-                effect=window_effect(op,end);
-                if(effect<0)ok=0;else writes|=effect;
-                q=end+1;
-            }
-            if(ok&&pull){
-                const char *next=pull+8,*op=NULL;
-                while(*next==';'){const char *end=strchr(next,'\n');if(!end)break;next=end+1;}
-                {const char *end=strchr(next,'\n');if(end)op=reload_op(next,end);}
-                after=(char*)next;
-                if(op&&(op_is(op,"jsr")||op_is(op,"jsl"))&&!writes)ok=1;
-                else if(op&&(op_is(op,"lda")||op_is(op,"txa")||op_is(op,"tya")||op_is(op,"tdc")||op_is(op,"tsc")||op_is(op,"pla")))
-                    ok=1;
-                else ok=!writes&&reload_flags_dead(after);
-                if(ok){
-                    size_t keep=(size_t)(pull-(eol+1));
-                    memmove(w,eol+1,keep);w+=keep;p=pull+8;continue;
-                }
-            }
-        }
-        {size_t n=(size_t)(eol-p)+1;memmove(w,p,n);w+=n;p=eol+1;}
-    }
-    {size_t rest=strlen(p);memmove(w,p,rest+1);w+=rest;}
-    cg.length=(size_t)(w-cg.assembly);
-}
-static const char *skip_comments(const char *p)
-{
-    while(*p==';'){const char *end=strchr(p,'\n');if(!end)break;p=end+1;}
-    return p;
-}
-/* After "rep #$20\n.a16\n" at p: the end of "lda #imm / sep #$20 / .a8 /
- * byte stores / rep #$20 / .a16" (the next 16-bit point), or NULL. */
-static const char *byte_store_group(const char *p)
-{
-    const char *q=skip_comments(p);int stores=0;
-    if(strncmp(q,"    lda #$",10)||!isxdigit((unsigned char)q[10]))return NULL;
-    q=strchr(q,'\n');if(!q)return NULL;++q;
-    if (strncmp(q, "    sep #$20\n.a8\n", 17)) {
-        return NULL;
-    }
-    q += 17;
-    for(;;){
-        q=skip_comments(q);
-        if(!strncmp(q,"    sta ",8)||!strncmp(q,"    stz ",8)){q=strchr(q,'\n');if(!q)return NULL;++q;++stores;continue;}
-        break;
-    }
-    if(!stores||strncmp(q,"    rep #$20\n.a16\n",18))return NULL;
-    return q+18;
-}
-/* A merge leaves A's high byte and N/Z different, so each group must end at a
- * full overwrite of A or at another mergeable group. */
-static int byte_group_mergeable(const char *p)
-{
-    const char *end=byte_store_group(p),*op,*eol;
-    if(!end)return 0;
-    /* A following group starts with a word LDA. Its own merge is checked
-     * separately, so an unsafe final group can still stay in word mode. */
-    if(byte_store_group(end))return 1;
-    do{
-        end=skip_comments(end);eol=strchr(end,'\n');
-        if(!eol||!(op=reload_op(end,eol)))return 0;
-        end=eol+1;
-    }while(op_is(op,"pea")||op_is(op,"pei"));
-    return op_is(op,"pla")||op_is(op,"txa")||op_is(op,"tya")||op_is(op,"tdc")||op_is(op,"tsc")||op_is(op,"lda");
-}
-/* Keep consecutive constant byte stores in one 8-bit region */
-static void merge_byte_stores(size_t at)
-{
-    char *p=cg.assembly+at,*w=p;int store=0;
-    while(*p){
-        char *eol=strchr(p,'\n');
-        if(!eol)break;
-        if(store&&!strncmp(p,"    rep #$20\n.a16\n",18)&&byte_group_mergeable(p+18)){
-            char *q=p+18,*imm;size_t n;
-            /* Comments, then the immediate narrowed to its stored byte */
-            imm=(char*)skip_comments(q);n=(size_t)(imm-q);memmove(w,q,n);w+=n;
-            {char *line=strchr(imm,'\n');unsigned long v=strtoul(imm+10,NULL,16);
-             char buffer[24];int k=snprintf(buffer,sizeof buffer,"    lda #$%02lX\n",v&0xFFu);
-             memcpy(w,buffer,(size_t)k);w+=k;p=line+1+17;}
-            continue;
-        }
-        /* Set at .a8; kept by stores and comments; cleared by anything else */
-        if(!strncmp(p,".a8\n",4))store=1;
-        else if(strncmp(p,"    sta ",8)&&strncmp(p,"    stz ",8)&&*p!=';')store=0;
-        {size_t n=(size_t)(eol-p)+1;memmove(w,p,n);w+=n;p=eol+1;}
-    }
-    {size_t rest=strlen(p);memmove(w,p,rest+1);w+=rest;}
-    cg.length=(size_t)(w-cg.assembly);
-}
-#include "assembly_lines.inc"
-/* Y-frame to stack-relative conversion of one finished function */
-/* edit: 1 delete, 2 TYA->TSC, 3 adjusted N,s, 4 LDX via A before a load,
- * 5 LDX moved to its carry line (1 + its index), the start of the A run. */
-typedef struct { const char *text; size_t length; const char *op; int label, depth, edit, offset, m8, x8, carry; } FrameLine;
-/* Instructions that only compute A from A and non-X operands */
-static int frame_a_only(const FrameLine *l)
-{
-    static const char *const ops[]={"and","ora","eor","adc","sbc","clc","sec","cmp"};
-    static const char *const shifts[]={"asl","lsr","rol","ror","inc","dec"};
-    const char *comma=strstr(l->op,",x");unsigned i;
-    if(l->m8||(comma&&comma<l->text+l->length))return 0;
-    for(i=0;i<sizeof ops/sizeof *ops;++i)if(op_is(l->op,ops[i]))return 1;
-    for(i=0;i<sizeof shifts/sizeof *shifts;++i)if(op_is(l->op,shifts[i]))return l->op[3]=='\n'||l->length==9;
-    return 0;
-}
-static int frame_line_is(const FrameLine *l,const char *text){size_t n=strlen(text);return l->op&&l->length==n+4&&!strncmp(l->op,text,n);}
-/* Byte change of S, or 99 when the instruction's stack effect is unknown */
-static int frame_stack_delta(const FrameLine *l)
-{
-    const char *op=l->op;
-    if(op_is(op,"tcs")||op_is(op,"txs")||op_is(op,"mvn")||op_is(op,"mvp")||op_is(op,"rti"))return 99;
-    return assembly_stack_bytes(op,l->m8,l->x8);
-}
-static int frame_y_use(const FrameLine *l)
-{
-    static const char *const users[]={"ldy","sty","cpy","iny","dey","tay","tya","tyx","txy","phy","ply","tsx","mvn","mvp"};
-    unsigned i;const char *comma;
-    for(i=0;i<sizeof users/sizeof *users;++i)if(op_is(l->op,users[i]))return 1;
-    comma=strstr(l->op,",y");
-    return comma&&comma<l->text+l->length;
-}
-static int frame_operand_at(const FrameLine *l,unsigned *n,size_t *at,size_t *span)
-{
-    const char *p=strstr(l->op,"a:$"),*end=l->text+l->length;char *stop;
-    if(!p||p>end)return 0;
-    *n=(unsigned)strtoul(p+3,&stop,16);
-    if(stop+2!=end||stop[0]!=','||stop[1]!='y'||stop-p!=7)return 0;
-    *at=(size_t)(p-l->text);*span=9;return 1;
-}
-/* The neighbouring instruction past comments, or -1 at a label, directive or
- * the edge of the function. */
-static int frame_instruction(const FrameLine *lines,unsigned count,unsigned k,int direction)
-{
-    unsigned i=k;
-    for(;;){
-        if(direction<0){if(!i)return -1;--i;}else if(++i>=count)return -1;
-        if(!lines[i].length)return -1;
-        if(lines[i].text[0]==';')continue;
-        return lines[i].op?(int)i:-1;
-    }
-}
-static int stack_frames(Function *f,size_t at)
-{
-    char *text;FrameLine *lines;unsigned count=0,i,frame=0,start=0,base_line=0,*work,top=0;size_t length=cg.length-at;
-    const char *p;int m8=0,x8=0,ok=1,prologue=-1,large=0,base=0,keep_y=0,unreachable=0;
-    AssemblyLabels labels={0};unsigned label_count=0;
-    if(f->symbol->interrupt||cg.parser->no_stack_frames)return 0;
-    text=malloc(length+1);lines=malloc((length/2+2)*sizeof *lines);work=malloc((length/2+2)*sizeof *work);
-    if(!text||!lines||!work){fputs("out of memory emitting assembly\n",stderr);exit(EXIT_FAILURE);}
-    memcpy(text,cg.assembly+at,length+1);
-    for(p=text;*p;){
-        const char *eol=strchr(p,'\n');FrameLine *l=&lines[count++];
-        if(!eol)eol=p+strlen(p);
-        memset(l,0,sizeof *l);l->text=p;l->length=(size_t)(eol-p);l->depth=-1;l->offset=-1;
-        l->label=assembly_decode(p,l->length,&m8,&x8,&l->op);
-        l->m8=m8;l->x8=x8;if(l->label)++label_count;
-        p=*eol?eol+1:eol;
-    }
-    /* Exactly one prologue: PHY, then pushes and TSC/TAY, or a TCS frame */
-    for(i=0;i<count&&ok;++i)if(lines[i].op&&frame_line_is(&lines[i],"phy")){
-        unsigned j=i+1,pushes=0;
-        /* Later PHYs are Y windows, checked while walking */
-        if(prologue>=0)continue;
-        while(j<count&&(frame_line_is(&lines[j],"pha")||frame_line_is(&lines[j],"phx"))){++pushes;++j;}
-        if(j+1<count&&frame_line_is(&lines[j],"tsc")&&frame_line_is(&lines[j+1],"tay")){
-            prologue=(int)i;frame=pushes*2;lines[i].edit=1;lines[j].edit=1;lines[j+1].edit=1;base_line=j+1;
-        }else if(!pushes&&j+4<count&&frame_line_is(&lines[j],"tsc")&&frame_line_is(&lines[j+1],"sec")&&
-                 lines[j+2].op&&!strncmp(lines[j+2].op,"sbc #$",6)&&frame_line_is(&lines[j+3],"tcs")&&frame_line_is(&lines[j+4],"tay")){
-            prologue=(int)i;frame=(unsigned)strtoul(lines[j+2].op+6,NULL,16);large=1;
-            lines[i].edit=1;lines[j+4].edit=1;base_line=j+4;
-        }else{
-            /* Pushes interleaved with straight-line parameter setup: every
-             * word pushed before TSC/TAY is a frame word. */
-            for(j=i+1,pushes=0;j+1<count;++j){
-                const FrameLine *l=&lines[j];
-                if(!l->op){if(l->label||(l->length&&l->text[0]=='.'))break;continue;}
-                if(frame_line_is(l,"tsc")&&frame_line_is(&lines[j+1],"tay"))break;
-                if(l->m8||l->x8||frame_y_use(l))break;
-                if(frame_line_is(l,"pha")||frame_line_is(l,"phx")||!strncmp(l->op,"pea ",4)){pushes+=2;continue;}
-                if (frame_stack_delta(l) || op_is(l->op, "jsr") || op_is(l->op, "jsl") ||
-                    op_is(l->op, "jmp") || op_is(l->op, "rts") ||
-                    (l->op[0] == 'b' && !op_is(l->op, "bit"))) {
-                    break;
-                }
-            }
-            if(j+1<count&&frame_line_is(&lines[j],"tsc")&&frame_line_is(&lines[j+1],"tay")&&pushes){
-                prologue=(int)i;frame=pushes;lines[i].edit=1;lines[j].edit=1;lines[j+1].edit=1;base_line=j+1;
-            }else ok=0;
-        }
-    }
-    if(prologue<0)ok=0;
-    if(ok&&lines[prologue].x8)ok=0;
-    /* Y windows: "phy / ldy #k ... [ptr],y ... ply" around far accesses. A
-     * converted frame leaves Y free, so the windows go and the caller's Y is
-     * saved once by the prologue's PHY and restored by the final PLY. */
-    for(i=0;ok&&i<count;++i)if(i!=(unsigned)prologue&&frame_line_is(&lines[i],"phy"))keep_y=1;
-    if(keep_y)lines[prologue].edit=6;
-    /* Walk every path from entry. A state is the push depth from entry times
-     * two, plus one while the saved Y (removed below) is on the stack. */
-    if(ok){
-        assembly_labels_init(&labels,label_count);
-        for(i=0;i<count;++i)if(lines[i].label)assembly_label_add(&labels,lines[i].text,lines[i].length,i);
-        lines[0].depth=0;work[top++]=0;
-    }
-    while(ok&&top){
-        unsigned k=work[--top],first=k;int state=lines[k].depth,d=state>>2,win=(state>>1)&1,active=state&1;
-        for(;k<count&&ok;++k){
-            FrameLine *l=&lines[k];int delta,target=-1,ends=0,conditional=0;
-            if(k!=first&&l->depth>=0){if(l->depth!=((d<<2)|(win<<1)|active))ok=0;break;}
-            l->depth=((d<<2)|(win<<1)|active);
-            if(!l->op)continue;
-            if(k==(unsigned)prologue){d+=2;active=1;continue;}
-            if(win){
-                /* Inside a window Y is an index: only these uses, and no
-                 * frame or stack-relative operand. */
-                const char *end=l->text+l->length;
-                if(frame_line_is(l,"ply")){l->edit=1;d-=2;win=0;continue;}
-                if(frame_y_use(l)){
-                    if(op_is(l->op,"ldy")||op_is(l->op,"iny")||op_is(l->op,"dey")||op_is(l->op,"txy")||
-                       (l->length>3&&(!strncmp(end-3,"],y",3)||!strncmp(end-3,"),y",3)))){l->edit=6;continue;}
-                    ok=0;break;
-                }
-                if(l->length>2&&end[-2]==','&&end[-1]=='s'){ok=0;break;}
-                if(op_is(l->op,"rts")||op_is(l->op,"rtl")){ok=0;break;}
-            }else if(keep_y&&frame_line_is(l,"phy")){
-                if(!active){ok=0;break;}
-                l->edit=1;d+=2;win=1;continue;
-            }
-            if(l->edit&&k!=base_line){d+=frame_stack_delta(l);continue;}
-            if(k==base_line){
-                if(large)d+=(int)frame;
-                base=d;continue;
-            }
-            if(large&&frame_line_is(l,"tcs")&&k==base_line-1)continue;
-            if(frame_line_is(l,"tya")){
-                /* Large-frame teardown: TYA is S at the frame base, then
-                 * CLC/ADC/TCS releases the frame. */
-                if(d!=base||!active||k+3>=count||!frame_line_is(&lines[k+1],"clc")||!lines[k+2].op||
-                   strncmp(lines[k+2].op,"adc #$",6)||!frame_line_is(&lines[k+3],"tcs")){ok=0;break;}
-                l->edit=2;lines[k+1].depth=lines[k+2].depth=((d<<2)|(win<<1)|active);
-                d-=(int)strtoul(lines[k+2].op+6,NULL,16);k+=3;lines[k].depth=((d<<2)|(win<<1)|active);continue;
-            }
-            if(frame_line_is(l,"ply")){
-                if(!active||d!=2){ok=0;break;}
-                l->edit=keep_y?6:1;
-                d=0;active=0;continue;
-            }
-            if(frame_y_use(l)){
-                unsigned n;size_t pos,span;
-                /* Only these instructions have a stack-relative mode. LDX
-                 * has none; it goes through A where A and N/Z are dead. */
-                if(op_is(l->op,"ldx")&&!l->m8&&!l->x8){
-                    int before=frame_instruction(lines,count,k,-1),after=frame_instruction(lines,count,k,1);
-                    while(after>=0&&(frame_line_is(&lines[after],"inx")||frame_line_is(&lines[after],"dex")))
-                        after=frame_instruction(lines,count,(unsigned)after,1);
-                    if(after>=0&&lines[after].op&&op_is(lines[after].op,"lda")&&!lines[after].m8)l->edit=4;
-                    else if(after>=0&&(op_is(lines[after].op,"jsr")||op_is(lines[after].op,"jsl"))){
-                        /* Before a call (which reads no flags), load X ahead of
-                         * the run of A-only instructions that produced A. */
-                        while(before>=0&&frame_a_only(&lines[before]))before=frame_instruction(lines,count,(unsigned)before,-1);
-                        if(before<0||!op_is(lines[before].op,"lda")||lines[before].m8||lines[before].carry||
-                           (strstr(lines[before].op,",x")&&strstr(lines[before].op,",x")<lines[before].text+lines[before].length)){ok=0;break;}
-                        l->edit=5;lines[before].carry=(int)k+1;
-                    }else{ok=0;break;}
-                }else if(!(op_is(l->op,"lda")||op_is(l->op,"sta")||op_is(l->op,"adc")||op_is(l->op,"sbc")||op_is(l->op,"and")||
-                     op_is(l->op,"ora")||op_is(l->op,"eor")||op_is(l->op,"cmp"))){ok=0;break;}
-                if(!active||!frame_operand_at(l,&n,&pos,&span)||d<base||!base){ok=0;break;}
-                if(n>frame&&n<=frame+2){ok=0;break;}
-                l->offset=(int)(keep_y||n<=frame?n:n-2)+(d-base);
-                if(l->offset>255){ok=0;break;}
-                continue;
-            }
-            if(active){
-                /* An existing N,s operand above the removed slot moves down */
-                const char *end=l->text+l->length;
-                if(l->length>2&&end[-2]==','&&end[-1]=='s'){
-                    const char *q=end-2;unsigned n;
-                    while(q>l->op&&isdigit((unsigned char)q[-1]))--q;
-                    if(q==end-2||q[-1]!=' '){ok=0;break;}
-                    n=(unsigned)strtoul(q,NULL,10);
-                    if(keep_y)l->offset=(int)n;
-                    else if((int)n>d)l->offset=(int)n-2;
-                    else if((int)n>d-2){ok=0;break;}
-                    else l->offset=(int)n;
-                    l->edit=3;
-                }
-            }
-            if(frame_line_is(l,"tsc")&&k+3<count&&frame_line_is(&lines[k+1],"clc")&&lines[k+2].op&&
-               !strncmp(lines[k+2].op,"adc #$",6)&&frame_line_is(&lines[k+3],"tcs")){
-                lines[k+1].depth=lines[k+2].depth=d;
-                d-=(int)strtoul(lines[k+2].op+6,NULL,16);k+=3;lines[k].depth=d;continue;
-            }
-            delta=frame_stack_delta(l);
-            if(delta==99){ok=0;break;}
-            d+=delta;
-            if(d<0){ok=0;break;}
-            if(op_is(l->op,"rts")||op_is(l->op,"rtl")){if(d){ok=0;}ends=1;}
-            else if(op_is(l->op,"jml")||op_is(l->op,"brk")||op_is(l->op,"cop")||op_is(l->op,"stp"))ends=1;
-            else if(op_is(l->op,"jmp")||op_is(l->op,"bra")||op_is(l->op,"brl")||
-                    (l->op[0]=='b'&&(op_is(l->op,"bcc")||op_is(l->op,"bcs")||op_is(l->op,"beq")||op_is(l->op,"bne")||
-                     op_is(l->op,"bmi")||op_is(l->op,"bpl")||op_is(l->op,"bvc")||op_is(l->op,"bvs")))){
-                const char *name=l->op+4;size_t n=(size_t)(l->text+l->length-name);
-                conditional=l->op[0]=='b'&&!op_is(l->op,"bra")&&!op_is(l->op,"brl");
-                if(*name=='('||*name=='['){ok=0;break;}
-                target=assembly_label_target(&labels,k,name,n);
-                if(target<0){
-                    /* A transfer out of the function is a tail call: frame gone */
-                    if(conditional||d){ok=0;break;}
-                    ends=1;
-                }
-            }
-            if(target>=0){
-                if(lines[target].depth<0){lines[target].depth=((d<<2)|(win<<1)|active);work[top++]=(unsigned)target;}
-                else if(lines[target].depth!=((d<<2)|(win<<1)|active)){ok=0;break;}
-                if(!conditional)break;
-            }
-            if(ends)break;
-        }
-    }
-    /* Unreachable frame references must be pruned before removing Y */
-    for(i=0;ok&&i<count;++i)if(lines[i].op&&frame_y_use(&lines[i])&&!lines[i].edit&&lines[i].offset<0&&lines[i].depth>=0)ok=0;
-    for(i=0;ok&&i<count;++i)if(lines[i].op&&frame_y_use(&lines[i])&&lines[i].depth<0){ok=0;unreachable=1;}
-    if(ok){
-        const FrameLine *previous=NULL;
-        cg.length=at;cg.assembly[at]=0;
-        for(i=0;i<count;++i){
-            FrameLine *l=&lines[i];
-            if(l->edit==1||l->edit==5)continue;
-            if(l->edit==4){code("    lda %u,s\n    tax\n",(unsigned)l->offset);previous=NULL;continue;}
-            /* An LDX before a call moves ahead of the run that produced A */
-            if(l->carry){code("    lda %u,s\n    tax\n",(unsigned)lines[l->carry-1].offset);previous=NULL;}
-            if(l->edit==2){code("    tsc\n");previous=l;continue;}
-            if(l->edit==3){
-                const char *q=l->text+l->length-2;
-                while(isdigit((unsigned char)q[-1]))--q;
-                code("%.*s%u,s\n",(int)(q-l->text),l->text,(unsigned)l->offset);previous=l;continue;
-            }
-            if(l->offset>=0){unsigned n;size_t pos,span;frame_operand_at(l,&n,&pos,&span);
-                /* Just after a 16-bit PHX, 1,s is X itself: TXA gives the same
-                 * A and N/Z without the stack read. */
-                if(l->offset==1&&pos==4&&!strncmp(l->op,"lda ",4)&&!l->m8&&!l->x8&&previous&&frame_line_is(previous,"phx")){
-                    code("    txa\n");previous=l;continue;
-                }
-                code("%.*s%u,s\n",(int)pos,l->text,(unsigned)l->offset);previous=l;continue;}
-            if(l->length||l->text[0])code("%.*s\n",(int)l->length,l->text);
-            if(l->op)previous=l;else if(l->label)previous=NULL;
-        }
-    }
-    (void)start;assembly_labels_free(&labels);free(text);free(lines);free(work);
-    return unreachable;
-}
-#include "line_passes.inc"
-static int lto_provided_function(Parser *p,Symbol *s)
-{
-    Function *f;if(!p->source_lto||!s->function)return 0;
-    for(f=p->functions;f;f=f->next)if(!strcmp(f->symbol->asm_name,s->asm_name)&&!f->symbol->inline_omit&&
-        (!f->symbol->inline_hint||f->symbol->internal||f->symbol->inline_external))return 1;
-    return 0;
-}
-/* Some near lvalues use an immediate object address followed by an indexed
- * memory instruction. Distinguish those from addresses passed to hardware. */
-static Symbol *interrupt_address_base(Expr *e)
-{
-    unsigned offset;
-    if(!e||far_pointer(value_type(e->type)))return NULL;
-    if(e->kind==EX_CAST)return interrupt_address_base(e->left);
-    if(e->kind==EX_BINARY&&(e->op=='+'||e->op=='-'))
-        return interrupt_address_base(value_type(e->left->type).pointers?e->left:e->right);
-    return near_object_address(e,&offset);
-}
-
-static void interrupt_lvalues(Expr *e,int access)
-{
-    Symbol *s=NULL;unsigned i,offset;
-    if(!e)return;
-    if(access){
-        if(e->kind==EX_OBJECT&&!e->type.array)s=e->symbol;
-        if(e->kind==EX_DEREF)s=interrupt_address_base(e->left);
-        if(e->kind==EX_MEMBER&&!e->type.array){
-            int pointer;Expr *root=member_root(e,&offset,&pointer);
-            if(pointer)s=interrupt_address_base(root);
-            else if(root->kind==EX_DEREF)s=interrupt_address_base(root->left);
-            else if(root->kind==EX_OBJECT)s=root->symbol;
-        }
-        if(s&&!s->owner&&!s->function&&!s->dpage&&!s->type.banked)
-            code("; interrupt lvalue _%s\n",s->asm_name);
-    }
-    interrupt_lvalues(e->left,e->kind!=EX_ADDRESS&&(e->kind!=EX_MEMBER||e->op==TOK_ARROW));
-    interrupt_lvalues(e->right,1);
-    interrupt_lvalues(e->third,1);
-    for(i=0;i<e->arg_count;++i)interrupt_lvalues(e->args[i],1);
-}
-
-static void interrupt_statement_lvalues(Statement *s)
-{
-    for(;s;s=s->next){
-        interrupt_lvalues(s->expression,1);
-        interrupt_lvalues(s->step,1);
-        interrupt_statement_lvalues(s->initial);
-        interrupt_statement_lvalues(s->body);
-        interrupt_statement_lvalues(s->alternate);
-    }
-}
-
-/* Keep unsupported wide value uses out of 32-bit optimizers until the full
- * eight-byte ABI and general expression lowering are implemented. */
-static int validate_wide_expression(Expr *e)
-{
-    unsigned i;int used=0;if(!e)return 0;
-    if(e->kind==EX_ADDRESS&&e->left){
-        if(e->left->kind==EX_OBJECT)return 0;
-        if(e->left->kind==EX_DEREF||e->left->kind==EX_MEMBER)
-            return validate_wide_expression(e->left->left);
-    }
-    if(wide_compare_supported(e)||wide_narrow_supported(e)||wide_pointer_supported(e)||wide_call_used(e)||
-       narrow_wide_compound_supported(e))return 1;
-    if(!wide_address_safe(e)&&wide_mixed_narrow_supported(e))return 1;
-    if(!e->type.pointers&&!e->type.array&&e->type.base==TY_DOUBLE)
-        error_at(e->location,"binary64 runtime values are not implemented yet");
-    if(!e->type.pointers&&!e->type.array&&e->type.base==TY_LONGLONG)
-        error_at(e->location,"64-bit runtime values are not implemented yet");
-    used|=validate_wide_expression(e->left);used|=validate_wide_expression(e->right);used|=validate_wide_expression(e->third);
-    for(i=0;i<e->arg_count;++i)used|=validate_wide_expression(e->args[i]);
-    if(used&&(((e->type.pointers||e->type.array)&&!wide_pointer_supported(e)&&
-       !(e->type.array&&e->kind==EX_DEREF&&wide_lvalue_address_supported(e))&&
-       !(e->kind==EX_ASSIGN&&e->left->kind==EX_OBJECT&&
-         ((!e->op&&(wide_pointer_supported(e->right)||wide_narrow_supported(e->right)||
-                    wide_address_expression_supported(e->right)))||
-          ((e->op=='+'||e->op=='-')&&wide_narrow_supported(e->right)))))||
-       (e->kind!=EX_BINARY&&e->kind!=EX_UNARY&&e->kind!=EX_CAST&&e->kind!=EX_CHOOSE&&
-        e->kind!=EX_COMMA&&e->kind!=EX_CALL&&e->kind!=EX_ASSIGN&&
-        !(e->kind==EX_DEREF&&(wide_pointer_supported(e->left)||wide_narrow_supported(e->left)))&&
-        !((e->kind==EX_MEMBER||e->kind==EX_BITFIELD)&&wide_lvalue_address_supported(e)))))
-        error_at(e->location,"64-bit runtime values in this expression are not implemented yet");
-    if(used&&e->kind==EX_ASSIGN&&(!e->left||(e->left->kind!=EX_OBJECT&&
-       ((!wide_lvalue_address_supported(e->left))||
-        (e->op&&!wide_mixed_narrow_supported(e->right))))))
-        error_at(e->location,"64-bit runtime values in this assignment are not implemented yet");
-    return used;
-}
-static int validate_wide_condition(Expr *e)
-{
-    if(!e)return 0;
-    if(wide_compare_supported(e)||(wide_scalar(value_type(e->type))&&wide_value_supported(e)))return 1;
-    if(e->kind==EX_BINARY&&(e->op==TOK_LAND||e->op==TOK_LOR)){
-        int a=validate_wide_condition(e->left),b=validate_wide_condition(e->right);return a||b;
-    }
-    if(e->kind==EX_UNARY&&e->op=='!')return validate_wide_condition(e->left);
-    if(e->kind==EX_CAST&&e->type.is_bool&&!e->type.pointers)return validate_wide_condition(e->left);
-    return validate_wide_expression(e);
-}
-static int wide_discard_supported(Expr *e)
-{
-    if(!e)return 0;
-    if(e->kind==EX_CAST&&!e->type.pointers&&e->type.base==TY_VOID)
-        return wide_discard_supported(e->left);
-    if(e->kind==EX_COMMA&&!e->type.pointers&&e->type.base==TY_VOID&&!wide_address_safe(e))
-        return (wide_address_safe(e->left)||wide_discard_supported(e->left))&&
-            (wide_address_safe(e->right)||wide_discard_supported(e->right));
-    if(wide_scalar(value_type(e->type)))return wide_value_supported(e);
-    return !wide_address_safe(e)&&wide_mixed_narrow_supported(e);
-}
-static int validate_wide_statements(Statement *s,int wide_result)
-{
-    int used=0;
-    for(;s;s=s->next){
-        if(s->kind==ST_EXPR&&(wide_assignment_supported(s->expression)||wide_update_supported(s->expression)||wide_narrow_assignment(s->expression)||wide_discard_supported(s->expression)))used=1;
-        else if(s->kind==ST_SWITCH&&wide_scalar(value_type(s->expression->type))&&wide_value_supported(s->expression))used=1;
-        else if(s->kind==ST_IF||s->kind==ST_WHILE||s->kind==ST_FOR||s->kind==ST_DO)
-            used|=validate_wide_condition(s->expression);
-        else if(s->kind==ST_RETURN&&wide_result&&wide_value_supported(s->expression))used=1;
-        else if((s->kind==ST_EXPR||s->kind==ST_RETURN)&&wide_call_used(s->expression))used=1;
-        else if(s->kind==ST_RETURN&&(wide_compare_supported(s->expression)||wide_narrow_supported(s->expression)))used=1;
-        else used|=validate_wide_expression(s->expression);
-        if(wide_assignment_supported(s->step)||wide_update_supported(s->step)||wide_narrow_assignment(s->step)||wide_discard_supported(s->step))used=1;
-        else used|=validate_wide_expression(s->step);
-        used|=validate_wide_statements(s->body,wide_result);
-        used|=validate_wide_statements(s->alternate,wide_result);
-        used|=validate_wide_statements(s->initial,wide_result);
-    }
-    return used;
-}
-static int function_uses_wide(Function *f)
-{
-    Symbol *s=f->symbol;
-    int signature=wide_scalar(value_type(s->type));
-    for(int i=0;i<s->param_count;++i)
-        if(wide_scalar(value_type(s->params[i])))signature=1;
-    return validate_wide_statements(f->body,wide_scalar(value_type(s->type)))|signature;
-}
-static void resolve_near_memcpy(Parser *p)
-{
-    for(unsigned i=0;i<p->symbol_count;++i){
-        Symbol *s=&p->symbols[i];
-        Type result,source,count;
-        if(!s->function||s->defined||s->internal||s->old_style||s->variadic||s->param_count!=3||
-           strcmp(s->asm_name,"memcpy"))continue;
-        result=value_type(s->type);source=value_type(s->params[1]);count=value_type(s->params[2]);
-        if(result.base==TY_VOID&&result.pointers==1&&!far_pointer(result)&&
-           same_type(result,value_type(s->params[0]))&&source.base==TY_VOID&&source.pointers==1&&
-           !far_pointer(source)&&object_constant(pointed_type(source))&&
-           count.base==TY_INT&&!count.pointers&&count.is_unsigned)
-            strcpy(s->asm_name,"_zicc_memcpy_near");
-    }
-}
-#include "narrow_rodata.inc"
-static void wram_object_segment(Symbol *s,unsigned part)
-{
-    const char *kind=s->wram==WRAM_HIRAM?"H":"X";
-    if(s->initializer)code(".segment \"ZWRAM_D_%s_%u_%s\"\n",kind,part,s->asm_name);
-    else code(".segment \"ZWRAM_B_%s_0_%s\"\n",kind,s->asm_name);
-}
-static void emit_sram_object(Symbol *s)
-{
-    unsigned size=width(s->type),bank=(unsigned)(s->wram-WRAM_SRAM_FIRST);
-    unsigned remaining=size;
-    for(unsigned part=0;remaining;part++){
-        unsigned bytes=remaining<sram_window_size?remaining:sram_window_size;
-        code(".segment \"ZSRAM_%u_%u_%u_%u_%u_%s\"\n",
-             sram_first_bank,sram_window_size,sram_capacity,bank,part,s->asm_name);
-        if(alignment(s->type)==2)code(".align 2\n");
-        if(!part)code("_%s:\n",s->asm_name);
-        code("    .res %u\n",bytes);
-        remaining-=bytes;
-    }
-    if(!s->internal){
-        code(".export _%s\n",s->asm_name);
-        code("__zicc_sram_window_%s = %u\n.export __zicc_sram_window_%s: absolute\n",s->asm_name,bank,s->asm_name);
-        code("__zicc_sram_bound_%s = %u\n.export __zicc_sram_bound_%s: far\n",s->asm_name,s->type.array,s->asm_name);
-        code("__zicc_object_size_%s = %u\n.export __zicc_object_size_%s: far\n",s->asm_name,size,s->asm_name);
-    }
-}
-static int wram_placement_known(Parser *p,Symbol *s)
-{
-    const char *item=p->near_wram_objects;
-    size_t length=strlen(s->asm_name);
-    while(item&&*item){
-        const char *end=strchr(item,',');
-        if((end?(size_t)(end-item):strlen(item))==length&&!memcmp(item,s->asm_name,length))return 1;
-        item=end?end+1:NULL;
-    }
-    return 0;
-}
-static void emit_program(FILE *out,Parser *p)
-{
-    Function *f;String *string;unsigned i,runtime_size=0;
-    memset(&cg,0,sizeof cg);cg.parser=p;
-    for(f=p->functions;f;f=f->next)f->uses_wide=function_uses_wide(f);
-    inline_translation_unit(p);
-    narrow_rodata_struct_arrays(p);
-    resolve_near_memcpy(p);
-    for(i=0;i<p->symbol_count;++i){
-        Symbol *s=&p->symbols[i];
-        if(s->wram&&s->wram<WRAM_SRAM_FIRST&&!s->owner)s->wram_near=wram_placement_known(p,s);
-    }
-    code("; ABI: near7e-far24pad32\n");
-    /* Debugger names describe source objects, never linker bookkeeping */
-    for(i=0;i<p->symbol_count;++i){Symbol *s=&p->symbols[i];
-        if(s->owner||!s->defined)continue;
-        code("; debug symbol _%s %s\n",s->asm_name,
-             s->internal&&!strncmp(s->asm_name,"__lto_",6)?s->asm_name+2:s->asm_name);
-    }
-    code(".setcpu \"65816\"\n.a16\n.i16\n.import main_exit\n");
-    for(i=0;i<p->symbol_count;++i){Symbol *s=&p->symbols[i];if(s->owner||s->function||!s->defined)continue;
-        unsigned size=width(s->type);
-        if(s->wram>=WRAM_SRAM_FIRST){emit_sram_object(s);continue;}
-        if(s->wram)wram_object_segment(s,0);
-        else code(".segment \"%s\"%s\n",s->runtime_ram?"RUNTIME_BSS":s->loram?(s->initializer?"LORAM_DATA":"LORAM_BSS"):s->initializer?(s->type.banked?(s->embedded?"EMBED":"RODATA"):"DATA"):s->dpage?"ZEROPAGE":"BSS",s->dpage?": zeropage":"");
-        if(!s->runtime_ram&&!s->loram&&!s->dpage&&!s->type.banked)
-            code("; allocation object _%s %s\n",s->asm_name,s->internal?"local":"global");
-        if(s->runtime_ram){unsigned a=alignment(s->type);runtime_size=(runtime_size+a-1)&~(a-1);runtime_size+=size;}
-        if(!s->internal)code(".%s _%s\n",s->dpage?"exportzp":"export",s->asm_name);
-        code("__zicc_object_size_%s = %u\n",s->asm_name,size);
-        if(!s->internal)code(".export __zicc_object_size_%s: %s\n",s->asm_name,
-                             size>65536||(s->wram&&size>65535)?"far":"absolute");
-        if(s->wram&&!s->internal){
-            const char *kind=s->wram==WRAM_HIRAM?"H":"X";
-            code("__zicc_wram_%s_%s = %u\n.export __zicc_wram_%s_%s: far\n",
-                 kind,s->asm_name,size,kind,s->asm_name);
-        }
-        if(structure_object(s->type)||((s->initializer||s->runtime_ram||s->wram)&&alignment(s->type)==2))code(".align 2\n");
-        if(s->initializer){
-            unsigned j,part=0,boundary=s->wram?0x4000:size;
-            Relocation *r=s->relocations;code("_%s:\n",s->asm_name);
-            for(j=0;j<size;){
-                /* Keep relocations intact so a manual LoROM link can place
-                 * each copy span in a single physical source window. */
-                if(r&&r->offset==j&&j<boundary&&j+r->size>boundary)boundary=j;
-                if(j==boundary){
-                    wram_object_segment(s,++part);
-                    boundary=j+0x4000;
-                }
-                if(r&&r->offset==j){
-                    char target[160];
-                    if(r->symbol){
-                        snprintf(target,sizeof target,r->symbol->function?(wide_scalar(value_type(r->symbol->type))?"__fnptr64_%s":"__fnptr_%s"):"_%s",r->symbol->asm_name);
-                        r->symbol->used=1;if(r->symbol->function)r->symbol->adapter_used=1;
-                    }
-                    else{snprintf(target,sizeof target,"str_%s_%u",p->unit,r->string->id);r->string->used=1;}
-                    code("    .word .loword(%s%+ld)\n",target,(long)r->addend);
-                    if(r->far_value){
-                        if(r->symbol&&!r->symbol->function&&!r->symbol->type.banked)code("    .byte $7E, $00\n");
-                        else code("    .byte .bankbyte(%s%+ld), $00\n",target,(long)r->addend);
-                    }
-                    if(r->symbol&&!r->symbol->function&&!r->symbol->type.banked&&!r->symbol->dpage)
-                        code(".assert %s%+ld >= $7E0001 .and %s%+ld <= $7EFFFF, lderror, \"near address initializer exceeds bank $7E\"\n",target,(long)r->addend,target,(long)r->addend);
-                    j+=r->size;r=r->next;
-                }else{
-                    unsigned end=boundary<size?boundary:size;
-                    if(r&&end>r->offset)end=r->offset;
-                    if(!s->wram&&size>65536&&s->initializer[j]==0){
-                        unsigned limit=end<j+65535?end:j+65535;
-                        unsigned zero=j+1;
-                        while(zero<limit&&s->initializer[zero]==0)++zero;
-                        if(zero-j>=16){
-                            code("    .res %u, 0\n",zero-j);
-                            j=zero;continue;
-                        }
-                    }
-                    if(end>j+16)end=j+16;
-                    code("    .byte ");for(;j<end;++j){code("$%02X",s->initializer[j]);if(j+1<end)code(",");}code("\n");
-                }
-            }
-        }else if(s->wram&&size>65535){
-            unsigned remaining=size;
-            code("_%s:\n",s->asm_name);
-            while(remaining>65535){code("    .res 65535\n");remaining-=65535;}
-            code("    .res %u\n",remaining);
-        }else code("_%s: .res %u\n",s->asm_name,size);
-        if(s->runtime_ram)code(".assert _%s >= $7F0000 .and _%s + %u <= $800000, lderror, \"runtime object exceeds bank $7F\"\n",s->asm_name,s->asm_name,size);
-    }
-    if(runtime_size)code(".export __runtime_runtime_bss_size := %u\n",runtime_size);
-    static_ipa_prepare(p);
-    bank_prepare();
-    for(f=p->functions;f;f=f->next){
-        size_t at;
-        if(f->symbol->inline_omit||(f->symbol->inline_hint&&!f->symbol->internal&&!f->symbol->inline_external))continue;
-        code("; allocation function %u begin\n",f->id);
-        if(frame_address_visible(f->body))code("%s",frame_address_marker);
-        at=cg.length;emit_function(f);
-        /* These passes currently treat arithmetic scratch as dead at a C
-         * return; an eight-byte result deliberately lives there across it. */
-        if(!f->uses_wide){
-            if(!volatile_statements(f->body))drop_reloads(at);
-            drop_push_pairs(at);merge_byte_stores(at);
-            if(stack_frames(f,at)&&lp_prune_before_frames(f,at))stack_frames(f,at);
-            line_passes(f,at);
-        }else lp_wide_runtime_exit(f,at);
-        /* Summarized last: line passes may give the function workspace words */
-        dp_summarize(f,at);
-        emit_block_copy_payloads(at);
-        if(f->symbol->interrupt)interrupt_statement_lvalues(f->body);
-        code("; allocation function %u end\n",f->id);
-    }
-    bank_emit();
-    emit_near_library();
-    for(i=0;i<p->symbol_count;++i)if(p->symbols[i].adapter_used)
-        code(".import %s%s\n",wide_scalar(value_type(p->symbols[i].type))?"__fnptr64_":"__fnptr_",p->symbols[i].asm_name);
-    for(i=0;i<p->symbol_count;++i){Symbol *s=&p->symbols[i];if(!s->owner&&s->used&&(!s->defined||
-        (s->function&&s->inline_hint&&!s->internal&&!s->inline_external))&&!lto_provided_function(p,s))
-        code(".import%s _%s\n",s->dpage?"zp":"",s->asm_name);}
-    /* A zero-byte segment records an unqualified object reference in the
-     * ca65 object. Manual links can check selected prebuilt members too. */
-    for(i=0;i<p->symbol_count;++i){
-        Symbol *s=&p->symbols[i];
-        if(!s->owner&&!s->function&&!s->defined&&s->used&&!s->wram)
-            code(".segment \"ZICC_WRAM_UNQUAL_%s\"\n",s->asm_name);
-    }
-    for(i=0;i<p->symbol_count;++i){
-        Symbol *s=&p->symbols[i];
-        const char *kind;
-        if(!s->wram||s->wram>=WRAM_SRAM_FIRST||s->owner||(!s->defined&&!s->used))continue;
-        kind=s->wram==WRAM_HIRAM?"H":"X";
-        if(!s->defined){
-            code(".import __zicc_wram_%s_%s: far\n",kind,s->asm_name);
-            if(width(s->type))
-                code(".assert __zicc_wram_%s_%s = %u, lderror, \"conflicting WRAM object extent\"\n",
-                     kind,s->asm_name,width(s->type));
-        }
-        if(s->wram_near){
-            if(!s->defined)
-                code(".assert _%s >= $7E0000 .and _%s + __zicc_wram_%s_%s <= $7F0000, lderror, \"invalid near WRAM placement\"\n",
-                     s->asm_name,s->asm_name,kind,s->asm_name);
-            else
-                code(".assert _%s >= $7E0000 .and _%s + %u <= $7F0000, lderror, \"invalid near WRAM placement\"\n",
-                     s->asm_name,s->asm_name,width(s->type));
-        }
-    }
-    int sram_bounds=0;
-    for(i=0;i<p->symbol_count;++i){
-        Symbol *s=&p->symbols[i];
-        if(s->wram<WRAM_SRAM_FIRST||s->owner||(!s->defined&&!s->used&&!s->placement_used))continue;
-        if(!sram_bounds){
-            code(".import __sram_first_bank, __sram_window_size, __sram_capacity: far\n");
-            code(".assert __sram_first_bank = %u .and __sram_window_size = %u .and __sram_capacity = %u, "
-                 "lderror, \"SRAM declaration was compiled with a different cartridge layout\"\n",
-                 sram_first_bank,sram_window_size,sram_capacity);
-            sram_bounds=1;
-        }
-        if(!s->defined){
-            code(".import __zicc_sram_window_%s: absolute, __zicc_sram_bound_%s: far, __zicc_object_size_%s: far\n",
-                 s->asm_name,s->asm_name,s->asm_name);
-            code(".assert __zicc_sram_window_%s = %u .and __zicc_sram_bound_%s = %u .and __zicc_object_size_%s = %u, "
-                 "lderror, \"conflicting SRAM declaration for %s\"\n",
-                 s->asm_name,(unsigned)(s->wram-WRAM_SRAM_FIRST),s->asm_name,s->type.array,s->asm_name,width(s->type),s->name);
-        }
-    }
-    int dp_bounds=0;
-    for(i=0;i<p->symbol_count;++i){Symbol *s=&p->symbols[i];
-        if(s->owner||!s->dpage||!s->type.pointers||s->type.array||(!s->defined&&!s->used))continue;
-        if(!dp_bounds){code(".import __DP_START__, __DP_SIZE__\n");dp_bounds=1;}
-        code(".assert _%s >= __DP_START__ .and _%s + %u <= __DP_START__ + __DP_SIZE__, lderror, \"__dpage pointer exceeds allocated direct page\"\n",s->asm_name,s->asm_name,width(s->type));
-    }
-    int loram_bounds=0;
-    for(i=0;i<p->symbol_count;++i){Symbol *s=&p->symbols[i];
-        if(s->owner||s->function||!s->loram||(!s->defined&&!s->used))continue;
-        if(!loram_bounds){code(".import __NEAR_START__\n");loram_bounds=1;}
-        if(!s->defined)code(".import __zicc_object_size_%s\n",s->asm_name);
-        code(".assert _%s >= __NEAR_START__ .and _%s + __zicc_object_size_%s <= $7E2000, lderror, \"__loram object %s exceeds available LoRAM\"\n",s->asm_name,s->asm_name,s->asm_name,s->name);
-    }
-    /* Speculative emission and later line passes may remove every workspace
-     * reference. Do not keep an otherwise unused runtime archive member. */
-    if(cg.arithmetic&&(strstr(cg.assembly,"__arith_lhs")||strstr(cg.assembly,"__arith_rhs")))
-        code(".importzp __arith_lhs, __arith_rhs\n");
-    if(strstr(cg.assembly,"__fp_round_mode"))code(".import __fp_round_mode\n");
-    if(strstr(cg.assembly,"a:.loword(__fp_exceptions)"))code(".import __fp_exceptions\n");
-    for(i=0;i<cg.helper_count;++i)code(".import %s\n",cg.helpers[i]);
-    if(cg.require_float_format)
-        code(".import __require_float_format\n.assert __require_float_format <> 0, lderror, \"float formatter is unavailable\"\n");
-    if(cg.require_int64_format)
-        code(".import __require_int64_format\n.assert __require_int64_format <> 0, lderror, \"64-bit integer formatter is unavailable\"\n");
-    code(".segment \"RODATA\"\n");
-    for(string=p->strings;string;string=string->next)if(string->used){
-        /* Literals are read-only and C leaves their sharing unspecified. A
-         * literal that ends another (including an identical one) aliases the
-         * longest such literal, lowest id first; owners emit the bytes. */
-        String *owner=string,*other;size_t j;
-        for(other=p->strings;other;other=other->next)
-            if(other->used&&other!=string&&other->size>=string->size&&
-               !memcmp(other->bytes+other->size-string->size,string->bytes,string->size)&&
-               (other->size>owner->size||(other->size==owner->size&&other->id<owner->id)))owner=other;
-        if(owner!=string){
-            code("str_%s_%u = str_%s_%u+$%04X\n",p->unit,string->id,p->unit,owner->id,(unsigned)(owner->size-string->size));
-            continue;
-        }
-        code("str_%s_%u:\n",p->unit,string->id);
-        for(j=0;j<string->size;++j){if(!(j%16))code("    .byte ");else code(",");code("$%02X",string->bytes[j]);if(j%16==15||j+1==string->size)code("\n");}
-    }
-    near_relocations();
-    if(!relax_assembly(out,cg.assembly,p->unit,!p->no_branch_relaxation))exit(EXIT_FAILURE);
-    free(cg.assembly);
-}
+#include "loop_emit.inc"
+#include "function_emit.inc"
+#include "post_emit.inc"
+#include "program_emit.inc"

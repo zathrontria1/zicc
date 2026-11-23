@@ -4,8 +4,8 @@
  * can tell them from any other write to X. */
 static void bound_mark(void)
 {
-    if(cg.bound_mark_count<sizeof cg.bound_marks/sizeof *cg.bound_marks)cg.bound_marks[cg.bound_mark_count++]=cg.length;
-    else cg.bound_failed=1;
+    if(bound_state.mark_count<sizeof bound_state.marks/sizeof *bound_state.marks)bound_state.marks[bound_state.mark_count++]=cg.length;
+    else bound_state.failed=1;
 }
 static void bound_emit(const char *instruction,const char *operand)
 {
@@ -267,7 +267,7 @@ static void strength_add_base(InductionCursor *c)
     Symbol *s=c->base;s->used=1;
     if(s->type.array){
         if(s->owner){
-            if(cg.dp_homes)cg.dp_failed=1;
+            if(dp_state.homes)dp_state.failed=1;
             cg.arithmetic=1;code("    sta z:__arith_lhs\n    tya\n    clc\n    adc z:__arith_lhs\n");
             strength_adjust(frame_offset(s->offset));
         }else code("    clc\n    adc #.loword(_%s)\n",s->asm_name);
@@ -294,7 +294,7 @@ static void strength_sync(Symbol *index,Expr *rhs)
     if(rhs)strength_affine(rhs,&source,&delta);
     for(i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index){
         InductionCursor *c=&cg.cursors[i],*other=source?strength_find(c->base,source):NULL;
-        if(c==cg.bound)cg.bound_failed=1;
+        if(c==bound_state.cursor)bound_state.failed=1;
         if(other){code("    lda %s\n",frame_operand(other->offset));strength_adjust(delta*c->scale);}
         else if(rhs&&rhs->kind==EX_INT&&rhs->type.base!=TY_FLOAT&&!rhs->type.pointers){
             Expr base={0};base.kind=EX_OBJECT;base.symbol=c->base;base.type=c->base->type;
@@ -326,11 +326,11 @@ static int strength_pointer(Expr *e,int in_x)
 {
     unsigned delta;InductionCursor *c=strength_pointer_plan(e,&delta);
     if(!c)return 0;
-    if(c==cg.bound){
+    if(c==bound_state.cursor){
         /* X already holds the cursor plus the region's single displacement */
-        if(in_x&&delta==cg.bound_delta)return 1;
-        if(!in_x){code("    txa\n");strength_adjust(delta-cg.bound_delta);return 1;}
-        cg.bound_failed=1;
+        if(in_x&&delta==bound_state.delta)return 1;
+        if(!in_x){code("    txa\n");strength_adjust(delta-bound_state.delta);return 1;}
+        bound_state.failed=1;
     }
     if(in_x&&(delta<=3||delta>=0xFFFD)){
         unsigned i,count=delta<=3?delta:0x10000-delta;
@@ -360,7 +360,7 @@ static int strength_update_cursors_only(Expr *e)
     code("; eliminated index %s: cursors only\n",index->name);
     for(i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index){
         InductionCursor *c=&cg.cursors[i];unsigned step=amount*c->scale;
-        if(c==cg.bound){bound_step(step);continue;}
+        if(c==bound_state.cursor){bound_step(step);continue;}
         code("    lda %s\n",frame_operand(c->offset));strength_adjust(step);code("    sta %s\n",frame_operand(c->offset));
     }
     return 1;
@@ -380,7 +380,7 @@ static int strength_update(Expr *e,int preserve)
             code("; eliminated index %s: cursors only\n",index->name);
             for(i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index){
                 InductionCursor *c=&cg.cursors[i];unsigned step=amount*c->scale;
-                if(c==cg.bound){bound_step(step);continue;}
+                if(c==bound_state.cursor){bound_step(step);continue;}
                 code("    lda %s\n",frame_operand(c->offset));strength_adjust(step);code("    sta %s\n",frame_operand(c->offset));
             }
             return 1;
@@ -393,7 +393,7 @@ static int strength_update(Expr *e,int preserve)
                 Symbol *source=e->right->symbol;
                 for(i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index){
                     InductionCursor *c=&cg.cursors[i],*other=strength_find(c->base,source);
-                    if(c==cg.bound)cg.bound_failed=1;
+                    if(c==bound_state.cursor)bound_state.failed=1;
                     if(other)code("    lda %s\n",frame_operand(other->offset));
                     else{load_symbol(source);strength_scale(c->scale,e->right);strength_add_base(c);}
                     code("    sta %s\n",frame_operand(c->offset));
@@ -401,7 +401,7 @@ static int strength_update(Expr *e,int preserve)
             }else strength_sync(index,e->right);
             return 1;
         }
-        cg.lftr_failed=1;
+        lftr_state.failed=1;
     }
     if(is_increment){
         load_symbol(index);if(preserve&&e->kind==EX_POST)code("    pha\n");
@@ -409,7 +409,7 @@ static int strength_update(Expr *e,int preserve)
         if(preserve&&e->kind==EX_PRE)code("    pha\n");
         for(i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index){
             InductionCursor *c=&cg.cursors[i];
-            if(c==cg.bound){bound_step(e->op==TOK_INC?c->scale:0u-c->scale);continue;}
+            if(c==bound_state.cursor){bound_step(e->op==TOK_INC?c->scale:0u-c->scale);continue;}
             code("    lda %s\n",frame_operand(c->offset));
             strength_adjust(e->op==TOK_INC?c->scale:0u-c->scale);code("    sta %s\n",frame_operand(c->offset));
         }
@@ -421,7 +421,7 @@ static int strength_update(Expr *e,int preserve)
         if((e->op=='+'||e->op=='-')&&e->right->kind==EX_INT&&e->right->type.base!=TY_FLOAT){
             for(i=0;i<cg.cursor_count;++i)if(cg.cursors[i].index==index){
                 InductionCursor *c=&cg.cursors[i];unsigned step=e->right->value*c->scale;
-                if(c==cg.bound){bound_step(e->op=='+'?step:0u-step);continue;}
+                if(c==bound_state.cursor){bound_step(e->op=='+'?step:0u-step);continue;}
                 code("    lda %s\n",frame_operand(c->offset));strength_adjust(e->op=='+'?step:0u-step);code("    sta %s\n",frame_operand(c->offset));
             }
         }else strength_sync(index,e->op?NULL:e->right);

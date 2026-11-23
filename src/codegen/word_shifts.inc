@@ -428,7 +428,7 @@ static int variable_word_shift(Expr *left,Expr *right,int op)
             if(signed_right)code("    eor #$0080\n    sec\n    sbc #$0080\n");
             code("    bra :++\n:\n    tax\n    pla\n:\n");
         }
-    }else if(!min_shift&&!bounded_15&&right->kind==EX_OBJECT&&cg.dp_homes&&!cg.stack_leaf&&
+    }else if(!min_shift&&!bounded_15&&right->kind==EX_OBJECT&&dp_state.homes&&!cg.stack_leaf&&
              right->symbol->owner==cg.function->id&&right->symbol->offset&&
              !right->type.array&&width(right->type)==2&&right->symbol!=cg.leaf_count&&
              !strncmp(frame_operand(right->symbol->offset),"z:",2)){
@@ -442,7 +442,7 @@ static int variable_word_shift(Expr *left,Expr *right,int op)
             if(signed_right)code("    eor #$0080\n    sec\n    sbc #$0080\n");
             code("    bra :++\n:\n    tax\n    pla\n:\n");
         }
-    }else if(!min_shift&&bounded_15&&right->kind==EX_OBJECT&&cg.dp_homes&&!cg.stack_leaf&&
+    }else if(!min_shift&&bounded_15&&right->kind==EX_OBJECT&&dp_state.homes&&!cg.stack_leaf&&
              right->symbol->owner==cg.function->id&&right->symbol->offset&&
              !right->type.array&&width(right->type)==2&&right->symbol!=cg.leaf_count&&
              !strncmp(frame_operand(right->symbol->offset),"z:",2)){

@@ -231,7 +231,7 @@ static int word_rows_enabled(void)
     return !(cg.parser->no_indexed_operands||cg.parser->no_body_optimizations||
        cg.parser->no_strength_reduction||cg.stack_leaf||cg.scalar_leaf||
        cg.scalar_first||cg.leaf_count||cg.retained_index||cg.retained_second||
-       cg.affine_active||cg.bound||cg.scan_cursor||cg.dead_index_count||
+       cg.affine_active||bound_state.cursor||cg.scan_cursor||cg.dead_index_count||
        cg.omitted_parameter_count||cg.function->symbol->interrupt);
 }
 
@@ -323,7 +323,7 @@ static Statement *word_row_region(Statement *s)
     guard=fixed?fixed->max_offset>=limit:plan.max!=0;
     slow=++cg.label;done=++cg.label;cg.arithmetic=1;
     if(s->kind==ST_CASE)label(s->case_label);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     code("; retained far/near word rows: %u rows\n    %s ",plan.count,fixed?"ldx":"lda");
     array_operand(plan.destination,0);code("\n");
     /* An indexed near address can carry out of DBR. Check the full row span */
@@ -333,14 +333,14 @@ static Statement *word_row_region(Statement *s)
     }
     row_fast(&plan,fixed);
     if(guard){
-        jump(done);label(slow);cg.divmod_available=0;
+        jump(done);label(slow);divmod_state.available=0;
         if(!row_wrapping_loop(&plan,fixed)){
             if(fixed)fixed->failed=1;
             else for(i=0;i<plan.count;++i)for(j=0;j<plan.rows[i].count;++j)emit_discarded(plan.rows[i].statements[j]);
         }
         label(done);
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return plan.last;
 }
 
@@ -464,7 +464,7 @@ static int emit_word_row_switch(Statement *s,unsigned end)
             label(entry[i]);row_wrap_group(cases,count,i,fixed,end);
         }
     }
-    cg.divmod_available=0;label(end);
+    divmod_state.available=0;label(end);
     return 1;
 }
 
@@ -537,7 +537,7 @@ static Statement *fixed_word_row_region(Statement *s)
     Statement *second=s->next,*region,*next;
     Expr *source,*destination,*source_offset,*destination_offset=NULL;
     FixedWordRows fixed={0};
-    Codegen *saved;
+    CodegenCheckpoint *saved;
     unsigned scale=0,displacement=0,source_uses,destination_uses;
     if(cg.fixed_rows||cg.parser->no_indexed_operands||cg.parser->no_body_optimizations||
        cg.parser->no_strength_reduction||cg.stack_leaf||cg.function->symbol->interrupt||
@@ -559,7 +559,7 @@ static Statement *fixed_word_row_region(Statement *s)
 
     saved=malloc(sizeof *saved);
     if(!saved){fputs("out of memory emitting word rows\n",stderr);exit(EXIT_FAILURE);}
-    *saved=cg;
+    cg_checkpoint_save(saved);
     code("; fixed font and buffer offsets\n");
     emit_value(source_offset);
     code("    sta ");array_operand(fixed.source,0);code("\n");
@@ -573,8 +573,7 @@ static Statement *fixed_word_row_region(Statement *s)
     region->next=next;cg.fixed_rows=NULL;
     if(fixed.failed||fixed.source_uses+1!=source_uses||
        fixed.destination_uses+1!=destination_uses){
-        char *assembly=cg.assembly;size_t capacity=cg.capacity;
-        cg=*saved;cg.assembly=assembly;cg.capacity=capacity;cg.assembly[cg.length]=0;
+        cg_checkpoint_restore_length(saved);
         free(saved);return NULL;
     }
     free(saved);return region;

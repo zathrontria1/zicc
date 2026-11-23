@@ -50,7 +50,7 @@ static int dpage_access(Expr *e,DpageAccess *out)
     if(d.far!=!!e->type.banked||!d.scale)return 0;
     /* Whole-loop/address-cursor selectors own their established address homes.
      * Do not recover an index they deliberately eliminated or bypass a cursor. */
-    if(d.far&&(cg.affine_active||cg.bound||cg.cursor_count||cg.lftr_active||cg.dead_index_count))return 0;
+    if(d.far&&(cg.affine_active||bound_state.cursor||cg.cursor_count||lftr_state.active||cg.dead_index_count))return 0;
     limit=d.width==4?65533:65535;
     if(offset>limit)return 0;
     if(index){
@@ -127,7 +127,7 @@ static int direct_dpage_load(Expr *e)
 static int direct_dpage_store(Expr *e)
 {
     DpageAccess d;
-    if(cg.affine_active||cg.bound||cg.cursor_count||cg.lftr_active||cg.dead_index_count)return 0;
+    if(cg.affine_active||bound_state.cursor||cg.cursor_count||lftr_state.active||cg.dead_index_count)return 0;
     if(e->kind!=EX_ASSIGN||e->op||!dpage_access(e->left,&d)||d.width==4||!home_rhs_pure(e->right))return 0;
     /* Pure index/RHS evaluation cannot change the destination pointer. A
      * single target transfer may alias the pointer itself: address fetch is
@@ -155,8 +155,8 @@ static Expr *post_cursor(Expr *e)
     Expr *update;
     Symbol *s;
     unsigned word;
-    if(!cg.dp_homes||cg.parser->no_direct_dpage||cg.numeric_index||cg.retained_index||
-       cg.scan_cursor||cg.affine_active||cg.bound||cg.lftr_active||
+    if(!dp_state.homes||cg.parser->no_direct_dpage||cg.numeric_index||cg.retained_index||
+       cg.scan_cursor||cg.affine_active||bound_state.cursor||lftr_state.active||
        e->kind!=EX_DEREF||e->type.pointers||e->type.base!=TY_INT||
        width(e->type)!=2||e->type.banked||volatile_expression(e))return NULL;
     update=e->left;
@@ -165,7 +165,7 @@ static Expr *post_cursor(Expr *e)
     s=update->left->symbol;
     if(!s->offset||!(s->offset&1)||!loop_private(s))return NULL;
     word=(s->offset-1)/2;
-    return word<cg.dp_words&&cg.dp_map[word]?update:NULL;
+    return word<dp_state.words&&dp_state.map[word]?update:NULL;
 }
 static const char post_cursor_marker[]="; private post-update word cursor\n";
 static void post_cursor_transfer(Expr *update,const char *instruction)
@@ -216,11 +216,11 @@ static int near_dpage_binary(Expr *left,Expr *right,int op,Type t)
     Symbol *home=pointer->symbol;
     if(home==cg.scan_cursor||home==cg.scalar_first||
        (home->owner?(!mapped_word_home(home)||
-        (cg.dp_zero_stack&&home->offset>=cg.dp_incoming_base)):!home->dpage))return 0;
+        (dp_state.zero_stack&&home->offset>=dp_state.incoming_base)):!home->dpage))return 0;
     convert_registers(value_type(left->type),t);
     if(op=='+'||op=='-')code(op=='+'?"    clc\n":"    sec\n");
     code("    %s (",op=='+'?"adc":op=='-'?"sbc":op=='&'?"and":op=='|'?"ora":"eor");
-    if(home->owner)code("__dp_home_%02u",cg.dp_map[(home->offset-1)/2]-1u);
+    if(home->owner)code("__dp_home_%02u",dp_state.map[(home->offset-1)/2]-1u);
     else code("_%s",home->asm_name);
     code(")\n");
     home->used=1;

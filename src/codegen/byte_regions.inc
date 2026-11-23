@@ -7,7 +7,7 @@ static int byte_region_operand(Expr *e,IndexedOperand *operand,int *indexed)
     *indexed=indexed_operand(e,operand)&&indexed_retained(operand,1);
     if(*indexed)return 1;
     if(e->kind!=EX_OBJECT||!loop_private(e->symbol)||e->symbol==cg.retained_index||e->symbol==cg.retained_second||
-       !cg.dp_homes||!e->symbol->offset||(e->symbol->offset-1)/2>=cg.dp_words||!cg.dp_map[(e->symbol->offset-1)/2])return 0;
+       !dp_state.homes||!e->symbol->offset||(e->symbol->offset-1)/2>=dp_state.words||!dp_state.map[(e->symbol->offset-1)/2])return 0;
     return 1;
 }
 static int byte_region_copy(Expr *e,int emit)

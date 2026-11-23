@@ -34,7 +34,7 @@ static int near_library_call(Expr *e)
     /* Retain the existing argument evaluation order and evaluate each once */
     load_word_pair(left,right);
     near_strcmp_name(name,sizeof name);call_entry(name);s->used=1;cg.near_strcmp=1;cg.arithmetic=1;
-    cg.divmod_available=0;return 1;
+    divmod_state.available=0;return 1;
 }
 
 /* A constant-length copy from a known WRAM bank uses a literal MVN. Its
@@ -76,7 +76,7 @@ static int near_origin_memcpy(Expr *e,int needed)
     if(needed)code("    plx\n    plx\n    plx\n");
     else code("    tsc\n    clc\n    adc #$0006\n    tcs\n");
     label(done);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 

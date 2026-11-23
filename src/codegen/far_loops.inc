@@ -76,7 +76,7 @@ static int far_leaf_plan(Function *f,FarLeafPlan *plan)
     memset(plan,0,sizeof *plan);
     memset(&result,0,sizeof result);
     if(cg.parser->no_register_loops||!strcmp(f->symbol->name,"main")||f->symbol->param_count<0||
-       reg_width(f->symbol->type)!=2||f->symbol->type.base==TY_FLOAT||cg.cursor_count||cg.divmod_count)return 0;
+       reg_width(f->symbol->type)!=2||f->symbol->type.base==TY_FLOAT||cg.cursor_count||divmod_state.count)return 0;
     if(!loop_flatten(f->body,statements,&count))return 0;
     for(i=0;i<count;++i)if(statements[i]->kind==ST_WHILE||statements[i]->kind==ST_FOR){position=i;break;}
     if(position==128||!loop_initializers(statements,position,symbols,values,&n))return 0;

@@ -333,7 +333,7 @@ static int register_loop(Statement *s)
 {
     RegisterLoop loop;unsigned i,j,enter=0,done=0;
     if(!loop_plan(&loop,s)||loop_has_far(&loop))return 0;
-    cg.arithmetic=1;cg.divmod_available=0;
+    cg.arithmetic=1;divmod_state.available=0;
     code("; register loop: X=%s",loop.pointers[0]->name);
     if(loop.pointer_count==2)code(", Y=%s",loop.pointers[1]->name);
     code("; A8, indices16\n");
@@ -376,7 +376,7 @@ static int register_loop(Statement *s)
             code("    %s\n    %s z:__arith_lhs\n",delta>0?"clc":"sec",delta>0?"adc":"sbc");
         store_symbol(loop.counters[i]);
     }
-    cg.divmod_available=0;return 1;
+    divmod_state.available=0;return 1;
 }
 /* Lifetime boundary analysis for leaf functions containing one planned loop.
  * If only a scalar result and final byte stores survive, frame homes and
@@ -451,7 +451,7 @@ static int indexed_loop_leaf(Function *f)
     RegisterLoop loop;unsigned count=0,n=0,initial_count=0,position=128,i,j,saved,done;
     uint32_t result=0;
     if(cg.parser->no_register_loops||!strcmp(f->symbol->name,"main")||f->symbol->param_count<0||
-       reg_width(f->symbol->type)!=2||f->symbol->type.base==TY_FLOAT||cg.cursor_count||cg.divmod_count)return 0;
+       reg_width(f->symbol->type)!=2||f->symbol->type.base==TY_FLOAT||cg.cursor_count||divmod_state.count)return 0;
     for(i=0;i<(unsigned)f->symbol->param_count;++i)if(width(f->symbol->params[i])!=2)return 0;
     if(!loop_flatten(f->body,statements,&count))return 0;
     for(i=0;i<count;++i)if(statements[i]->kind==ST_WHILE||statements[i]->kind==ST_FOR){position=i;break;}
@@ -560,7 +560,7 @@ static int predicate_loop_leaf(Function *f)
     int evaluation=0,reload=0,cached=-1,zero_flags=0;
     if(cg.parser->no_register_loops||!strcmp(f->symbol->name,"main")||f->symbol->param_count<0||
        f->symbol->type.pointers||(f->symbol->type.base!=TY_INT&&f->symbol->type.base!=TY_CHAR)||
-       cg.cursor_count||cg.divmod_count)return 0;
+       cg.cursor_count||divmod_state.count)return 0;
     for(i=0;i<(unsigned)f->symbol->param_count;++i)if(width(f->symbol->params[i])!=2)return 0;
     if(!loop_flatten(f->body,statements,&count))return 0;
     for(i=0;i<count;++i)if(statements[i]->kind==ST_WHILE||statements[i]->kind==ST_FOR){position=i;break;}
@@ -628,7 +628,7 @@ static int register_loop_leaf(Function *f)
     int return_pointer=-1,remaining_parameter=-1;unsigned remaining_value=0;int parameter;
     uint32_t value=0;int fast_inputs,snapshot,anchor_parameter=-1;unsigned initial_offset=0;
     if(cg.parser->no_register_loops||!strcmp(f->symbol->name,"main")||f->symbol->param_count<0||
-       reg_width(f->symbol->type)!=2||f->symbol->type.base==TY_FLOAT||cg.cursor_count||cg.divmod_count)return 0;
+       reg_width(f->symbol->type)!=2||f->symbol->type.base==TY_FLOAT||cg.cursor_count||divmod_state.count)return 0;
     for(i=0;i<(unsigned)f->symbol->param_count;++i)if(width(f->symbol->params[i])!=2)return 0;
     if(!loop_flatten(f->body,statements,&count))return 0;
     for(i=0;i<count;++i)if(statements[i]->kind==ST_WHILE||statements[i]->kind==ST_FOR){position=i;break;}

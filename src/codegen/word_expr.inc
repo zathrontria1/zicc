@@ -557,7 +557,7 @@ static int accumulator_zero_choose(Expr *e,Type result)
     word_compare_loaded(test,keep_yes?done:replace,keep_yes?replace:done,replace);
     label(replace);emit_value(other);
     label(done);code("    ora #$0000\n");
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 static int accumulator_choose(Expr *e)

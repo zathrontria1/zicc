@@ -13,8 +13,8 @@ static int byte_loop_target(ByteLoopPlan *p,Expr *e);
 
 static int byte_loop_home(Symbol *s)
 {
-    return !s->owner||(cg.dp_homes&&s->offset&&(s->offset&1)&&
-           (s->offset-1)/2<cg.dp_words&&cg.dp_map[(s->offset-1)/2]);
+    return !s->owner||(dp_state.homes&&s->offset&&(s->offset&1)&&
+           (s->offset-1)/2<dp_state.words&&dp_state.map[(s->offset-1)/2]);
 }
 static int byte_loop_affine(ByteLoopPlan *p,IndexedOperand *operand,unsigned *stride,unsigned *offset)
 {
@@ -540,9 +540,9 @@ static int structured_byte_loop(Statement *s)
     IndexedOperand pair[2];
     int adjacent_swap,descending=0;
     if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||cg.parser->no_register_loops||
-       cg.parser->no_register_cursors||cg.parser->no_indexed_operands||!cg.dp_homes||cg.stack_leaf||
-       cg.function->jump_label_count||cg.retained_index||cg.numeric_index||cg.bound||cg.affine_active||
-       cg.lftr_active||cg.scalar_first||cg.scalar_leaf||cg.loop_count==64||s->kind!=ST_FOR||
+       cg.parser->no_register_cursors||cg.parser->no_indexed_operands||!dp_state.homes||cg.stack_leaf||
+       cg.function->jump_label_count||cg.retained_index||cg.numeric_index||bound_state.cursor||cg.affine_active||
+       lftr_state.active||cg.scalar_first||cg.scalar_leaf||cg.loop_count==64||s->kind!=ST_FOR||
        !condition||condition->kind!=EX_BINARY||(condition->op!='<'&&condition->op!=TOK_NE)||
        condition->left->kind!=EX_OBJECT||!step)return 0;
     plan.statement=s;plan.index=condition->left->symbol;plan.bound=condition->right;
@@ -623,7 +623,7 @@ static int structured_byte_loop(Statement *s)
     code("    rep #$20\n.a16\n    ply\n");
     --cg.loop_count;label(done);
     if(plan.expr_bound)code("    pla\n    sta z:$0000\n");
-    cg.divmod_available=0;
+    divmod_state.available=0;
     loop_previous=previous;loop_current=current;return 1;
 }
 
@@ -634,7 +634,7 @@ static int fixed_byte_copy_loop(Statement *s)
     Statement *body=s->body,*initial=s->initial;Expr *e,*init,*test=s->expression,*step=s->step,*rhs;
     IndexedOperand to,from;Symbol *index;uint32_t first,end;unsigned a,b,c,d,count,i,source,destination;
     if(cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||cg.parser->no_loop_unroll||
-       cg.parser->no_register_loops||cg.retained_index||cg.numeric_index||cg.affine_active||cg.lftr_active||
+       cg.parser->no_register_loops||cg.retained_index||cg.numeric_index||cg.affine_active||lftr_state.active||
        cg.function->jump_label_count||s->kind!=ST_FOR||!test||test->kind!=EX_BINARY||test->op!='<'||
        test->left->kind!=EX_OBJECT||!integer_constant(test->right,&end)||!step)return 0;
     index=test->left->symbol;
@@ -678,7 +678,7 @@ static int fixed_byte_copy_loop(Statement *s)
     }
     to.base->used=from.base->used=1;
     if(loop_observed_outside(cg.function->body,s,index)){code("    lda #$%04X\n",end&65535);store_symbol(index);strength_sync(index,NULL);}
-    cg.divmod_available=0;return 1;
+    divmod_state.available=0;return 1;
 }
 
 static int byte_copy_counter(Symbol *symbol)
@@ -820,12 +820,12 @@ static int counted_byte_copy_loop(Statement *s)
     if(fallback){
         Statement *previous=loop_previous,*current=loop_current;
         jump(done);label(fallback);
-        cg.divmod_available=0;
+        divmod_state.available=0;
         emit_loop_body(s,0);
         loop_previous=previous;loop_current=current;
     }
     label(done);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 
@@ -931,7 +931,7 @@ static int runtime_byte_sum_loop(Statement *s)
     code("    phy\n    xba\n    clc\n    adc 1,s\n    xba\n    rep #$20\n.a16\n    ply\n    ply\n");
     store_symbol(sum);
     label(done);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 
@@ -980,7 +980,7 @@ static int fixed_byte_sum_loop(Statement *s)
     if(loop_observed_outside(cg.function->body,s,index)){
         code("    lda #$%04X\n",final);store_symbol(index);
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 
@@ -1025,7 +1025,7 @@ static int strided_byte_store_loop(Statement *s)
     code("\n    cmp #$%04X\n    bcc cg_%s_%u\n",(unsigned)limit,cg.parser->unit,loop);
     label(done);
     if(loop_observed_outside(cg.function->body,s,index))store_symbol(index);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 
@@ -1156,6 +1156,6 @@ static int packed_byte_mask_loop(Statement *s)
         for(unsigned i=0;i<divisor;++i)code("%s$%02X",i?",":"",255u^values->initializer[displacement+i]);
         code("\n.segment \"%s\"\n",code_segment());
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }

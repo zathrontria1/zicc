@@ -116,7 +116,7 @@ static int affine_pair_loop(Statement *s)
 
     if(s->kind!=ST_FOR||cg.parser->no_strength_reduction||cg.parser->no_register_loops||
        cg.switch_depth||cg.function->jump_label_count||cg.stack_leaf||cg.scalar_leaf||
-       cg.scalar_first||cg.leaf_count||cg.retained_index||cg.bound||cg.bound_pending||
+       cg.scalar_first||cg.leaf_count||cg.retained_index||bound_state.cursor||bound_state.pending||
        cg.affine_active||cg.scan_cursor||
        cg.dead_index_count||cg.omitted_parameter_count||cg.function->symbol->interrupt||
        !test||test->kind!=EX_BINARY||test->op!='<'||test->left->kind!=EX_OBJECT||
@@ -163,7 +163,7 @@ static int affine_pair_loop(Statement *s)
               "    txa\n    clc\n    adc #$%04X\n    tax\n",strides[0],strides[0]);
     code("    dec z:__arith_lhs+2\n    bne cg_%s_%u\n    ply\n",cg.parser->unit,start);
     label(done);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 
@@ -420,7 +420,7 @@ static Expr *affine_explicit_store(Statement *s,Symbol **cursor,unsigned *stride
 {
     Statement *body=s->body,*tail;Expr *store,*step,*address;uint32_t amount=1;
     if(cg.parser->no_register_loops||cg.parser->no_register_cursors||cg.function->jump_label_count||
-       cg.bound||cg.bound_pending||cg.retained_index||cg.retained_second||cg.scan_cursor||cg.affine_active||
+       bound_state.cursor||bound_state.pending||cg.retained_index||cg.retained_second||cg.scan_cursor||cg.affine_active||
        volatile_statement(s))return NULL;
     while(body&&body->kind==ST_BLOCK&&!body->next&&!body->inline_callee)body=body->body;
     if(!body||body->kind!=ST_EXPR||body->inline_callee)return NULL;
@@ -474,7 +474,7 @@ static int affine_register_loop(Statement *s,AffineLoop *loop)
         code("    sta a:$0000,x\n    inx\n    dey\n    bne cg_%s_%u\n    rep #$20\n.a16\n    ply\n    stz z:$0000\n",cg.parser->unit,start);
         code("    txa\n");store_symbol(cursor);
         dp_counter_exit(&counter);
-        label(done);cg.divmod_available=0;
+        label(done);divmod_state.available=0;
         return 1;
     }
     label(start);
@@ -492,5 +492,5 @@ static int affine_register_loop(Statement *s,AffineLoop *loop)
     /* Deferred index updates must leave pre-existing function cursors coherent */
     if((!counted||counter.update_index)&&loop_observed_outside(cg.function->body,s,loop->index))strength_sync(loop->index,NULL);
     if(counted)label(done);
-    cg.divmod_available=0;return 1;
+    divmod_state.available=0;return 1;
 }

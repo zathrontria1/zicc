@@ -106,12 +106,12 @@ static uint64_t frame_live_one(FramePacking *p,Statement *s,uint64_t next,uint64
         head=frame_live(p,s->initial,head,breaking,continuing);
         {
             uint64_t setup_kill=0,setup_gen=0;unsigned d,k,idx;
-            for(d=0;d<cg.dot_count;++d)if(cg.dots[d].loop==s)
-                for(idx=0;idx<p->count;++idx)if(p->symbols[idx]==cg.dots[d].bias_sym)setup_kill|=UINT64_C(1)<<idx;
-            for(k=0;k<cg.dot_pack_count;++k)if(cg.dot_packs[k].loop==s){
+            for(d=0;d<dot_state.count;++d)if(dot_state.dots[d].loop==s)
+                for(idx=0;idx<p->count;++idx)if(p->symbols[idx]==dot_state.dots[d].bias_sym)setup_kill|=UINT64_C(1)<<idx;
+            for(k=0;k<dot_state.pack_count;++k)if(dot_state.packs[k].loop==s){
                 for(idx=0;idx<p->count;++idx){
-                    if(p->symbols[idx]==cg.dot_packs[k].pack_sym)setup_kill|=UINT64_C(1)<<idx;
-                    if(p->symbols[idx]==cg.dot_packs[k].coeff_sym)setup_gen|=UINT64_C(1)<<idx;
+                    if(p->symbols[idx]==dot_state.packs[k].pack_sym)setup_kill|=UINT64_C(1)<<idx;
+                    if(p->symbols[idx]==dot_state.packs[k].coeff_sym)setup_gen|=UINT64_C(1)<<idx;
                 }
             }
             if(setup_kill||setup_gen){

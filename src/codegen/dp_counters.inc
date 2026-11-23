@@ -234,7 +234,7 @@ static int dp_counter_plan(Statement *s,AffineLoop *affine,DpCounter *counter)
     /* A body exit can leave the setup and restore cost unamortized */
     if(!affine&&!counter->wide&&counter->update_index&&contains_break(s->body))return 0;
     /* A plain DP-home step/test also beats save/setup/restore on short loops */
-    if(cg.dp_homes&&s->initial&&region_trips(s)<=3)return 0;
+    if(dp_state.homes&&s->initial&&region_trips(s)<=3)return 0;
     return 1;
 }
 static int dp_counter_word_access(Expr *e,Symbol *index)
@@ -357,7 +357,7 @@ static int dp_counter_word_fill(Statement *s)
     IndexedOperand operand;
     unsigned scale,offset,enter,loop,done;
     uint32_t value;
-    if(s->kind!=ST_FOR||!test||cg.switch_depth||cg.stack_leaf||cg.bound||cg.bound_pending||
+    if(s->kind!=ST_FOR||!test||cg.switch_depth||cg.stack_leaf||bound_state.cursor||bound_state.pending||
        cg.retained_index||cg.parser->no_body_optimizations||cg.parser->no_register_loops||
        cg.parser->no_register_cursors||volatile_statement(s))return 0;
     while(body&&body->kind==ST_BLOCK&&!body->next&&!body->inline_callee)body=body->body;
@@ -385,6 +385,6 @@ static int dp_counter_word_fill(Statement *s)
     code("\n    inx\n    inx\n");
     dp_counter_step(&counter,loop);
     dp_counter_exit(&counter);
-    label(done);cg.divmod_available=0;
+    label(done);divmod_state.available=0;
     return 1;
 }

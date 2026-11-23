@@ -62,12 +62,12 @@ static const char *symbol_load_operand(Symbol *s, unsigned offset)
     static char buf[32];
     unsigned word=(s->offset+offset-1)/2;
     if(s->owner){
-        if(cg.dp_homes&&cg.dp_zero_stack&&s->offset+offset>=cg.dp_incoming_base){
-            snprintf(buf,sizeof buf,"a:$%04X,y",s->offset+offset-cg.dp_incoming_base+5+cg.parser->long_return);
+        if(dp_state.homes&&dp_state.zero_stack&&s->offset+offset>=dp_state.incoming_base){
+            snprintf(buf,sizeof buf,"a:$%04X,y",s->offset+offset-dp_state.incoming_base+5+cg.parser->long_return);
             return buf;
         }
-        if(cg.dp_homes&&s->offset&&word<cg.dp_words&&cg.dp_map[word]&&!((s->offset+offset-1)&1)){
-            snprintf(buf,sizeof buf,"z:__dp_home_%02u",cg.dp_map[word]-1u);
+        if(dp_state.homes&&s->offset&&word<dp_state.words&&dp_state.map[word]&&!((s->offset+offset-1)&1)){
+            snprintf(buf,sizeof buf,"z:__dp_home_%02u",dp_state.map[word]-1u);
             return buf;
         }
         snprintf(buf,sizeof buf,"a:$%04X,y",frame_offset(s->offset+offset));
@@ -351,10 +351,10 @@ static const char *far_pointer_dp_home(Expr *base)
     Symbol *s;
     unsigned word;
     const char *home;
-    if(!cg.dp_homes||base->kind!=EX_OBJECT||!far_pointer(value_type(base->type))||
+    if(!dp_state.homes||base->kind!=EX_OBJECT||!far_pointer(value_type(base->type))||
        !(s=base->symbol)->owner||!s->offset||object_volatile(base->type))return NULL;
     word=(s->offset-1)/2;
-    if(word+1>=cg.dp_words||!cg.dp_map[word]||cg.dp_map[word+1]!=cg.dp_map[word]+1)return NULL;
+    if(word+1>=dp_state.words||!dp_state.map[word]||dp_state.map[word+1]!=dp_state.map[word]+1)return NULL;
     home=frame_operand(s->offset);
     return !strncmp(home,"z:",2)?home+2:NULL;
 }
@@ -378,9 +378,9 @@ static int discarded_scaled_far_home(Expr *e)
        !far_pointer(value_type(base->type))||index->kind!=EX_OBJECT||
        index->type.pointers||!index->type.is_unsigned||!word_integer(index->type))return 0;
     if(base->symbol->owner&&base->symbol->offset){
-        unsigned word=(base->symbol->offset-1)/2,home=cg.dp_map[(dest->offset-1)/2];
-        for(unsigned i=word;i<=word+1&&i<cg.dp_words;++i)
-            if(cg.dp_map[i]==home||cg.dp_map[i]==home+1)return 0;
+        unsigned word=(base->symbol->offset-1)/2,home=dp_state.map[(dest->offset-1)/2];
+        for(unsigned i=word;i<=word+1&&i<dp_state.words;++i)
+            if(dp_state.map[i]==home||dp_state.map[i]==home+1)return 0;
     }
     stride=width(pointed_type(value_type(base->type)));
     if(stride<2||stride>16||(stride&(stride-1)))return 0;

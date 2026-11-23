@@ -35,7 +35,7 @@ static int narrow_product_sum(Expr *e)
        (!direct_operand(value,word_type,0,0)&&!indexed_operand(value,&indexed))||
        widened_word(wide)||!direct_operand(wide,t,0,0)||!direct_operand(wide,t,1,0))return 0;
     slow=++cg.label;done=++cg.label;
-    cg.arithmetic=1;cg.divmod_available=0;
+    cg.arithmetic=1;divmod_state.available=0;
     code("; guarded narrow sum of widened products\n    lda ");
     direct_operand(wide,t,1,1);code("\n");
     flag_branch("bne","beq",slow,0,0);
@@ -64,6 +64,6 @@ static int narrow_product_sum(Expr *e)
     label(slow);
     emit_value(e->left);binary_after_left(e->left,e->right,'+');
     label(done);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }

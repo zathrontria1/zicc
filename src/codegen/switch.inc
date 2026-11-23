@@ -52,7 +52,7 @@ static int split_word_switch(Statement *s,unsigned fallback,int retain_word)
     }
     for(i=1;i<count;++i)if(cases[i-1].key+1!=cases[i].key)return 0;
     /* Negation permutes the word keys, so the dispatch can read its input */
-    emit_value(negated?control->left:control);cg.divmod_available=0;
+    emit_value(negated?control->left:control);divmod_state.available=0;
     flags=accumulator_zero_flags();
     if(retain_word)code("    tax\n");
     if(same_action){
@@ -184,7 +184,7 @@ static int const_lut_word_switch(Statement *s,unsigned end)
     if(update>0||(update==0&&count==3&&target&&width(target->type)==2&&!default_sets)){
         Expr home={.kind=EX_OBJECT,.symbol=target,.type=target->type};
         if(count<3||count>6||default_sets||!direct_operand(&home,home.type,0,0))return 0;
-        emit_value(s->expression);cg.divmod_available=0;
+        emit_value(s->expression);divmod_state.available=0;
         unsigned apply=++cg.label,arms[6];
         for(i=0;i<count;++i)arms[i]=++cg.label;
         if(count==3&&entries[0].key+1==entries[1].key&&entries[1].key+2<entries[2].key){
@@ -221,7 +221,7 @@ static int const_lut_word_switch(Statement *s,unsigned end)
             direct_operand(&home,home.type,0,1);code("\n");
         }
         store_symbol(target);
-        label(end);cg.divmod_available=0;return 1;
+        label(end);divmod_state.available=0;return 1;
     }
     if(count<4)return 0;
     for(i=1;i<count;++i){
@@ -243,7 +243,7 @@ static int const_lut_word_switch(Statement *s,unsigned end)
     }
     if(span!=count)for(i=0;i<span;++i)if(!present[i]&&!(has_default&&default_sets))return 0;
     code("; constant dense switch lookup table (%u entries)\n",span);
-    emit_value(s->expression);cg.divmod_available=0;
+    emit_value(s->expression);divmod_state.available=0;
     if(min_key)code("    sec\n    sbc #$%04X\n",min_key);
     id=++cg.label;
     if(has_default&&default_sets){
@@ -271,7 +271,7 @@ static int const_lut_word_switch(Statement *s,unsigned end)
         store_symbol(target);
         label(end);
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 
@@ -306,12 +306,12 @@ static void emit_switch_dispatch(Statement *s,unsigned fallback,int retain_word)
     Statement *item;unsigned next;int flags;
     if(!retain_word&&!cg.parser->no_strength_reduction&&s->expression->kind==EX_INT){
         item=switch_constant_case(s);
-        jump(item?item->case_label:fallback);cg.divmod_available=0;
+        jump(item?item->case_label:fallback);divmod_state.available=0;
         return;
     }
     if(wide_scalar(value_type(s->expression->type))){
         unsigned part;
-        emit_wide_operand(s->expression);cg.divmod_available=0;
+        emit_wide_operand(s->expression);divmod_state.available=0;
         code("; linear switch dispatch: 64-bit controlling value\n");
         for(item=s->cases;item;item=item->case_next)if(!item->is_default){
             uint64_t value=((uint64_t)item->case_value_high<<32)|item->case_value;
@@ -324,7 +324,7 @@ static void emit_switch_dispatch(Statement *s,unsigned fallback,int retain_word)
         jump(fallback);return;
     }
     if(split_word_switch(s,fallback,retain_word))return;
-    emit_value(s->expression);cg.divmod_available=0;
+    emit_value(s->expression);divmod_state.available=0;
     /* The first case may reuse the controlling value's Z flag for zero */
     flags=accumulator_zero_flags();
     if(retain_word)code("    tax\n");
@@ -356,5 +356,5 @@ static void emit_switch(Statement *s)
      * real loop, while break uses the nearest entry of either kind. */
     cg.loop_start[cg.loop_count]=0;cg.loop_end[cg.loop_count++]=end;
     ++cg.switch_depth;emit_statements(s->body);--cg.switch_depth;--cg.loop_count;
-    cg.divmod_available=0;label(end);
+    divmod_state.available=0;label(end);
 }

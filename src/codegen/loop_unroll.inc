@@ -125,7 +125,7 @@ static int unroll_loop(AffineLoop *loop,Expr *assignment)
     UnrollPlan plan;unsigned enter,done,group,scalar,scalar_body,finish,factor;
     if(!loop->unroll_selected)return 0;
     plan=loop->unroll;
-    if(plan.full&&!plan.span){code("; cost unroll: empty constant span\n");cg.divmod_available=0;return 1;}
+    if(plan.full&&!plan.span){code("; cost unroll: empty constant span\n");divmod_state.available=0;return 1;}
     code("; cost unroll: %s, factor %u, %s span, estimated clocks %u vs %u, bytes %u\n",
          plan.full?"full":"partial",plan.factor,plan.known?"constant":"runtime",plan.cost,plan.rolled,plan.bytes);
     enter=++cg.label;done=++cg.label;
@@ -157,5 +157,5 @@ static int unroll_loop(AffineLoop *loop,Expr *assignment)
     }
     if((plan.counter.update_index||(plan.full&&plan.counter.recover_index))&&
        loop_observed_outside(cg.function->body,loop->statement,loop->index))strength_sync(loop->index,NULL);
-    label(done);cg.divmod_available=0;return 1;
+    label(done);divmod_state.available=0;return 1;
 }

@@ -74,7 +74,7 @@ static Statement *local_byte_block(Statement *s)
     Statement *p,*last=NULL;
     if(cg.parser->no_copy_selection||cg.parser->no_body_optimizations||
        cg.function->symbol->interrupt||cg.stack_leaf||cg.numeric_index||
-       cg.bound||cg.affine_active||cg.lftr_active||cg.retained_index)return NULL;
+       bound_state.cursor||cg.affine_active||lftr_state.active||cg.retained_index)return NULL;
     for(p=s;p&&p->kind==ST_EXPR&&!p->inline_callee&&n<sizeof bytes;p=p->next){
         Expr *e=p->expression;
         Symbol *base;
@@ -99,7 +99,7 @@ static Statement *local_byte_block(Statement *s)
     }
     id=++cg.label;
     require_frame_home(array);
-    if(cg.dp_homes)cg.dp_failed=1;
+    if(dp_state.homes)dp_state.failed=1;
     code("; local byte initializer: mvn\n    tya\n    clc\n    adc #$%04X\n    phy\n    tay\n",
          frame_offset(array->offset));
     code("    ldx #.loword(cg_%s_%u_data)\n    lda #$%04X\n"
@@ -140,7 +140,7 @@ static int adjacent_store(Statement *s)
     IndexedOperand low,high;unsigned offset=0,other_offset=0;int32_t x,y;uint32_t maximum;
     uint32_t val_a=0,val_b=0;int const_bytes;
     if(cg.parser->no_store_fusion||cg.parser->no_strength_reduction||cg.parser->no_body_optimizations||
-       cg.function->symbol->interrupt||cg.numeric_index||cg.bound||cg.affine_active||cg.lftr_active||cg.scalar_first||
+       cg.function->symbol->interrupt||cg.numeric_index||bound_state.cursor||cg.affine_active||lftr_state.active||cg.scalar_first||
        !next||next->kind!=ST_EXPR||s->inline_callee||next->inline_callee)return 0;
     a=s->expression;b=next->expression;
     if(!a||!b||a->kind!=EX_ASSIGN||b->kind!=EX_ASSIGN||a->op||b->op||
@@ -277,6 +277,6 @@ static Statement *adjacent_bitfield_stores(Statement *s)
         code("; shared packed bit-field payload\n");
         store_bitfield_payload(&next);last=end;
     }
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return last;
 }

@@ -172,48 +172,61 @@ the function into `cg.assembly[at..cg.length]`.
 
 | Pass | Flag | File | Reads | Changes | Must run before it |
 | --- | --- | --- | --- | --- | --- |
-| `drop_reloads` | (always on; skipped if volatile) | [codegen.inc](../../src/codegen/codegen.inc) | Function assembly text | Deletes `lda X` right after `sta X` on private storage when flags are dead | `emit_function` |
-| `drop_push_pairs` | (always on) | [codegen.inc](../../src/codegen/codegen.inc) | Function assembly text | Removes redundant `pha`/`pla` pairs when A and flags are preserved or overwritten | `drop_reloads` |
-| `merge_byte_stores` | (always on) | [codegen.inc](../../src/codegen/codegen.inc) | Function assembly text | Keeps consecutive constant 8-bit stores inside a single `sep #$20` / `rep #$20` block | `drop_push_pairs` |
-| `stack_frames` (+ `lp_prune_before_frames` retry) | `--no-stack-frames` | [codegen.inc](../../src/codegen/codegen.inc), [assembly_lines.inc](../../src/codegen/assembly_lines.inc), [line_passes.inc](../../src/codegen/line_passes.inc) | Function assembly lines and stack depth CFG | Converts Y-relative frame accesses (`n,y`) into direct stack-relative accesses (`n,s`) and drops Y setup; retries once if unreachable Y uses are pruned | `merge_byte_stores` |
+| `drop_reloads` | (always on; skipped if volatile) | [post_emit.inc](../../src/codegen/post_emit.inc) | Function assembly text | Deletes `lda X` right after `sta X` on private storage when flags are dead | `emit_function` |
+| `drop_push_pairs` | (always on) | [post_emit.inc](../../src/codegen/post_emit.inc) | Function assembly text | Removes redundant `pha`/`pla` pairs when A and flags are preserved or overwritten | `drop_reloads` |
+| `merge_byte_stores` | (always on) | [post_emit.inc](../../src/codegen/post_emit.inc) | Function assembly text | Keeps consecutive constant 8-bit stores inside a single `sep #$20` / `rep #$20` block | `drop_push_pairs` |
+| `stack_frames` (+ `lp_prune_before_frames` retry) | `--no-stack-frames` | [post_emit.inc](../../src/codegen/post_emit.inc), [assembly_lines.inc](../../src/codegen/assembly_lines.inc), [line_passes.inc](../../src/codegen/line_passes.inc) | Function assembly lines and stack depth CFG | Converts Y-relative frame accesses (`n,y`) into direct stack-relative accesses (`n,s`) and drops Y setup; retries once if unreachable Y uses are pruned | `merge_byte_stores` |
 | `line_passes` (ordinary & interrupt) | `--no-line-passes`, `--no-private-regions`, `--no-value-reuse`, `--no-index-elimination` | [line_passes.inc](../../src/codegen/line_passes.inc), [lp_core.inc](../../src/codegen/lp_core.inc), [lp_basic_passes.inc](../../src/codegen/lp_basic_passes.inc), [lp_cfg_passes.inc](../../src/codegen/lp_cfg_passes.inc), [lp_cleanup.inc](../../src/codegen/lp_cleanup.inc), [lp_peepholes.inc](../../src/codegen/lp_peepholes.inc) | Function assembly text parsed into `LpUnit` | Runs ~100 ordered micro-passes in 4 phases using its own `lp_state` | `stack_frames` |
 | `lp_cleanup` sub-modules (inside `line_passes`) | `--no-line-passes`, `--no-private-regions` | [private_values.inc](../../src/codegen/private_values.inc), [private_regions.inc](../../src/codegen/private_regions.inc), [accumulator_cfg.inc](../../src/codegen/accumulator_cfg.inc), [region_register_values.inc](../../src/codegen/region_register_values.inc) | `LpUnit` CFG and liveness | Forwards private values/constants, removes dead stores, tracks A/X must-availability across CFG joins, and cleans scratch copies | `stack_frames` |
 | Frame promotion & guard frames (inside `line_passes`) | `--no-line-passes` | [frame_regions.inc](../../src/codegen/frame_regions.inc), [guard_frames.inc](../../src/codegen/guard_frames.inc) | `LpUnit` frame accesses and call sites | Promotes Y frames to direct page or registers (`lp_y_promote`, `lp_call_frame_homes`, `lp_pointer_frame_home`, `lp_leaf_stack_arguments`, `lp_closed_frame`) and delays/removes guarded frame setup | Initial `lp_cleanup` round |
 | `lp_carry_on_fallthrough` (last in `line_passes`) | `--no-line-passes` | [lp_cleanup.inc](../../src/codegen/lp_cleanup.inc) | `LpUnit` branch/carry flags | Removes redundant `clc`/`sec` when fallthrough guarantees carry state | All arithmetic line peepholes |
 | `lp_wide_runtime_exit` (wide functions only) | `--no-line-passes` | [line_passes.inc](../../src/codegen/line_passes.inc) | Wide-function assembly (`f->uses_wide`) | Cleans jumps to runtime exits and repeated FP inexact raises without touching 64-bit return workspace | `emit_function` (wide path) |
 | `dp_summarize` | `--no-dp-summaries` | [dp_homes.inc](../../src/codegen/dp_homes.inc) | Final function assembly | Records which DP scratch words `$02..$21` this function writes into `dp_summaries` for later callers in the same TU | `line_passes` (or `lp_wide_runtime_exit`) |
-| `emit_block_copy_payloads` | (always on) | [codegen.inc](../../src/codegen/codegen.inc) | `; block copy payload` markers in function text | Appends inline `.byte` payload tables after the function's return | `dp_summarize` |
-| `interrupt_statement_lvalues` | (always on; interrupts only) | [codegen.inc](../../src/codegen/codegen.inc) | Interrupt function AST | Emits `; interrupt lvalue _name` comments for the ROM linker/allocator | `emit_block_copy_payloads` |
+| `emit_block_copy_payloads` | (always on) | [post_emit.inc](../../src/codegen/post_emit.inc) | `; block copy payload` markers in function text | Appends inline `.byte` payload tables after the function's return | `dp_summarize` |
+| `interrupt_statement_lvalues` | (always on; interrupts only) | [program_emit.inc](../../src/codegen/program_emit.inc) | Interrupt function AST | Emits `; interrupt lvalue _name` comments for the ROM linker/allocator | `emit_block_copy_payloads` |
 
 ### Stage 5: Whole-program assembly finalization
 
 | Pass | Flag | File | Reads | Changes | Must run before it |
 | --- | --- | --- | --- | --- | --- |
-| `bank_emit` | `--no-bank-specialization` | [bank_calls.inc](../../src/codegen/bank_calls.inc) | Used entries in `cg.banks` | Emits private bank-specialized helper functions | All functions emitted |
+| `bank_emit` | `--no-bank-specialization` | [bank_calls.inc](../../src/codegen/bank_calls.inc) | Used entries in `bank_state` | Emits private bank-specialized helper functions | All functions emitted |
 | `emit_near_library` | (always on) | [near_libcalls.inc](../../src/codegen/near_libcalls.inc) | `cg.near_strcmp`, `cg.need_smul8`, `cg.need_pack_coeff` | Emits internal unit-local helper routines when referenced | `bank_emit` |
-| Imports, assertions & RODATA strings | (always on) | [codegen.inc](../../src/codegen/codegen.inc) | Symbol `used` flags, `cg.helpers`, `cg.assembly`, `p->strings` | Emits `.import`/`.importzp`, WRAM/SRAM/DP/LoRAM `.assert` checks, and suffix-shared string literals | `emit_near_library` |
-| `near_relocations` | `--long-calls`, `--long-return` | [codegen.inc](../../src/codegen/codegen.inc) | Complete `cg.assembly` text | Rewrites eligible `jsr`+`rts` pairs to tail `jmp`, and applies `--long-calls` / `--long-return` conversions | Imports & RODATA emitted |
+| Imports, assertions & RODATA strings | (always on) | [program_emit.inc](../../src/codegen/program_emit.inc) | Symbol `used` flags, `cg.helpers`, `cg.assembly`, `p->strings` | Emits `.import`/`.importzp`, WRAM/SRAM/DP/LoRAM `.assert` checks, and suffix-shared string literals | `emit_near_library` |
+| `near_relocations` | `--long-calls`, `--long-return` | [post_emit.inc](../../src/codegen/post_emit.inc) | Complete `cg.assembly` text | Rewrites eligible `jsr`+`rts` pairs to tail `jmp`, and applies `--long-calls` / `--long-return` conversions | Imports & RODATA emitted |
 | `relax_assembly` | `--no-branch-relaxation` | [relax.c](../../src/relax.c) | Complete `cg.assembly` text | Measures instruction sizes in `CODE`, converts out-of-range short branches into `brl` or inverted-branch + `jmp`, and writes the final `.s` file | `near_relocations` |
 
 ---
 
-## Shared state (`cg`) ownership map
+## Shared state (`cg`) and module-owned state map
 
-Most codegen files read and write a single static `Codegen cg` struct defined at
-the top of [src/codegen/codegen.inc](../../src/codegen/codegen.inc#L54-L97).
-Grouping its fields by lifetime shows where state boundaries actually live:
+Core emitter state (`Codegen cg`), subsystem state structs, and `CodegenCheckpoint`
+live in [src/codegen/emit_buffer.inc](../../src/codegen/emit_buffer.inc). The
+former giant `codegen.inc` is split into:
+
+- [emit_buffer.inc](../../src/codegen/emit_buffer.inc): core state, subsystem state definitions, checkpoints, assembly buffer, and frame operand helpers.
+- [codegen.inc](../../src/codegen/codegen.inc): core expression and statement lowering.
+- [wide_emit.inc](../../src/codegen/wide_emit.inc): 64-bit integer and `binary64` wide value lowering.
+- [loop_emit.inc](../../src/codegen/loop_emit.inc): loop lowering dispatcher, scaled-ring/guard-Y loops, shift scans, and fixed update folds.
+- [function_emit.inc](../../src/codegen/function_emit.inc): per-function driver, register/parameter home planning, `scalar_leaf`, `literal_record_return`, and interrupt scratch.
+- [post_emit.inc](../../src/codegen/post_emit.inc): post-emission text sweeps, `near_relocations`, and `stack_frames`.
+- [program_emit.inc](../../src/codegen/program_emit.inc): `emit_program`, wide validation, WRAM/SRAM/RODATA emission, and relaxation handoff.
+
+Remaining fields in `cg`:
 
 | Group | Fields in `cg` | Lifetime | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | Unit & output buffer | `parser`, `assembly`, `length`, `capacity`, `label`, `inline_label`, `helpers`, `helper_count`, `arithmetic`, `require_float_format`, `require_int64_format`, `near_strcmp`, `need_smul8`, `need_pack_coeff` | Whole translation unit | `emit_program`, `code()`, `helper()`, emitters | All emitters, `dp_homes.inc`, `line_passes.inc`, `near_relocations` |
-| Bank variants | `banks`, `bank_count` | Whole translation unit | `bank_prepare`, call sites (`used = 1`) | `bank_emit` |
 | Current function & control flow | `function`, `loop_start`, `loop_end`, `loop_count`, `switch_depth`, `jump_base`, `interrupt_scratch` | One function | `emit_function`, `emit_function_frame`, `emit_loop`, `switch.inc` | Statement/expression emitters, interrupt scratch inserter |
 | Frame & parameter layout | `frame_map`, `frame_saved`, `omitted_parameters`, `omitted_parameter_count`, `register_homes`, `register_spills`, `stack_leaf`, `stack_bias`, `scalar_first`, `scalar_leaf`, `scalar_spill`, `leaf_count` | One function | `plan_register_homes`, `compact_parameter_reservations`, `pack_private_frame`, `scalar_leaf` | `frame_offset()`, `emit_function_frame`, expression emitters |
-| DP home allocation | `dp_homes`, `dp_frameless`, `dp_trial`, `dp_failed`, `dp_byte_operand`, `dp_words`, `dp_incoming_base`, `dp_zero_stack`, `dp_map`, `dp_weight` | One function (or trial) | `dp_homes.inc`, `region_homes.inc` | `frame_operand()`, `emit_function_frame` |
-| Loop & arithmetic plans | `cursors`, `cursor_count`, `affine`, `affine_active`, `affine_count`, `dead_indices`, `dead_index_count`, `divmod`, `divmod_count`, `divmod_available`, `divmod_version`, `divmod_wide_version`, `dots`, `dot_count`, `dot_packs`, `dot_pack_count`, `lftr`, `lftr_count`, `lftr_active`, `lftr_failed` | One function | `strength.inc`, `affine_loops.inc`, `divmod.inc`, `dot_products.inc`, `lftr.inc` | `emit_function`, `emit_loop_body`, expression emitters |
-| Active loop lowering state | `retained_*`, `scaled_ring_*`, `numeric_*`, `bound*`, `fixed_rows`, `scan_cursor`, `scan_failed`, `loop_y_borrowed` | One active loop | `index_retention.inc`, `numeric_loops.inc`, `bound_cursors.inc`, `word_rows.inc`, `codegen.inc` | Active loop body emitters |
+| Loop plans & active lowering | `cursors`, `cursor_count`, `affine`, `affine_active`, `affine_count`, `dead_indices`, `dead_index_count`, `retained_*`, `scaled_ring_*`, `numeric_*`, `fixed_rows`, `scan_cursor`, `scan_failed`, `loop_y_borrowed` | One function or active loop | `strength.inc`, `affine_loops.inc`, `index_retention.inc`, `numeric_loops.inc`, `word_rows.inc`, `loop_emit.inc` | Loop and expression emitters |
 
 Module-owned static states outside `cg`:
-- `lp_state` in [src/codegen/lp_core.inc](../../src/codegen/lp_core.inc) (owned by the assembly line-pass modules; holds `is_volatile`, `frame_address`, `word_result`, `value_result`, and bound buffer/label handles).
-- `inl` in [src/codegen/inline.inc](../../src/codegen/inline.inc) (owned only during `inline_translation_unit`).
-- `dp_summaries` / `dp_summary_count` in [src/codegen/dp_homes.inc](../../src/codegen/dp_homes.inc) (accumulated across functions in the translation unit).
+- `lp_state` in [src/codegen/lp_core.inc](../../src/codegen/lp_core.inc): assembly line-pass flags (`is_volatile`, `frame_address`, `word_result`, `value_result`) and bound buffer/label handles.
+- `bank_state` in [src/codegen/bank_calls.inc](../../src/codegen/bank_calls.inc): private fixed-bank call specializations (`variants`, `count`).
+- `divmod_state` ([divmod.inc](../../src/codegen/divmod.inc)): quotient/remainder reuse cache (`entries`, `count`, `available`, `version`, `wide_version`).
+- `dot_state` ([dot_products.inc](../../src/codegen/dot_products.inc)): signed-byte dot-product plans (`dots`, `count`, `packs`, `pack_count`).
+- `lftr_state` ([lftr.inc](../../src/codegen/lftr.inc)): speculative index elimination (`indices`, `count`, `active`, `failed`).
+- `bound_state` ([bound_cursors.inc](../../src/codegen/bound_cursors.inc)): X-held register cursor trials (`cursor`, `pending`, `delta`, `marks`, `mark_count`, `start`, `end`, `failed`, `own`, `entered`).
+- `dp_state` ([dp_homes.inc](../../src/codegen/dp_homes.inc) / [region_homes.inc](../../src/codegen/region_homes.inc)): direct-page home promotion (`homes`, `frameless`, `trial`, `failed`, `byte_operand`, `words`, `incoming_base`, `zero_stack`, `map`, `weight`).
+- `inl` in [src/codegen/inline.inc](../../src/codegen/inline.inc): same-TU inliner call graph and symbol map.
+- `dp_summaries` / `dp_summary_count` in [src/codegen/dp_homes.inc](../../src/codegen/dp_homes.inc): accumulated same-TU DP clobber summaries.

@@ -44,7 +44,7 @@ static int indexed_operand(Expr *e,IndexedOperand *out)
     if(!pointer&&root->kind!=EX_DEREF)return 0;
     address=pointer?root:root->left;
     /* Wide functions retain this cursor without the later line passes */
-    if(cg.function->uses_wide&&cg.bound&&strength_pointer_plan(address,&scale)==cg.bound)return 0;
+    if(cg.function->uses_wide&&bound_state.cursor&&strength_pointer_plan(address,&scale)==bound_state.cursor)return 0;
     if(address->kind!=EX_BINARY||address->op!='+'||
        !address->left->type.array||address->left->type.banked){
         Expr *index=NULL;

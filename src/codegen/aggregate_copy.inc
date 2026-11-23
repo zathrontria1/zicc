@@ -46,7 +46,7 @@ static int short_memset(Expr *e,int needed)
         code("    rep #$20\n.a16\n");
     }
     if(needed)code("    txa\n");
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 /* A short literal format without conversions is a string copy and a count */
@@ -74,7 +74,7 @@ static int literal_sprintf(Expr *e,int needed)
         code("    sep #$20\n.a8\n    stz a:$%04X,x\n    rep #$20\n.a16\n",n);
     }
     if(needed)code("    lda #$%04X\n",n);
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 static int literal_strcpy(Expr *e)
@@ -136,7 +136,7 @@ static int literal_strcpy(Expr *e)
         code("    plx\n    plx\n");
         fn->used=1;label(end);
     }
-    pop_value(type(TY_INT,0));cg.divmod_available=0;return 1;
+    pop_value(type(TY_INT,0));divmod_state.available=0;return 1;
 }
 /* A short fixed copy can visit the same bytes without a scratch pointer or
  * a loop counter. Keep address evaluation ahead of the transfer. */
@@ -165,7 +165,7 @@ static int volatile_fixed_copy(Expr *e,int needed)
     }
     code("    rep #$20\n.a16\n");
     if(needed){if(destination)emit_address(to);else code("    txa\n");}
-    cg.divmod_available=0;
+    divmod_state.available=0;
     return 1;
 }
 /* Advance both long bases between Y windows. A complete window terminates
@@ -217,7 +217,7 @@ static void volatile_aggregate(Expr *e,int copying,int needed)
         code("    iny\n    cpy #$%04X\n    bcc cg_%s_%u\n    rep #$20\n.a16\n    ply\n",n,cg.parser->unit,loop);
     }
     if(copying&&needed){code("    lda z:__arith_rhs\n");if(e->left->type.banked)code("    ldx z:__arith_rhs+2\n");}
-    cg.divmod_available=0;
+    divmod_state.available=0;
 }
 static void emit_aggregate_copy(Expr *e,int needed)
 {
@@ -259,7 +259,7 @@ static void emit_aggregate_copy(Expr *e,int needed)
             if(destination)emit_address(e->left);
             else code("    txa\n");
         }
-        cg.divmod_available=0;
+        divmod_state.available=0;
         return;
     }
     if(n>=65536||((e->left->type.banked||e->right->type.banked)&&(!direct||(expanded&&n>12)))){
@@ -274,7 +274,7 @@ static void emit_aggregate_copy(Expr *e,int needed)
             code("    lda [__arith_lhs],y\n    sta [__arith_rhs],y\n    iny\n    iny\n    cpy #$%04X\n    bcc cg_%s_%u\n    ply\n",n,cg.parser->unit,loop);
         }
         if(needed){code("    lda z:__arith_rhs\n");if(e->left->type.banked)code("    ldx z:__arith_rhs+2\n");}
-        cg.divmod_available=0;return;
+        divmod_state.available=0;return;
     }
     unsigned long_words=direct&&source->type.banked?n/2:0;
     CopyPlan plan={0,(direct?5:6)*n+long_words,3*n+long_words};
@@ -324,7 +324,7 @@ static void emit_aggregate_copy(Expr *e,int needed)
         code("    ply\n");
     }
     /* Embedded scalar/pointer fields may have changed through an alias */
-    cg.divmod_available=0;
+    divmod_state.available=0;
 }
 
 static void copy_prepare_expr(Function *f,Expr *e)
