@@ -15,7 +15,16 @@ static int tail_call(const char *p)
 
         adjacent = 0;
 
-        if (!eol || !n || *p == ' ' || *p == ';' || *p == '.')
+        if (*p == ';') {
+            if (!eol)
+                return 0;
+
+            adjacent = 0;
+            p = eol;
+            continue;
+        }
+
+        if (!eol || !n || *p == ' ' || *p == '.')
             return 0;
 
         /* Labels: "name:" or "name = *" */

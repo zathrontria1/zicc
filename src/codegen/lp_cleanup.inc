@@ -303,6 +303,9 @@ static int lp_demanded_masks(LpUnit *u, Function *f, size_t at)
     }
 
     /* Forward pass: drop AND #imm that only clears already-zero bits */
+    int saved_target = -1;
+    unsigned saved_zero = 0, saved_ones = 0;
+
     for (i = 0; i < u->count; ++i) {
         LpLine *l = &u->lines[i];
         size_t n;
@@ -311,6 +314,15 @@ static int lp_demanded_masks(LpUnit *u, Function *f, size_t at)
 
         if (l->deleted || l->replace)
             continue;
+
+        if ((int)i == saved_target) {
+            known = 1;
+            zero_a = saved_zero;
+            ones_a = saved_ones;
+            nslots = 0;
+            saved_target = -1;
+            continue;
+        }
 
         if (!l->op) {
             int fallthrough =
@@ -332,6 +344,25 @@ static int lp_demanded_masks(LpUnit *u, Function *f, size_t at)
         if (known_targets && i + 2 < u->count && lp_branch(l) && l->target == (int)(i + 2) &&
             !u->lines[i + 1].deleted && u->lines[i + 1].ends && !u->lines[i + 1].label &&
             targets[i + 2] == 1 && u->lines[i + 2].label) {
+            // Preserve known A bits across a single-entry guard jump
+            if (known && saved_target < 0 && lp_is(&u->lines[i + 1], "jmp") &&
+                !u->lines[i + 1].indirect && u->lines[i + 1].target > (int)(i + 2) &&
+                targets[u->lines[i + 1].target] == 1) {
+                int prev = u->lines[i + 1].target - 1;
+
+                while (prev >= 0 &&
+                       (!u->lines[prev].length || u->lines[prev].text[0] == ';' ||
+                        (u->lines[prev].label && !targets[prev]))) {
+                    --prev;
+                }
+
+                if (prev >= 0 && u->lines[prev].ends) {
+                    saved_target = u->lines[i + 1].target;
+                    saved_zero = zero_a;
+                    saved_ones = ones_a;
+                }
+            }
+
             i += 2;
             continue;
         }

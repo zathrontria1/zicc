@@ -1378,7 +1378,7 @@ static uint32_t lp_workspace_access(const LpLine *l, int *exact)
                     return (1u << (start + width)) - 1u;
 
                 offset = start;
-            } else if (lp_index_use(l))
+            } else if (o[0] == 'z' && lp_index_use(l))
                 return UINT32_MAX;
         }
     }
@@ -1407,6 +1407,22 @@ static uint32_t lp_workspace_access(const LpLine *l, int *exact)
     return mask;
 }
 
+// True when a call target is a 32-bit shift helper reading only __arith_lhs+0..3 and __arith_rhs+0..1
+static int lp_shift32_helper_call(const LpLine *l)
+{
+    size_t n;
+    const char *o;
+
+    if (!l->op || (!lp_is(l, "jsr") && !lp_is(l, "jmp")))
+        return 0;
+
+    o = lp_operand(l, &n);
+
+    return (n == 17 && !strncmp(o, ".loword(__ushr32)", 17)) ||
+           (n == 16 && !strncmp(o, ".loword(__shl32)", 16)) ||
+           (n == 17 && !strncmp(o, ".loword(__sshr32)", 17));
+}
+
 /* The arithmetic workspace is caller-clobbered. Unknown calls and
  * instructions may read every byte. During DSE a flag-dead update only
  * needs its input if a successor observes the written value. */
@@ -1422,6 +1438,10 @@ static void lp_workspace_liveness(LpUnit *u, LpWorkspaceLive *memory, int dead_u
 
         if (!l->op || lp_line_is(l, "sep #$20") || lp_line_is(l, "rep #$20"))
             continue;
+        if (lp_shift32_helper_call(l)) {
+            memory[i].read = 0x3Fu;
+            continue;
+        }
         if (l->call && lp_callee(l))
             continue;
         if (l->call || l->use == LP_ALL) {
@@ -1675,6 +1695,37 @@ static int lp_commute_spilled_add(LpUnit *u, Function *f, size_t at)
         return 0;
 
     for (unsigned i = 0; i < u->count; ++i) {
+        // Fold sta z:D; lda OP; [clc]; adc/and/ora/eor z:D into [clc]; op OP
+        if (lp_is(&u->lines[i], "sta") && !u->lines[i].m8) {
+            size_t an, on;
+            const char *a = lp_operand(&u->lines[i], &an);
+            int aslot = lp_workspace_word(a, an);
+            int load = aslot < 0 ? -1 : lp_next(u, i, 1);
+
+            if (load >= 0 && lp_is(&u->lines[load], "lda") && !u->lines[load].m8) {
+                int after = lp_next(u, (unsigned)load, 1);
+                int alu = after;
+                int is_add = 0;
+
+                if (after >= 0 && lp_line_is(&u->lines[after], "clc")) {
+                    alu = lp_next(u, (unsigned)after, 1);
+                    is_add = 1;
+                }
+
+                if (alu >= 0 && !u->lines[alu].m8 &&
+                    (is_add ? lp_is(&u->lines[alu], "adc")
+                            : (lp_is(&u->lines[alu], "and") || lp_is(&u->lines[alu], "ora") ||
+                               lp_is(&u->lines[alu], "eor"))) &&
+                    lp_operand_is(&u->lines[alu], a, an)) {
+                    const char *op_text = lp_operand(&u->lines[load], &on);
+
+                    lp_set(&u->lines[alu], "    %.3s %.*s", u->lines[alu].op, (int)on, op_text);
+                    u->lines[load].deleted = 1;
+                    return 1;
+                }
+            }
+        }
+
         int save = lp_next(u, i, 1);
         int copy = save < 0 ? -1 : lp_next(u, (unsigned)save, 1);
         int clear = copy < 0 ? -1 : lp_next(u, (unsigned)copy, 1);
@@ -1701,6 +1752,338 @@ static int lp_commute_spilled_add(LpUnit *u, Function *f, size_t at)
     }
 
     return 0;
+}
+
+// Next non-comment line, including directives and labels
+static int lp_next_noncomment(const LpUnit *u, unsigned k)
+{
+    unsigned i = k;
+
+    for (;;) {
+        if (++i >= u->count)
+            return -1;
+        if (!u->lines[i].length)
+            return -1;
+        if (u->lines[i].text[0] == ';')
+            continue;
+
+        return (int)i;
+    }
+}
+
+// High byte of A is already zero after an 8-bit mask, so a narrow immediate CMP can stay 16-bit
+static int lp_zero_extended_byte_compare(LpUnit *u, Function *f, size_t at)
+{
+    (void)f;
+    (void)at;
+
+    if (u->indirect)
+        return 0;
+
+    int liveness_ready = 0;
+
+    for (unsigned i = 0; i < u->count; ++i) {
+        LpLine *mask = &u->lines[i];
+        long bits;
+        int enter, a8, cmp, leave, a16;
+        long value;
+
+        if (mask->m8 || !lp_is(mask, "and"))
+            continue;
+
+        bits = lp_immediate(mask);
+
+        if (bits < 0 || bits > 255)
+            continue;
+
+        enter = lp_next(u, i, 1);
+
+        if (enter < 0 || !lp_line_is(&u->lines[enter], "sep #$20"))
+            continue;
+
+        a8 = lp_next_noncomment(u, (unsigned)enter);
+
+        if (a8 < 0 || u->lines[a8].label || u->lines[a8].length != 3 ||
+            strncmp(u->lines[a8].text, ".a8", 3))
+            continue;
+
+        cmp = lp_next_noncomment(u, (unsigned)a8);
+
+        if (cmp < 0 || !u->lines[cmp].op || !u->lines[cmp].m8 || !lp_is(&u->lines[cmp], "cmp"))
+            continue;
+
+        value = lp_immediate(&u->lines[cmp]);
+
+        if (value < 0 || value > 255)
+            continue;
+
+        leave = lp_next_noncomment(u, (unsigned)cmp);
+
+        if (leave < 0 || !u->lines[leave].op || !lp_line_is(&u->lines[leave], "rep #$20"))
+            continue;
+
+        a16 = lp_next_noncomment(u, (unsigned)leave);
+
+        if (a16 < 0 || u->lines[a16].label || u->lines[a16].length != 4 ||
+            strncmp(u->lines[a16].text, ".a16", 4))
+            continue;
+
+        if (!liveness_ready) {
+            lp_liveness(u);
+            liveness_ready = 1;
+        }
+
+        // Only C and Z match between 8-bit and 16-bit CMP when high byte is zero
+        if ((u->lines[cmp].out & LP_N) || (u->lines[leave].out & LP_N))
+            continue;
+
+        u->lines[enter].deleted = 1;
+        u->lines[a8].deleted = 1;
+        u->lines[leave].deleted = 1;
+        u->lines[a16].deleted = 1;
+        lp_set(&u->lines[cmp], "    cmp #$%04lX", value);
+        return 1;
+    }
+
+    return 0;
+}
+
+// True when an instruction cannot write memory or change globals
+static int lp_pure_register_or_branch(const LpLine *l)
+{
+    if (!l->op || l->m8 || l->x8 || l->call || l->ends || l->use == LP_ALL)
+        return 0;
+
+    if (lp_branch(l))
+        return 1;
+
+    if (lp_line_is(l, "txa") || lp_line_is(l, "tya") || lp_line_is(l, "tax") ||
+        lp_line_is(l, "tay") || lp_line_is(l, "txy") || lp_line_is(l, "tyx") ||
+        lp_line_is(l, "clc") || lp_line_is(l, "sec") || lp_line_is(l, "inx") ||
+        lp_line_is(l, "dex") || lp_line_is(l, "iny") || lp_line_is(l, "dey") ||
+        lp_line_is(l, "xba") || lp_line_is(l, "asl a") || lp_line_is(l, "lsr a") ||
+        lp_line_is(l, "inc a") || lp_line_is(l, "dec a"))
+        return 1;
+
+    if (lp_is(l, "lda") || lp_is(l, "ldx") || lp_is(l, "ldy"))
+        return 1;
+
+    if ((lp_is(l, "cmp") || lp_is(l, "cpx") || lp_is(l, "cpy") || lp_is(l, "and") ||
+         lp_is(l, "ora") || lp_is(l, "eor") || lp_is(l, "adc") || lp_is(l, "sbc")) &&
+        lp_immediate(l) >= 0)
+        return 1;
+
+    return 0;
+}
+
+// Eliminate redundant workspace copies when reloading a direct global or forwarding to a workspace slot
+static int lp_forward_workspace_copy(LpUnit *u, Function *f, size_t at)
+{
+    LpWorkspaceLive *memory = NULL;
+    int changed = 0;
+
+    (void)f;
+    (void)at;
+
+    if (u->indirect || lp_state.is_volatile || lp_state.parser->no_value_reuse ||
+        !lp_fixed_workspace(u))
+        return 0;
+
+    for (unsigned i = 0; i < u->count; ++i) {
+        LpLine *first = &u->lines[i];
+        size_t sn, wn;
+        const char *src, *w;
+
+        if (first->m8 || first->x8)
+            continue;
+
+        // Case A: lda direct_global; sta z:W; [pure ops / dead-W branch]; op z:W -> op direct_global
+        if (lp_is(first, "lda")) {
+            int save = lp_next(u, i, 1);
+
+            src = lp_operand(first, &sn);
+
+            if (save >= 0 && lp_is(&u->lines[save], "sta") && !u->lines[save].m8 &&
+                !memchr(src, ',', sn) && !memchr(src, '[', sn) &&
+                lp_workspace_word(src, sn) < 0 &&
+                ((sn > 3 && !memchr(src, '(', sn) &&
+                  (!strncmp(src, "z:_", 3) || !strncmp(src, "a:_", 3))) ||
+                 (sn > 12 && !strncmp(src, "a:.loword(_", 11) && src[sn - 1] == ')' &&
+                  !memchr(src + 11, '(', sn - 11)))) {
+                w = lp_operand(&u->lines[save], &wn);
+
+                if (lp_workspace_word(w, wn) >= 0) {
+                    if (!memory) {
+                        lp_liveness(u);
+                        memory = allocate(u->count * sizeof *memory);
+                        lp_workspace_liveness(u, memory, 1);
+                    }
+
+                    uint32_t wmask = memory[save].write;
+                    int jumped = 0;
+
+                    for (unsigned k = (unsigned)save + 1, steps = 0; k < u->count && steps < 16;
+                         ++k) {
+                        LpLine *cur = &u->lines[k];
+
+                        if (!cur->length || cur->text[0] == ';')
+                            continue;
+
+                        if (cur->label) {
+                            if (cur->first_incoming >= 0)
+                                break;
+
+                            continue;
+                        }
+
+                        if (!cur->op)
+                            break;
+
+                        ++steps;
+
+                        if (!cur->m8 &&
+                            (lp_is(cur, "adc") || lp_is(cur, "sbc") || lp_is(cur, "and") ||
+                             lp_is(cur, "ora") || lp_is(cur, "eor") || lp_is(cur, "cmp") ||
+                             lp_is(cur, "lda")) &&
+                            lp_operand_is(cur, w, wn)) {
+                            if (!(memory[k].out & wmask)) {
+                                lp_set(cur, "    %.3s %.*s", cur->op, (int)sn, src);
+                                changed = 1;
+                                goto done;
+                            }
+
+                            break;
+                        }
+
+                        // Follow a single-entry forward jmp (from relaxed-later inverted branches)
+                        if (!jumped && lp_is(cur, "jmp") && !cur->indirect &&
+                            cur->target > (int)k &&
+                            u->lines[cur->target].first_incoming == (int)k &&
+                            cur->next_incoming < 0) {
+                            int prev = (int)cur->target - 1;
+
+                            while (prev >= 0 &&
+                                   (!u->lines[prev].length || u->lines[prev].text[0] == ';' ||
+                                    (u->lines[prev].label &&
+                                     u->lines[prev].first_incoming < 0))) {
+                                --prev;
+                            }
+
+                            if (prev >= 0 && u->lines[prev].ends) {
+                                jumped = 1;
+                                k = (unsigned)cur->target;
+                                continue;
+                            }
+                        }
+
+                        if (!lp_pure_register_or_branch(cur) || (memory[k].read & wmask) ||
+                            (memory[k].write & wmask))
+                            break;
+
+                        if (lp_branch(cur)) {
+                            if (cur->target < 0)
+                                break;
+
+                            if (!(memory[cur->target].live & wmask))
+                                continue;
+
+                            // Follow a single-entry early-guard branch when fallthrough is dead on W
+                            if (!jumped && cur->target > (int)k && k + 1 < u->count &&
+                                !(memory[k + 1].live & wmask) &&
+                                u->lines[cur->target].first_incoming == (int)k &&
+                                cur->next_incoming < 0) {
+                                int prev = (int)cur->target - 1;
+
+                                while (prev >= 0 &&
+                                       (!u->lines[prev].length || u->lines[prev].text[0] == ';' ||
+                                        (u->lines[prev].label &&
+                                         u->lines[prev].first_incoming < 0))) {
+                                    --prev;
+                                }
+
+                                if (prev >= 0 && u->lines[prev].ends) {
+                                    jumped = 1;
+                                    k = (unsigned)cur->target;
+                                    continue;
+                                }
+                            }
+
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Case B: sta z:W; [straight-line not touching W or R]; lda z:W; sta z:R -> sta z:R
+        if (lp_is(first, "sta")) {
+            w = lp_operand(first, &wn);
+
+            if (lp_workspace_word(w, wn) >= 0) {
+                if (!memory) {
+                    lp_liveness(u);
+                    memory = allocate(u->count * sizeof *memory);
+                    lp_workspace_liveness(u, memory, 1);
+                }
+
+                uint32_t wmask = memory[i].write;
+                int k = lp_next(u, i, 1);
+
+                for (unsigned steps = 0; k >= 0 && steps < 12;
+                     k = lp_next(u, (unsigned)k, 1), ++steps) {
+                    LpLine *cur = &u->lines[k];
+
+                    if (cur->m8 || cur->x8 || cur->call || cur->ends || lp_branch(cur))
+                        break;
+
+                    if (lp_is(cur, "lda") && lp_operand_is(cur, w, wn)) {
+                        int store = lp_next(u, (unsigned)k, 1);
+
+                        if (store >= 0 && lp_is(&u->lines[store], "sta") && !u->lines[store].m8 &&
+                            !(memory[k].out & wmask)) {
+                            size_t rn;
+                            const char *r = lp_operand(&u->lines[store], &rn);
+                            int rslot = lp_workspace_word(r, rn);
+
+                            if (rslot >= 0 && !(memory[store].write & wmask)) {
+                                uint32_t rmask = memory[store].write;
+                                int conflict = 0;
+
+                                for (unsigned j = i + 1; j < (unsigned)k; ++j) {
+                                    if ((memory[j].read & rmask) || (memory[j].write & rmask)) {
+                                        conflict = 1;
+                                        break;
+                                    }
+                                }
+
+                                int after = lp_next(u, (unsigned)store, 1);
+                                int a_dead = !(u->lines[store].out & (LP_A | LP_FLAGS)) ||
+                                             (after >= 0 &&
+                                              lp_shift32_helper_call(&u->lines[after]));
+
+                                if (!conflict && a_dead) {
+                                    lp_set(first, "    sta %.*s", (int)rn, r);
+                                    cur->deleted = 1;
+                                    u->lines[store].deleted = 1;
+                                    changed = 1;
+                                    goto done;
+                                }
+                            }
+                        }
+
+                        break;
+                    }
+
+                    if ((memory[k].read & wmask) || (memory[k].write & wmask))
+                        break;
+                }
+            }
+        }
+    }
+
+done:
+    free(memory);
+    return changed;
 }
 
 /* Fuse the saved trip counter with the retained X displacement. The typed

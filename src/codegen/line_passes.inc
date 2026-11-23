@@ -274,12 +274,19 @@ static void line_passes(Function *f, size_t at)
     while (lp_run(&runner, f, at, lp_redundant_y_offset)) {
     }
 
-    lp_run(&runner, f, at, lp_commute_spilled_add);
+    while (lp_run(&runner, f, at, lp_commute_spilled_add)) {
+    }
+
+    while (lp_run(&runner, f, at, lp_forward_workspace_copy)) {
+    }
 
     while (lp_run(&runner, f, at, lp_direct_rhs_operand)) {
     }
 
     lp_run(&runner, f, at, lp_drop_dead_workspace_stores);
+
+    while (lp_run(&runner, f, at, lp_zero_extended_byte_compare)) {
+    }
     lp_run(&runner, f, at, lp_scaled_word_latch);
 
     while (lp_run(&runner, f, at, lp_rmw_reload)) {
@@ -411,6 +418,14 @@ static void line_passes(Function *f, size_t at)
     lp_run(&runner, f, at, lp_store_zero);
 
     while (lp_run(&runner, f, at, lp_byte_region_modes)) {
+    }
+
+    if (lp_run(&runner, f, at, lp_zero_extended_byte_compare)) {
+        while (lp_run(&runner, f, at, lp_zero_extended_byte_compare)) {
+        }
+
+        while (lp_run(&runner, f, at, lp_demanded_masks)) {
+        }
     }
 
     lp_run(&runner, f, at, lp_store_zero);
