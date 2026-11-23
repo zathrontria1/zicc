@@ -4,7 +4,9 @@ If you're building a game, start with the [setup guide](../README.md), then
 look up [C features](operations.md), [ROM sizes](rom-allocation.md) or
 [library functions](libc.md).
 
-If you're changing the compiler, use the [development commands](#development-commands)
+If you're changing the compiler, start with the
+[architecture and pass pipeline](technical/architecture.md) to see how stages
+fit together, then use the [development commands](#development-commands)
 to build it and the [verification guide](#verification) to check your change.
 To see why zicc chose an instruction, start with the C and assembly examples in
 the [optimization guide](optimizations.md). Its [implementation reference](technical/optimization-catalog.md)

@@ -1,6 +1,8 @@
 # Optimization implementation reference
 
-Start with the [optimization guide](../optimizations.md) for a C example.
+Start with the [optimization guide](../optimizations.md) for a C example, or
+read the [compiler architecture](architecture.md) for the full pass order and
+shared state.
 Use the table here to find the compiler code that implements it and the tests
 that check it. Timing figures belong to the builds described in the linked
 reports.
