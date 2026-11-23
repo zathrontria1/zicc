@@ -869,8 +869,7 @@ static void emit_function(Function *f)
     }
 
     if (!s->interrupt && !volatile_statements(f->body) && !statement_inline_markers(f->body) &&
-        (word_shift_scan_leaf(f) || range_scan_leaf(f) || guarded_update_leaf(f) ||
-         guarded_byte_lookup_leaf(f) || counted_reduction(f)))
+        (word_shift_scan_leaf(f) || range_scan_leaf(f) || counted_reduction(f)))
         return;
 
     scalar_propagate(f);

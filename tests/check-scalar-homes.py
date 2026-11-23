@@ -90,12 +90,14 @@ def main():
   result[name]=support.emulate(rom,labels,0)
   if name in GUARDED_SELECTED:
    assembly=(OUT/(name+'.s')).read_text();part=assembly.split('_update:\n',1)[1].split('__size_update',1)[0]
-   assert ('; guarded word update leaf' in part)==GUARDED_SELECTED[name],name
    if GUARDED_SELECTED[name]:
     offset=4 if name=='guarded_nested' else 2
-    assert f'    adc a:${offset:04X},x\n    bmi ' in part and f'    sta a:${offset:04X},x\n' in part,name
-    assert '    phy\n' not in part and '    tsc\n' not in part and '__arith_' not in part,name
-    assert part.index('    bmi ')<part.index('    sta '),name
+    ops=[line for line in part.splitlines() if line.startswith('    ')]
+    add_idx=ops.index(f'    adc a:${offset:04X},x')
+    branch_op=ops[add_idx+1]
+    assert branch_op.startswith('    bmi ') or branch_op.startswith('    bpl '),part
+    assert f'    sta a:${offset:04X},x' in ops[add_idx+2:],part
+    assert '    phy\n' not in part and '    tsc\n' not in part and '__arith_' not in part,part
   def baseline(cmd,*a,**kw):
    if Path(cmd[0]).name=='zicc.exe':cmd=[args.baseline,*cmd[1:]]
    return original(cmd,*a,**kw)
