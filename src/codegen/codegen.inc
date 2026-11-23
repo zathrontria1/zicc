@@ -8939,8 +8939,9 @@ static void emit_value(Expr *e)
              word_constant_product(e) || hardware_byte_product(e) || byte_bitwise_binary(e) ||
              direct_large_shift(e) || indexed_pair_binary(e) || indexed_immediate_pair(e) ||
              shifted_indexed_long_bits(e) || indirect_long_binary(e) || near_word_pair(e) ||
-             deferred_binary(e) || shared_adjusted_members(e) || shared_element_binary(e) ||
-             narrow_product_sum(e) || widened_word_product(e) || staged_binary(e)))
+             direct_wide_binary(e) || deferred_binary(e) || shared_adjusted_members(e) ||
+             shared_element_binary(e) || narrow_product_sum(e) || widened_word_product(e) ||
+             staged_binary(e)))
             break;
 
         if ((volatile_expression(e) || (!fixed_near_pointer_sum(e) && !indexed_pointer_sum(e))) &&

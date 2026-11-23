@@ -912,8 +912,8 @@ static void emit_function(Function *f)
         (statement_inline_markers(f->body)
              ? word_expression_leaf(f)
              : (far_loop_leaf(f) || predicate_loop_leaf(f) || indexed_loop_leaf(f) ||
-                register_loop_leaf(f) || word_leaf(f) || word_expression_leaf(f) || wide_leaf(f) ||
-                entry_cursor_leaf(f) || entry_cursor_nested_leaf(f))))
+                register_loop_leaf(f) || word_expression_leaf(f) || entry_cursor_leaf(f) ||
+                entry_cursor_nested_leaf(f))))
         return;
     if (scalar_leaf(f))
         return;

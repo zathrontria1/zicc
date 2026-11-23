@@ -104,18 +104,20 @@ unsigned int svalue(long a,long b){return (a==b)|((a!=b)<<1)|((a<b)<<2)|((a<=b)<
     for n in range(7, 16):
         shift = assembly.split(f'_cr{n}:', 1)[1].split(f'__size_cr{n}', 1)[0]
         assert 'lda z:__arith_lhs+1' in shift and shift.count('ror z:__arith_lhs') == max(0, n-8), shift
-    for name in ('add', 'sub', 'sadd', 'ssub', 'band', 'bor', 'bxor', 'shl', 'shr', 'sar', 'mix'):
-        body = assembly.split('_' + name + ':', 1)[1].split('__size_' + name, 1)[0]
-        assert 'native stack leaf' in body and 'tcs' not in body and 'tay' not in body, name
     def function_body(name):
         return assembly.split('_' + name + ':', 1)[1].split('__size_' + name, 1)[0]
-    assert function_body('add') == function_body('sadd')
-    assert function_body('sub') == function_body('ssub')
+    def function_ops(name):
+        return [line for line in function_body(name).splitlines() if line.startswith('    ')]
+    for name in ('add', 'sub', 'sadd', 'ssub', 'band', 'bor', 'bxor', 'shl', 'shr', 'sar', 'mix'):
+        body = function_body(name)
+        assert 'tcs' not in body and 'tay' not in body and 'phy' not in body, (name, body)
+    assert function_ops('add') == function_ops('sadd')
+    assert function_ops('sub') == function_ops('ssub')
     for name in ('wadd', 'wsub', 'wrev', 'wsadd', 'wssub', 'wand', 'wor', 'wxor'):
         body = function_body(name)
-        assert 'native word leaf' in body and 'tcs' not in body and 'tay' not in body, name
-    assert function_body('wadd') == function_body('wsadd')
-    assert function_body('wsub') == function_body('wssub')
+        assert 'native word expression leaf' in body and 'tcs' not in body and 'tay' not in body, name
+    assert function_ops('wadd') == function_ops('wsadd')
+    assert function_ops('wsub') == function_ops('wssub')
     table = ',\n'.join('{' + ','.join(map(str, row)) + '}' for row in rows)
     names = ('a', 'b', 'ea', 'es', 'eb', 'eo', 'ex', 'el', 'er', 'ear', 'em')
     assignments = ''.join(f'long({labels[name]},c[{column}]);' for name, column in zip(names, (1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12)))

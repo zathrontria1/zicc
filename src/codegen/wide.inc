@@ -621,6 +621,42 @@ static int readonly_integer_expression(Expr *e)
            readonly_integer_expression(e->left) && readonly_integer_expression(e->right);
 }
 
+static int direct_wide_binary(Expr *e)
+{
+    Type t = e->type;
+    const char *instruction;
+
+    if (e->kind != EX_BINARY || t.pointers || t.base != TY_LONG || reg_width(t) != 4 ||
+        !basic_integer_op(e->op) || !direct_operand(e->left, t, 0, 0) ||
+        !direct_operand(e->left, t, 1, 0) || !direct_operand(e->right, t, 0, 0) ||
+        !direct_operand(e->right, t, 1, 0))
+        return 0;
+
+    instruction = e->op == '+'   ? "adc"
+                  : e->op == '-' ? "sbc"
+                  : e->op == '&' ? "and"
+                  : e->op == '|' ? "ora"
+                                 : "eor";
+    code("    lda ");
+    direct_operand(e->left, t, 0, 1);
+    code("\n");
+
+    if (e->op == '+' || e->op == '-')
+        code("    %s\n", e->op == '+' ? "clc" : "sec");
+
+    code("    %s ", instruction);
+    direct_operand(e->right, t, 0, 1);
+    code("\n    pha\n");
+    cg.stack_bias += 2;
+    code("    lda ");
+    direct_operand(e->left, t, 1, 1);
+    code("\n    %s ", instruction);
+    direct_operand(e->right, t, 1, 1);
+    code("\n    tax\n    pla\n");
+    cg.stack_bias -= 2;
+    return 1;
+}
+
 static int deferred_binary(Expr *e)
 {
     Type t = e->type;
@@ -789,227 +825,4 @@ static Symbol *leaf_parameter(Function *f, unsigned index)
     }
 
     return NULL;
-}
-
-static int word_register(Expr *e, Symbol *first, Symbol *second)
-{
-    while (e->kind == EX_CAST && e->type.base == TY_INT && !e->type.pointers &&
-           e->left->type.base == TY_INT && !e->left->type.pointers) {
-        e = e->left;
-    }
-
-    if (e->kind != EX_OBJECT)
-        return 0;
-    if (first && e->symbol == first)
-        return 1;
-    if (second && e->symbol == second)
-        return 2;
-
-    return 0;
-}
-
-static int word_leaf(Function *f)
-{
-    Statement *s = f->body;
-    Expr *e, *lhs, *rhs;
-    Symbol *fn = f->symbol, *first = NULL, *second = NULL;
-
-    unsigned i;
-    int left, right;
-    const char *instruction;
-
-    if (s->kind == ST_BLOCK)
-        s = s->body;
-    if (!s || s->next || s->kind != ST_RETURN || !s->expression || fn->param_count < 0 ||
-        fn->param_count > 2 || !strcmp(fn->name, "main") ||
-        f->slots != (unsigned)fn->param_count * 2)
-        return 0;
-
-    e = s->expression;
-
-    while (e->kind == EX_CAST && e->type.base == TY_INT && !e->type.pointers &&
-           e->left->type.base == TY_INT && !e->left->type.pointers) {
-        e = e->left;
-    }
-
-    if (e->kind != EX_BINARY || e->type.base != TY_INT || e->type.pointers ||
-        !basic_integer_op(e->op))
-        return 0;
-
-    for (i = 0; i < (unsigned)fn->param_count; ++i) {
-        if (fn->params[i].base != TY_INT || fn->params[i].pointers)
-            return 0;
-    }
-
-    if (fn->param_count > 0)
-        first = leaf_parameter(f, 0);
-    if (fn->param_count > 1)
-        second = leaf_parameter(f, 1);
-
-    left = word_register(e->left, first, second);
-    right = word_register(e->right, first, second);
-
-    if ((!left && !direct_operand(e->left, e->type, 0, 0)) ||
-        (!right && !direct_operand(e->right, e->type, 0, 0)))
-        return 0;
-
-    lhs = e->left;
-    rhs = e->right;
-
-    if (e->op != '-' && right && (!left || (left == 1 && right == 2))) {
-        Expr *swap = lhs;
-        int reg = left;
-
-        lhs = rhs;
-        rhs = swap;
-        left = right;
-        right = reg;
-    }
-
-    instruction = e->op == '+'   ? "adc"
-                  : e->op == '-' ? "sbc"
-                  : e->op == '&' ? "and"
-                  : e->op == '|' ? "ora"
-                                 : "eor";
-    code(".segment \"CODE\"\n.export _%s\n_%s:\n; native word leaf\n", fn->asm_name, fn->asm_name);
-
-    if (right) {
-        cg.arithmetic = 1;
-        code("    %s z:__arith_rhs\n", right == 1 ? "stx" : "sta");
-    }
-
-    if (left == 1)
-        code("    txa\n");
-    else if (!left) {
-        code("    lda ");
-        direct_operand(lhs, e->type, 0, 1);
-        code("\n");
-    }
-
-    if (e->op == '+' || e->op == '-')
-        code("    %s\n", e->op == '+' ? "clc" : "sec");
-
-    code("    %s ", instruction);
-
-    if (right)
-        code("z:__arith_rhs");
-    else
-        direct_operand(rhs, e->type, 0, 1);
-
-    code("\n");
-    code("    rts\n__size_%s = * - _%s\n", fn->asm_name, fn->asm_name);
-    return 1;
-}
-
-static int wide_leaf(Function *f)
-{
-    Statement *s = f->body;
-    Expr *e, *shift = NULL;
-    Symbol *fn = f->symbol, *count = NULL;
-
-    unsigned i, j, slots = 0, offset = 3 + cg.parser->long_return;
-
-    if (s->kind == ST_BLOCK)
-        s = s->body;
-    if (!s || s->next || s->kind != ST_RETURN || !s->expression)
-        return 0;
-
-    e = s->expression;
-
-    if (e->kind != EX_BINARY || e->type.base != TY_LONG || e->type.pointers)
-        return 0;
-
-    if (e->op == '^' && e->left->kind == EX_BINARY && e->right->kind == EX_BINARY &&
-        ((e->left->op == TOK_SHL && e->right->op == TOK_SHR) ||
-         (e->left->op == TOK_SHR && e->right->op == TOK_SHL)) &&
-        e->left->left->kind == EX_OBJECT && e->right->left->kind == EX_OBJECT &&
-        e->left->left->symbol == e->right->left->symbol && e->left->right->kind == EX_OBJECT &&
-        e->right->right->kind == EX_OBJECT && e->left->right->symbol == e->right->right->symbol)
-        shift = e->left;
-    else if (e->op == TOK_SHL || e->op == TOK_SHR)
-        shift = e;
-
-    if (shift && shift->right->kind == EX_OBJECT) {
-        count = shift->right->symbol;
-
-        if (fn->param_count != 2 || reg_width(fn->params[0]) != 4 ||
-            reg_width(fn->params[1]) != 2 || count->owner != f->id || count->scope ||
-            strcmp(count->name, fn->param_names[1]) || shift->left->kind != EX_OBJECT ||
-            shift->left->symbol->owner != f->id ||
-            strcmp(shift->left->symbol->name, fn->param_names[0]))
-            return 0;
-    } else {
-        if (!basic_integer_op(e->op) && e->op != '*' && e->op != '/' && e->op != '%' && !shift)
-            return 0;
-        if (!direct_operand(e->left, e->type, 0, 0) || !direct_operand(e->left, e->type, 1, 0) ||
-            !direct_operand(e->right, e->type, 0, 0) || !direct_operand(e->right, e->type, 1, 0))
-            return 0;
-    }
-
-    for (i = 0; i < (unsigned)fn->param_count; ++i) {
-        if (reg_width(fn->params[i]) != 4 && !(count && i == 1))
-            return 0;
-
-        slots += reg_width(fn->params[i]);
-    }
-
-    if (f->slots != slots || !strcmp(fn->name, "main"))
-        return 0;
-
-    for (i = 0; i < (unsigned)fn->param_count; ++i) {
-        if (count && i == 1)
-            continue;
-
-        for (j = 0; j < cg.parser->symbol_count; ++j) {
-            Symbol *v = &cg.parser->symbols[j];
-
-            if (v->owner == f->id && v->scope == 0 && !strcmp(v->name, fn->param_names[i])) {
-                v->offset = offset;
-                break;
-            }
-        }
-
-        offset += 4;
-    }
-
-    cg.stack_leaf = 1;
-    cg.stack_bias = 0;
-    cg.leaf_count = count;
-    code(".segment \"CODE\"\n.export _%s\n_%s:\n; native stack leaf\n", fn->asm_name, fn->asm_name);
-
-    if (count) {
-        cg.arithmetic = 1;
-        code("    sta z:__arith_rhs\n    stz z:__arith_rhs+2\n");
-    }
-
-    if (!shift && basic_integer_op(e->op)) {
-        const char *instruction = e->op == '+'   ? "adc"
-                                  : e->op == '-' ? "sbc"
-                                  : e->op == '&' ? "and"
-                                  : e->op == '|' ? "ora"
-                                                 : "eor";
-        code("    lda ");
-        direct_operand(e->left, e->type, 0, 1);
-        code("\n");
-
-        if (e->op == '+' || e->op == '-')
-            code("    %s\n", e->op == '+' ? "clc" : "sec");
-
-        code("    %s ", instruction);
-        direct_operand(e->right, e->type, 0, 1);
-        code("\n    pha\n");
-        cg.stack_bias += 2;
-        code("    lda ");
-        direct_operand(e->left, e->type, 1, 1);
-        code("\n    %s ", instruction);
-        direct_operand(e->right, e->type, 1, 1);
-        code("\n    tax\n    pla\n");
-        cg.stack_bias -= 2;
-    } else
-        emit_value(e);
-
-    code("    rts\n__size_%s = * - _%s\n", fn->asm_name, fn->asm_name);
-    cg.stack_leaf = 0;
-    cg.leaf_count = NULL;
-    return 1;
 }

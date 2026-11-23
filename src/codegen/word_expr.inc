@@ -657,7 +657,11 @@ static void word_evaluate(WordPlan *p, Expr *e)
     lhs = word_operand(p, e->left, &left);
     rhs = word_operand(p, e->right, &right);
 
-    if (rhs) {
+    if (lhs && rhs && e->op != '-' && right.kind == WORD_SECOND && p->a_second &&
+        left.kind != WORD_SECOND) {
+        word_evaluate(p, e->right);
+        operand = word_resolve(p, left, 1, &slot);
+    } else if (rhs) {
         word_evaluate(p, e->left);
         operand = word_resolve(p, right, 1, &slot);
     } else if (lhs && e->op != '-') {
