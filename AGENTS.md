@@ -18,6 +18,9 @@ Run native Windows GNU Make from the repository root with MSVC (C17), cc65, and 
 Write new and edited code in a readable, uncrowded style instead of copying legacy dense one-liners:
 
 - Use one statement per line, consistent four-space indentation in C and Python, tabs for Make recipes, and empty lines between logical blocks to avoid walls of text.
+- Separate variable declarations from executable statements with a blank line.
+- Always brace loop blocks (`for`, `while`, `do...while`) regardless of what they contain, and put a blank line before and after each loop block (except directly inside `{` or `}`).
+- Put a blank line before and after conditional blocks (`if...else if...else` chains and `switch`). For unbraced conditionals, always put the executed line on its own line with a blank line before and after, except inside flat lookup/dispatch `if` ladders where consecutive entries stay grouped together.
 - Keep variable and function names clear (`snake_case` in C and Python). Name Python verification scripts `check-<feature>.py`.
 - Add short, plain ELI5 comments where the code is not obvious (either `//` above a block or a brief `//` to the right of a variable or short assignment). Avoid parroting what the code already says, and never end a single-line comment with a period `.`.
 - Splitting a large file (such as `codegen.inc` or `line_passes.inc`) into focused files that own their own state instead of sharing global `cg` is an allowed and encouraged improvement when working in that area.
