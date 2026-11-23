@@ -6,14 +6,14 @@ zicc runs on Windows and Linux. It turns C into 65816 assembly, ca65 assembles t
 and ld65 links it into a ROM. The included runtime starts your program and
 provides a text console, interrupt support, math routines and a small C library.
 Check which C features zicc supports before you port an existing program.
-[Supported C features and limits](docs/operations.md#debugging-and-current-limits)
+[Supported C features and limits](docs/operations.md#unsupported-c-features)
 
 ## Getting started
 
 Install these tools on Windows.
 
 - MSVC with C17 support, discoverable through `vswhere`.
-- ca65/ld65 and the other cc65 tools (default: `C:/bin/cc65/bin`).
+- ca65/ld65 and the other cc65 tools (pointed to by `$CC65_BIN`).
 - A native Windows build of GNU Make on `PATH`. Check that `make --version` reports `Built for Windows32`.
 - Python 3 and PowerShell. Verification also uses Pillow and Mesen.
 
@@ -38,7 +38,7 @@ Open `build/minimal.sfc` for an idle loop or `build/prompt.sfc` for a text
 prompt. See the [samples guide](samples/readme.md) for the other ROMs.
 
 Use the `minimal` or `prompt` target to build an individual ROM. Pass
-`"CC65_BIN=C:/path/to/cc65/bin"` if cc65 is installed elsewhere. Other
+`"CC65_BIN=/path/to/cc65/bin"` if cc65 is installed elsewhere. Other
 project guides use `make` for the same native Windows build of GNU Make.
 
 ### Linux

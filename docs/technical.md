@@ -95,7 +95,7 @@ records the HiROM baseline and master-clock comparisons.
 
 ## Host toolchain
 
-Use a native Windows build of GNU Make, cc65 (default `C:/bin/cc65/bin`),
+Use a native Windows build of GNU Make, cc65 (`$CC65_BIN`),
 Python 3, and MSVC discoverable with vswhere. The compiler builds with
 `/std:c17 /W4 /WX /O2`. Override `CC65_BIN` if needed. Verification also
 uses PowerShell, Pillow, and Mesen.

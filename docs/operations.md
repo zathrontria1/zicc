@@ -2,7 +2,8 @@
 
 On the SNES, an `int` takes two bytes and an ordinary pointer can reach one
 64 KiB bank of working memory. If you are bringing code over from a PC, check
-[type sizes](#scalar-types) and [pointer sizes](#near-and-far-pointers) first.
+[type sizes](#scalar-types), [pointer sizes](#near-and-far-pointers), and
+[unsupported C features](#unsupported-c-features) first.
 For a game that talks to the hardware, see [hardware registers](#volatile-accesses-and-mmio)
 and [interrupt handlers](#native-interrupt-functions). The compiler's register
 and calling rules are in the [assembly reference](technical/operations.md).
@@ -721,16 +722,37 @@ const unsigned char tiles[] = {
   FOUND=1 or EMPTY=2. Unsupported vendor parameters return NOT_FOUND in probes
   and produce errors in actual directives.
 
+## Unsupported C features
+
+`zicc` implements most of C89 and part of C99, not a full C99/C11 compiler.
+Check this list before porting existing C code:
+
+- **Preprocessor:** variadic macros (`...` / `__VA_ARGS__`), `#pragma`,
+  `#error`, `#warning`, and standard version macros (`__STDC__`,
+  `__STDC_VERSION__`).
+- **Initializers and literals:** designated initializers (`.field = ...`,
+  `[i] = ...`), empty initializer lists (`{}`), compound literals
+  (`(struct S){ ... }`), union initializers past the first member, initializers
+  on explicit `__dpage` globals, and pointer-to-integer casts in constant
+  global initializers.
+- **Types and declarations:** variable-length arrays (VLAs), flexible array
+  members, anonymous struct/union member promotion, incomplete `enum` forward
+  declarations, C99 `restrict`, and C11 keywords (`_Static_assert`, `_Generic`,
+  `_Alignas`, `_Alignof`, `_Atomic`, `_Thread_local`, `_Noreturn`).
+- **Expressions and inline assembly:** aggregate casts, aggregate conditional
+  (`?:`) and comma values, aggregate arithmetic or comparison, file-scope
+  inline assembly, and extended `asm` operands or clobbers.
+- **Library and tooling:** `time_t`, `time()`, and calendar conversions; wide
+  characters; `%e`, `%a`, `%p`, and `%n` format specifiers in `printf`/`sprintf`;
+  and original-C source stepping in debuggers (debug labels map to emitted
+  assembly).
+
 ## Debugging and current limits
 
 - The `--c89-keywords` compiler option permits `inline` as a name and retains the extension
   spellings `__inline` and `__inline__`.
 - `__const`, `__volatile` and `__signed` are alternate keyword spellings. Their
   forms with trailing double underscores are also accepted.
-
-- The compiler implements a C subset, not a complete conforming C implementation.
-- Unsupported features include aggregate casts and conditional values.
-  Additional initializer and preprocessor limits appear above.
 - Builds retain emitted assembly, maps and debugger labels. Debug source mapping
   uses generated assembly; original-C source stepping is not implemented.
 - For library pointer requirements and allocation rules, see the
