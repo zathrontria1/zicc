@@ -49,7 +49,10 @@ static int word_shift_loaded(Expr *value,int op,Type result,unsigned count)
     if(!word_shift_plan(value,op,result,count,&p))return 0;
     code("; byte-shuffle word shift\n    xba\n");
     if(p.mask)code("    and #$%04X\n",p.mask);
-    for(i=0;i<p.steps;++i)code(p.left?"    asl a\n":"    lsr a\n");return 1;
+    for (i = 0; i < p.steps; ++i) {
+        code(p.left ? "    asl a\n" : "    lsr a\n");
+    }
+    return 1;
 }
 
 /* Constant divisors are selected before divmod caching as well as from the
@@ -207,7 +210,11 @@ static int shift_index(Expr *e,ShiftIndex *index)
         if(!integer_constant(e->right,&n)){value=e->right;if(!integer_constant(e->left,&n))return 0;}
         if(n>15||!shift_index(value,&p))return 0;
         if(e->op=='+')p.offset+=n;else{p.offset*=n;p.stride*=n;}
-        if(p.offset+p.mask*p.stride>=16)return 0;*index=p;return 1;
+        if (p.offset + p.mask * p.stride >= 16) {
+            return 0;
+        }
+        *index = p;
+        return 1;
     }
     if(e->kind!=EX_BINARY)return 0;
     value=e->left;
@@ -215,7 +222,10 @@ static int shift_index(Expr *e,ShiftIndex *index)
         if(!integer_constant(e->right,&n)){value=e->right;if(!integer_constant(e->left,&n))return 0;}
         if(n>15)return 0;
     }else if(e->op=='%'&&common_type(e->left->type,e->right->type).is_unsigned){
-        if(!integer_constant(e->right,&n)||!n||n>16||(n&(n-1)))return 0;--n;
+        if (!integer_constant(e->right, &n) || !n || n > 16 || (n & (n - 1))) {
+            return 0;
+        }
+        --n;
     }else return 0;
     if(value->type.pointers||reg_width(value->type)!=2||value->type.base==TY_FLOAT)return 0;
     *index=(ShiftIndex){value,n,1,0};return 1;

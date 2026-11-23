@@ -12,7 +12,10 @@ static Expr *body_clone(Expr *e)
 {
     Expr *n;unsigned i;if(!e)return NULL;n=allocate(sizeof *n);*n=*e;
     n->left=body_clone(e->left);n->right=body_clone(e->right);n->third=body_clone(e->third);
-    for(i=0;i<e->arg_count;++i)n->args[i]=body_clone(e->args[i]);return n;
+    for (i = 0; i < e->arg_count; ++i) {
+        n->args[i] = body_clone(e->args[i]);
+    }
+    return n;
 }
 static Expr *body_object(Symbol *v,Location at)
 {
@@ -52,21 +55,36 @@ static int body_equal(Expr *a,Expr *b)
     if(a->kind!=b->kind||a->op!=b->op||a->value!=b->value||a->value_high!=b->value_high||a->symbol!=b->symbol||
        a->string!=b->string||a->arg_count!=b->arg_count||!same_type(a->type,b->type))return 0;
     if(!body_equal(a->left,b->left)||!body_equal(a->right,b->right)||!body_equal(a->third,b->third))return 0;
-    for(i=0;i<a->arg_count;++i)if(!body_equal(a->args[i],b->args[i]))return 0;return 1;
+    for (i = 0; i < a->arg_count; ++i) {
+        if (!body_equal(a->args[i], b->args[i])) {
+            return 0;
+        }
+    }
+    return 1;
 }
 static int body_effect(Expr *e)
 {
     unsigned i;if(!e)return 0;
     if(e->kind==EX_CALL||e->kind==EX_ASSIGN||e->kind==EX_PRE||e->kind==EX_POST||volatile_expression(e))return 1;
     if(body_effect(e->left)||body_effect(e->right)||body_effect(e->third))return 1;
-    for(i=0;i<e->arg_count;++i)if(body_effect(e->args[i]))return 1;return 0;
+    for (i = 0; i < e->arg_count; ++i) {
+        if (body_effect(e->args[i])) {
+            return 1;
+        }
+    }
+    return 0;
 }
 static int body_mutating(Expr *e)
 {
     unsigned i;if(!e)return 0;
     if(e->kind==EX_ASSIGN||e->kind==EX_PRE||e->kind==EX_POST)return 1;
     if(body_mutating(e->left)||body_mutating(e->right)||body_mutating(e->third))return 1;
-    for(i=0;i<e->arg_count;++i)if(body_mutating(e->args[i]))return 1;return 0;
+    for (i = 0; i < e->arg_count; ++i) {
+        if (body_mutating(e->args[i])) {
+            return 1;
+        }
+    }
+    return 0;
 }
 static int body_nested_updates(Expr *e)
 {
@@ -79,7 +97,12 @@ static int body_has_deref(Expr *e)
     unsigned i;if(!e)return 0;
     if(e->kind==EX_DEREF)return 1;
     if(body_has_deref(e->left)||body_has_deref(e->right)||body_has_deref(e->third))return 1;
-    for(i=0;i<e->arg_count;++i)if(body_has_deref(e->args[i]))return 1;return 0;
+    for (i = 0; i < e->arg_count; ++i) {
+        if (body_has_deref(e->args[i])) {
+            return 1;
+        }
+    }
+    return 0;
 }
 static int body_pointer_post_store(Statement *s,Expr **target_out,Symbol **home_out,unsigned *offset_out,unsigned *stride_out,Expr **val)
 {
@@ -211,7 +234,10 @@ static void body_clear(BodyFacts *facts)
 static BodyFacts *body_copy_facts(BodyFacts *facts)
 {
     BodyFacts *copy=allocate(sizeof *copy);unsigned i;
-    for(i=0;i<1024;++i)copy->value[i]=body_clone(facts->value[i]);return copy;
+    for (i = 0; i < 1024; ++i) {
+        copy->value[i] = body_clone(facts->value[i]);
+    }
+    return copy;
 }
 /* Conservative within an expression: forget every assignment before replacing
  * any read. This avoids imposing an evaluation order on C operands/arguments. */
@@ -662,12 +688,20 @@ static void body_expr(Expr **at,BodyFacts *facts,int discarded)
 }
 static int body_value_returns(Statement *s)
 {
-    for(;s;s=s->next)if((s->kind==ST_RETURN&&s->expression)||body_value_returns(s->body)||
-        body_value_returns(s->alternate)||body_value_returns(s->initial))return 1;return 0;
+    for (; s; s = s->next) {
+        if ((s->kind == ST_RETURN && s->expression) || body_value_returns(s->body) ||
+            body_value_returns(s->alternate) || body_value_returns(s->initial)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 static Statement *body_single(Statement *s)
 {
-    while(s&&s->kind==ST_BLOCK&&!s->next)s=s->body;return s;
+    while (s && s->kind == ST_BLOCK && !s->next) {
+        s = s->body;
+    }
+    return s;
 }
 static int body_step_direction(Expr *e,Symbol *v)
 {
@@ -2033,12 +2067,21 @@ static unsigned body_reads(Expr *e,Symbol *v,int discarded)
     if(discarded&&(e->kind==EX_ASSIGN||e->kind==EX_PRE||e->kind==EX_POST)&&e->left->kind==EX_OBJECT&&e->left->symbol==v)
         return body_reads(e->right,v,0);
     n=body_reads(e->left,v,0)+body_reads(e->right,v,0)+body_reads(e->third,v,0);
-    for(i=0;i<e->arg_count;++i)n+=body_reads(e->args[i],v,0);return n;
+    for (i = 0; i < e->arg_count; ++i) {
+        n += body_reads(e->args[i], v, 0);
+    }
+    return n;
 }
 static unsigned body_statement_reads(Statement *s,Symbol *v)
 {
-    unsigned n=0;for(;s;s=s->next)n+=body_reads(s->expression,v,s->kind==ST_EXPR)+body_reads(s->step,v,1)+
-        body_statement_reads(s->body,v)+body_statement_reads(s->alternate,v)+body_statement_reads(s->initial,v);return n;
+    unsigned n = 0;
+
+    for (; s; s = s->next) {
+        n += body_reads(s->expression, v, s->kind == ST_EXPR) + body_reads(s->step, v, 1) +
+             body_statement_reads(s->body, v) + body_statement_reads(s->alternate, v) +
+             body_statement_reads(s->initial, v);
+    }
+    return n;
 }
 static void body_drop_private_update(Expr **at,Symbol *v)
 {
@@ -2252,7 +2295,10 @@ static Statement *body_flatten(Statement *s)
         if(s->kind==ST_EMPTY)free(s);
         else if(s->kind==ST_BLOCK&&!s->inline_callee){*tail=body_flatten(s->body);s->body=NULL;free(s);}
         else *tail=s;
-        while(*tail)tail=&(*tail)->next;s=next;
+        while (*tail) {
+            tail = &(*tail)->next;
+        }
+        s = next;
     }return head;
 }
 static int body_hidden_control(Expr *e)
@@ -2260,20 +2306,33 @@ static int body_hidden_control(Expr *e)
     unsigned i;if(!e)return 0;
     if(e->kind==EX_CALL||e->kind==EX_CHOOSE||(e->kind==EX_BINARY&&(e->op==TOK_LAND||e->op==TOK_LOR)))return 1;
     if(body_hidden_control(e->left)||body_hidden_control(e->right)||body_hidden_control(e->third))return 1;
-    for(i=0;i<e->arg_count;++i)if(body_hidden_control(e->args[i]))return 1;return 0;
+    for (i = 0; i < e->arg_count; ++i) {
+        if (body_hidden_control(e->args[i])) {
+            return 1;
+        }
+    }
+    return 0;
 }
 static unsigned body_occurs(Expr *e,Expr *pattern)
 {
     unsigned i,n;if(!e)return 0;if(body_equal(e,pattern))return 1;
     n=body_occurs(e->left,pattern)+body_occurs(e->right,pattern)+body_occurs(e->third,pattern);
-    for(i=0;i<e->arg_count;++i)n+=body_occurs(e->args[i],pattern);return n;
+    for (i = 0; i < e->arg_count; ++i) {
+        n += body_occurs(e->args[i], pattern);
+    }
+    return n;
 }
 static int body_changes_address(Expr *e,Expr *address)
 {
     unsigned i;if(!e)return 0;
     if((e->kind==EX_ASSIGN||e->kind==EX_PRE||e->kind==EX_POST)&&e->left->kind==EX_OBJECT&&loop_mentions(address,e->left->symbol))return 1;
     if(body_changes_address(e->left,address)||body_changes_address(e->right,address)||body_changes_address(e->third,address))return 1;
-    for(i=0;i<e->arg_count;++i)if(body_changes_address(e->args[i],address))return 1;return 0;
+    for (i = 0; i < e->arg_count; ++i) {
+        if (body_changes_address(e->args[i], address)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 static void body_candidates(Expr *e,Expr **list,unsigned *count)
 {

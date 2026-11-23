@@ -112,7 +112,11 @@ static int pr_enabled(LpUnit *u)
 static int lp_region_private_copies(LpUnit *u,Function *f,size_t at)
 {
     struct {char key[128],value[128];int bytes;} copies[64];char a[128]="";unsigned count=0,i,j;int bytes=0,changed=0;PrState *states;(void)at;
-    if(!pr_enabled(u))return 0;states=pr_states(u);lp_liveness(u);
+    if (!pr_enabled(u)) {
+        return 0;
+    }
+    states = pr_states(u);
+    lp_liveness(u);
     for(i=0;i<u->count;++i){LpLine *l=&u->lines[i];int offset,kind;char key[128];
         if(!l->op){if(l->label){count=0;a[0]=0;bytes=0;}continue;}
         kind=pr_memory(l,&states[i],f,&offset);
@@ -148,7 +152,10 @@ static int lp_region_private_copies(LpUnit *u,Function *f,size_t at)
 static int lp_region_dead_stores(LpUnit *u,Function *f,size_t at)
 {
     PrState *states;unsigned word,i;unsigned char *use,*def,*live,*out;int changed=0,*kind,*offset;(void)at;
-    if(!pr_enabled(u))return 0;states=pr_states(u);
+    if (!pr_enabled(u)) {
+        return 0;
+    }
+    states = pr_states(u);
     kind=calloc(u->count*2,sizeof *kind);use=calloc(u->count*4,1);
     if(!kind||!use){fputs("out of memory\n",stderr);exit(EXIT_FAILURE);}offset=kind+u->count;def=use+u->count;live=def+u->count;out=live+u->count;
     for(i=0;i<u->count;++i)if(u->lines[i].op)kind[i]=pr_memory(&u->lines[i],&states[i],f,&offset[i]);
@@ -170,7 +177,10 @@ static int lp_region_dead_stores(LpUnit *u,Function *f,size_t at)
         }
         while(again){again=0;for(i=u->count;i-->0;){LpLine *l=&u->lines[i];unsigned o=0,v;
             if(!l->op||!l->ends)o=i+1<u->count?live[i+1]:0;
-            if(l->target>=0)o|=live[l->target];v=use[i]|(o&~def[i]);
+            if (l->target >= 0) {
+                o |= live[l->target];
+            }
+            v = use[i] | (o & ~def[i]);
             if(v!=live[i]||o!=out[i]){live[i]=(unsigned char)v;out[i]=(unsigned char)o;again=1;}
         }}
         for(i=0;i<u->count;++i)if(def[i]&&!use[i]&&!(def[i]&out[i])&&!u->lines[i].call&&

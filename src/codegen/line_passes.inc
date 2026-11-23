@@ -1715,7 +1715,10 @@ static int lp_y_promote(LpUnit *u,Function *f,size_t at)
         if(!l->op)continue;
         if(entry<0)entry=(int)i;
         if(l->x8)return 0;
-        if(lp_index_use(l)&LP_Y||l->use&LP_Y&&!l->ends&&!l->call&&l->use!=LP_ALL)return 0;
+        if ((lp_index_use(l) & LP_Y) ||
+            ((l->use & LP_Y) && !l->ends && !l->call && l->use != LP_ALL)) {
+            return 0;
+        }
         if(l->def&LP_Y||lp_is(l,"phy")||lp_is(l,"ply")||lp_is(l,"tsx")||lp_is(l,"txs")||lp_is(l,"mvn")||lp_is(l,"mvp"))return 0;
         if(lp_is(l,"jml")||lp_is(l,"rti"))return 0;
         if(l->use==LP_ALL&&!lp_is(l,"rep")&&!lp_is(l,"sep"))return 0;
@@ -3478,7 +3481,13 @@ static int lp_byte_compare(LpUnit *u,Function *f,size_t at)
                (u->lines[k].length==4&&!strncmp(u->lines[k].text,".a16",4))))++k;
         if((unsigned)k>=u->count)continue;
         m=lp_next(u,(unsigned)k,1);n=m>=0?lp_next(u,(unsigned)m,1):-1;
-        if(n<0)continue;restore=&u->lines[j];mask=&u->lines[k];compare=&u->lines[m];branch=&u->lines[n];
+        if (n < 0) {
+            continue;
+        }
+        restore = &u->lines[j];
+        mask = &u->lines[k];
+        compare = &u->lines[m];
+        branch = &u->lines[n];
         if(!lp_is(mask,"and")||lp_immediate(mask)!=255||!lp_is(compare,"cmp")||
            (value=lp_immediate(compare))<0||value>255||!lp_branch(branch)||
            (compare->out&(LP_A|LP_N))||restore->deleted||mask->deleted||compare->deleted)continue;
@@ -6948,10 +6957,15 @@ static int lp_direct_rhs_operand(LpUnit *u,Function *f,size_t at)
         if(next>=0&&(lp_line_is(&u->lines[next],"clc")||lp_line_is(&u->lines[next],"sec")))
             alu=lp_next(u,(unsigned)next,1);
         else alu=next;
-        if(alu<0||u->lines[alu].m8||!lp_line_is(&u->lines[alu],"adc z:__arith_rhs")&&
-           !lp_line_is(&u->lines[alu],"sbc z:__arith_rhs")&&!lp_line_is(&u->lines[alu],"and z:__arith_rhs")&&
-           !lp_line_is(&u->lines[alu],"ora z:__arith_rhs")&&!lp_line_is(&u->lines[alu],"eor z:__arith_rhs")&&
-           !lp_line_is(&u->lines[alu],"cmp z:__arith_rhs"))continue;
+        if (alu < 0 || u->lines[alu].m8 ||
+            (!lp_line_is(&u->lines[alu], "adc z:__arith_rhs") &&
+             !lp_line_is(&u->lines[alu], "sbc z:__arith_rhs") &&
+             !lp_line_is(&u->lines[alu], "and z:__arith_rhs") &&
+             !lp_line_is(&u->lines[alu], "ora z:__arith_rhs") &&
+             !lp_line_is(&u->lines[alu], "eor z:__arith_rhs") &&
+             !lp_line_is(&u->lines[alu], "cmp z:__arith_rhs"))) {
+            continue;
+        }
         /* Ensure z:__arith_rhs is not read after alu before being overwritten */
         int k=lp_next(u,(unsigned)alu,1),dead_rhs=0;
         for(;k>=0;k=lp_next(u,(unsigned)k,1)){

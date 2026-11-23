@@ -196,8 +196,13 @@ static void inline_marker(Statement *s)
 }
 static int statement_inline_markers(Statement *s)
 {
-    for(;s;s=s->next)if(s->inline_callee||statement_inline_markers(s->body)||
-        statement_inline_markers(s->alternate)||statement_inline_markers(s->initial))return 1;return 0;
+    for (; s; s = s->next) {
+        if (s->inline_callee || statement_inline_markers(s->body) ||
+            statement_inline_markers(s->alternate) || statement_inline_markers(s->initial)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 /* Operand text for the general path's frame byte at offset. Every Y-relative
  * frame access is formatted here so individual slots can later be relocated
@@ -954,7 +959,10 @@ static void binary_loaded(int op,Type t,int byte_inputs)
     if(op=='/'||op=='%'){
         if(w==2)helper(op=='/'?(byte_inputs?"__uquot8":t.is_unsigned?"__uquot16":"__sdiv16"):
                               (byte_inputs?"__umod8":t.is_unsigned?"__umod16":"__smod16"));
-        else helper(op=='/'?(t.is_unsigned?"__uquot32":"__sdiv32"):(t.is_unsigned?"__umod32":"__smod32"));return;
+        else {
+            helper(op == '/' ? (t.is_unsigned ? "__uquot32" : "__sdiv32") : (t.is_unsigned ? "__umod32" : "__smod32"));
+        }
+        return;
     }
     if(op==TOK_SHL||op==TOK_SHR){helper(op==TOK_SHL?"__shl32":t.is_unsigned?"__ushr32":"__sshr32");return;}
     code("    lda z:__arith_lhs\n");
@@ -2009,7 +2017,10 @@ static void store_saved_address(Type t,int wram,unsigned offset)
 }
 static unsigned increment_step(Type t)
 {
-    if(t.pointers)return width(pointed_type(t));return 1;
+    if (t.pointers) {
+        return width(pointed_type(t));
+    }
+    return 1;
 }
 static void increment_value(Type t,int op)
 {
@@ -2024,7 +2035,10 @@ static void increment_value(Type t,int op)
     if(reg_width(t)==4){
         if(step<=65535)code("    pha\n    txa\n    %s #0\n",op==TOK_INC?"adc":"sbc");
         else code("    pha\n    txa\n    %s #$%04X\n",op==TOK_INC?"adc":"sbc",step>>16);
-        if(far_pointer(t))code("    and #$00FF\n");code("    tax\n    pla\n");
+        if (far_pointer(t)) {
+            code("    and #$00FF\n");
+        }
+        code("    tax\n    pla\n");
     }
     narrow_char(t);
 }
@@ -2190,7 +2204,12 @@ static int near_small_offset(Expr *e,Expr **base,int *delta)
        far_pointer(value_type(e->left->type))||!integer_constant(e->right,&bits)||value_width(e->right->type)!=2)return 0;
     scale=width(pointed_type(value_type(e->left->type)));d=(int)(int16_t)((bits*scale)&65535);
     if(e->op=='-')d=(int)(int16_t)(0u-(unsigned)d);
-    if(d<-3||d>3)return 0;*base=e->left;*delta=d;return 1;
+    if (d < -3 || d > 3) {
+        return 0;
+    }
+    *base = e->left;
+    *delta = d;
+    return 1;
 }
 /* Select X as the result register at the use site. A and flags are not outputs
  * here; callers needing the value in A continue to use emit_value. */
@@ -4156,7 +4175,11 @@ static int scalar_home_update(Expr *e,int needed)
         return 1;
     }
     load_symbol(s);binary_after_left(e->left,e->right,e->op);
-    if(!e->known_no_conversion)convert_registers(t,e->type);store_home_result(s,needed);return 1;
+    if (!e->known_no_conversion) {
+        convert_registers(t, e->type);
+    }
+    store_home_result(s, needed);
+    return 1;
 }
 #include "shared_elements.inc"
 #include "aggregate_copy.inc"
@@ -4704,7 +4727,10 @@ static int byte_bitwise_binary(Expr *e)
             indexed_index(&idx->iop);
             code("    phx\n");if(cg.stack_leaf)cg.stack_bias+=2;
             emit_m8_byte_value(other);
-            if(cg.stack_leaf)cg.stack_bias-=2;code("    plx\n");
+            if (cg.stack_leaf) {
+                cg.stack_bias -= 2;
+            }
+            code("    plx\n");
             code("    %s ",mnemonic);indexed_text(&idx->iop);
             code("\n    rep #$20\n.a16\n    and #$00FF\n");
             indexed_finish(&idx->iop);
@@ -5013,7 +5039,10 @@ static void emit_value(Expr *e)
                 }else{
                     code("    pha\n");if(cg.stack_leaf)cg.stack_bias+=2;
                     offset=assign_base_x(e->left);
-                    if(cg.stack_leaf)cg.stack_bias-=2;code("    pla\n");
+                    if (cg.stack_leaf) {
+                        cg.stack_bias -= 2;
+                    }
+                    code("    pla\n");
                 }
                 if(op=='+')code("    clc\n");
                 code("    %s %s:$%04X,x\n",mnemonic,wram?"z":"a",offset);
@@ -5095,7 +5124,10 @@ static void emit_value(Expr *e)
         if(e->kind==EX_POST)push_value(e->type);
         increment_value(e->type,e->op);stage(0,e->type);
         code("    lda %u,s\n    tax\n    lda z:__arith_lhs\n",(e->kind==EX_POST?reg_width(e->type):0)+1);
-        if(width(e->type)==1)code("    sep #$20\n.a8\n");code("    sta %s:$0000,x\n",e->left->kind==EX_DEREF&&strength_wram_pointer(e->left->left)?"z":"a");
+        if (width(e->type) == 1) {
+            code("    sep #$20\n.a8\n");
+        }
+        code("    sta %s:$0000,x\n", e->left->kind == EX_DEREF && strength_wram_pointer(e->left->left) ? "z" : "a");
         if(width(e->type)==1)code("    rep #$20\n.a16\n");
         if(reg_width(e->type)==4)code("    lda z:__arith_lhs+2\n    sta %s:$0002,x\n",e->left->kind==EX_DEREF&&strength_wram_pointer(e->left->left)?"z":"a");
         if(e->kind==EX_POST)pop_value(e->type);
@@ -8866,7 +8898,10 @@ static int emit_statements(Statement *s)
         case ST_BLOCK:
             inline_marker(s);
             if((byte_end=adjacent_bitfield_stores(s))!=NULL){s=byte_end;break;}
-            if(!emit_statements(s->body))return 0;break;
+            if (!emit_statements(s->body)) {
+                return 0;
+            }
+            break;
         case ST_EXPR:
             if(!cg.function->uses_wide){
                 Statement *loop;
@@ -8911,8 +8946,12 @@ static int emit_statements(Statement *s)
                 else emit_value(s->expression);
             }
             if(cg.scalar_leaf){unsigned spill;for(spill=0;spill<(unsigned)cg.scalar_spill;++spill)code("    plx\n");code("    rts\n");return 0;}
-            code("    jmp .loword(return_%s)\n",cg.function->symbol->asm_name);
-            if(!cg.switch_depth)return 0;cg.divmod_available=0;break;
+            code("    jmp .loword(return_%s)\n", cg.function->symbol->asm_name);
+            if (!cg.switch_depth) {
+                return 0;
+            }
+            cg.divmod_available = 0;
+            break;
         case ST_IF:
             if(shifted_bit_update(s))break;
             if(!cg.parser->no_body_optimizations&&!s->body&&!s->alternate){
@@ -8947,9 +8986,13 @@ static int emit_statements(Statement *s)
                 unsigned context=cg.loop_count;
                 while(context&&!cg.loop_start[context-1])--context;
                 if(!context)error_at(s->location,"continue outside loop");
-                jump(cg.loop_start[context-1]);
+                jump(cg.loop_start[context - 1]);
             }
-            if(!cg.switch_depth)return 0;cg.divmod_available=0;break;
+            if (!cg.switch_depth) {
+                return 0;
+            }
+            cg.divmod_available = 0;
+            break;
         }
     }
     return 1;
@@ -9939,7 +9982,10 @@ static unsigned interrupt_scratch_writes(size_t start)
                 mask|=(1u<<((base+offset)/2))|(1u<<((base+offset+1)/2));
             }
         }
-        if(!end)break;line=end+1;
+        if (!end) {
+            break;
+        }
+        line = end + 1;
     }
     return mask;
 }
@@ -10386,7 +10432,10 @@ static void emit_function(Function *f)
     body_order_homes(f);
     value_recurrences_prepare(f);
     body_byte_ranges(f);
-    if(!volatile_statements(f->body))forward_return(f,f->body);f->frame=f->slots?f->slots+4:0;
+    if (!volatile_statements(f->body)) {
+        forward_return(f, f->body);
+    }
+    f->frame = f->slots ? f->slots + 4 : 0;
     if(recursive_word_product(f))return;
     strength_prepare(f);
     affine_prepare(f);
@@ -10698,7 +10747,10 @@ static const char *byte_store_group(const char *p)
     const char *q=skip_comments(p);int stores=0;
     if(strncmp(q,"    lda #$",10)||!isxdigit((unsigned char)q[10]))return NULL;
     q=strchr(q,'\n');if(!q)return NULL;++q;
-    if(strncmp(q,"    sep #$20\n.a8\n",17))return NULL;q+=17;
+    if (strncmp(q, "    sep #$20\n.a8\n", 17)) {
+        return NULL;
+    }
+    q += 17;
     for(;;){
         q=skip_comments(q);
         if(!strncmp(q,"    sta ",8)||!strncmp(q,"    stz ",8)){q=strchr(q,'\n');if(!q)return NULL;++q;++stores;continue;}
@@ -10837,8 +10889,11 @@ static int stack_frames(Function *f,size_t at)
                 if(frame_line_is(l,"tsc")&&frame_line_is(&lines[j+1],"tay"))break;
                 if(l->m8||l->x8||frame_y_use(l))break;
                 if(frame_line_is(l,"pha")||frame_line_is(l,"phx")||!strncmp(l->op,"pea ",4)){pushes+=2;continue;}
-                if(frame_stack_delta(l)||op_is(l->op,"jsr")||op_is(l->op,"jsl")||op_is(l->op,"jmp")||op_is(l->op,"rts")||
-                   l->op[0]=='b'&&!op_is(l->op,"bit"))break;
+                if (frame_stack_delta(l) || op_is(l->op, "jsr") || op_is(l->op, "jsl") ||
+                    op_is(l->op, "jmp") || op_is(l->op, "rts") ||
+                    (l->op[0] == 'b' && !op_is(l->op, "bit"))) {
+                    break;
+                }
             }
             if(j+1<count&&frame_line_is(&lines[j],"tsc")&&frame_line_is(&lines[j+1],"tay")&&pushes){
                 prologue=(int)i;frame=pushes;lines[i].edit=1;lines[j].edit=1;lines[j+1].edit=1;base_line=j+1;

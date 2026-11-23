@@ -78,7 +78,10 @@ static int direct_operand(Expr *e,Type target,unsigned high,int emit)
         return 0;
     }
     if(integer_constant(e,&v)){
-        if(emit)code("#$%04X",(v>>(high?16:0))&65535);return 1;
+        if (emit) {
+            code("#$%04X", (v >> (high ? 16 : 0)) & 65535);
+        }
+        return 1;
     }
     if(reg_width(target)==2&&!high){
         Expr *sh=e;

@@ -215,7 +215,11 @@ static void word_load(WordPlan *p,WordOperand operand)
     if(operand.kind==WORD_SECOND){
         if(!p->a_second&&p->second_slot<0){p->failed=1;return;}
         if(!p->a_second)word_instruction(p,"lda",word_operand_value(WORD_TEMP,(unsigned)p->second_slot));
-        if(p->second_left)--p->second_left;p->a_second=1;return;
+        if (p->second_left) {
+            --p->second_left;
+        }
+        p->a_second = 1;
+        return;
     }
     word_clobber_a(p);
     if(operand.kind==WORD_X)word_implied(p,"txa");else word_instruction(p,"lda",operand);
@@ -298,7 +302,10 @@ static void word_evaluate(WordPlan *p,Expr *e)
     if(e->kind==EX_UNARY){
         word_evaluate(p,e->left);if(e->op=='+')return;word_clobber_a(p);
         word_instruction(p,"eor",word_operand_value(WORD_IMMEDIATE,65535));
-        if(e->op=='-')word_instruction(p,"inc",word_operand_value(WORD_ACCUMULATOR,0));return;
+        if (e->op == '-') {
+            word_instruction(p, "inc", word_operand_value(WORD_ACCUMULATOR, 0));
+        }
+        return;
     }
     if(word_product(p,e,&base,&scale)){
         if(!cg.parser->no_strength_reduction&&!scale.negate&&scale.factor&&!(scale.factor&(scale.factor-1))){
@@ -395,7 +402,10 @@ static int word_expression_leaf(Function *f)
 
 static Expr *word_uncast(Expr *e)
 {
-    while(e->kind==EX_CAST&&known_conversion(e->left,e->type))e=e->left;return e;
+    while (e->kind == EX_CAST && known_conversion(e->left, e->type)) {
+        e = e->left;
+    }
+    return e;
 }
 static Expr *word_bits(Expr *e);
 static Symbol *fixed_byte_home(Expr *e,unsigned byte,unsigned *offset);

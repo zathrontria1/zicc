@@ -15,7 +15,10 @@ static Statement *inl_statement(StatementKind k,Location at)
 }
 static void inl_append(Statement **head,Statement *s)
 {
-    while(*head)head=&(*head)->next;*head=s;
+    while (*head) {
+        head = &(*head)->next;
+    }
+    *head = s;
 }
 static Expr *inl_object(Symbol *v,Location at)
 {
@@ -66,7 +69,10 @@ static unsigned inl_expr_cost(Expr *e)
     if(e->kind==EX_CALL)n+=INL_CALL_COST;
     if(e->kind==EX_BINARY&&(e->op=='*'||e->op=='/'||e->op=='%'))n+=8;
     n+=inl_expr_cost(e->left)+inl_expr_cost(e->right)+inl_expr_cost(e->third);
-    for(i=0;i<e->arg_count;++i)n+=inl_expr_cost(e->args[i]);return n;
+    for (i = 0; i < e->arg_count; ++i) {
+        n += inl_expr_cost(e->args[i]);
+    }
+    return n;
 }
 static unsigned inl_cost(Statement *s,int *unsupported)
 {
@@ -1043,7 +1049,11 @@ static Expr *inl_snapshot_global(Expr *call,Function *f,unsigned cost)
 static Function *inl_candidate(Expr *e,int diagnose)
 {
     Symbol *v;Function *f;const char *reason=NULL;unsigned cost,words,pressure,benefit,i,extra=0,count=0;int bad=0,loop_leaf,literal_args;
-    if(!e||e->kind!=EX_CALL||!e->symbol)return NULL;v=e->symbol;f=inl.by_symbol[v-inl.p->symbols];
+    if (!e || e->kind != EX_CALL || !e->symbol) {
+        return NULL;
+    }
+    v = e->symbol;
+    f = inl.by_symbol[v - inl.p->symbols];
     if(inl.caller->uses_bitfields){
         Expr *site=inl.site?inl.site->expression:NULL;
         if(!f||!site||inl.site->kind!=ST_EXPR||site->kind!=EX_ASSIGN||site->op||
@@ -1130,7 +1140,12 @@ static int inl_has(Expr *e)
 {
     unsigned i;if(!e)return 0;if(inl_candidate(e,1))return 1;
     if(inl_has(e->left)||inl_has(e->right)||inl_has(e->third))return 1;
-    for(i=0;i<e->arg_count;++i)if(inl_has(e->args[i]))return 1;return 0;
+    for (i = 0; i < e->arg_count; ++i) {
+        if (inl_has(e->args[i])) {
+            return 1;
+        }
+    }
+    return 0;
 }
 /* A widening pointer conversion is redundant when every use is a scalar
  * member access. The near and far addresses agree for a valid access. */
@@ -1216,7 +1231,10 @@ static Expr *inl_clone_expr(Expr *e,Symbol **map,Expr **values)
             n->right->type=value_type(n->left->type);
     }
     if(e->kind==EX_MEMBER&&e->op==TOK_ARROW&&far_pointer(value_type(e->left->type))&&!far_pointer(value_type(n->left->type)))n->type.banked=0;
-    for(i=0;i<e->arg_count;++i)n->args[i]=inl_clone_expr(e->args[i],map,values);return n;
+    for (i = 0; i < e->arg_count; ++i) {
+        n->args[i] = inl_clone_expr(e->args[i], map, values);
+    }
+    return n;
 }
 static Statement *inl_clone(Statement *s,Symbol **map,Expr **values)
 {
@@ -1735,7 +1753,10 @@ static Expr *inl_scalar_region_pre(Expr *call,Function *f,int discard,Expr **sto
            !inl_scalar_update(e,values,f,literals,
                               (discard||stores)?INL_NEED_LITERAL:INL_KEEP_EXPR))bad=1;
     }
-    for(i=0;i<1024;++i)free_expression(values[i]);free(values);
+    for (i = 0; i < 1024; ++i) {
+        free_expression(values[i]);
+    }
+    free(values);
     if(bad){free_expression(result);return NULL;}
     if(!bad&&snapshot_args&&result){
         for(i=call->arg_count;i;--i){
@@ -2734,7 +2755,10 @@ static void inline_translation_unit(Parser *p)
     reach=allocate(n*n?n*n:1);
     for(f=p->functions;f;f=f->next)inl_edges(f->body,reach,f->id-1,n);
     for(k=0;k<n;++k)for(i=0;i<n;++i)if(reach[i*n+k])for(j=0;j<n;++j)reach[i*n+j]|=reach[k*n+j];
-    for(i=0;i<n;++i)inl.recursive[i]=reach[i*n+i];free(reach);
+    for (i = 0; i < n; ++i) {
+        inl.recursive[i] = reach[i * n + i];
+    }
+    free(reach);
     if(!p->no_inline&&!p->no_body_optimizations&&!p->no_strength_reduction)
         for(f=p->functions;f;f=f->next)inl_prepare_local_tables(f);
     /* Estimate a called fixed-trip loop after the existing bounded

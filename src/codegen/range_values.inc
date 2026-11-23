@@ -20,7 +20,12 @@ static RvValue rv_point(Type t,uint32_t n)
 }
 static void rv_identity(RvContext *c,RvValue *v)
 {
-    if(!v->valid)return;if(!v->id)v->id=++c->serial;
+    if (!v->valid) {
+        return;
+    }
+    if (!v->id) {
+        v->id = ++c->serial;
+    }
     if(!v->select&&!v->terms[0].root){v->terms[0].root=v->id;v->terms[0].lo=v->terms[0].hi=0;}
 }
 static RvValue rv_cast(RvValue v,Type t)
@@ -108,7 +113,8 @@ static RvValue rv_read(RvContext *c,RvFlow *f,Expr *e)
             }
         }
         if(immutable_element_bounds(e,0,index.valid,index.lo,index.hi,&imm)){
-            if(v.lo<imm.min)v.lo=imm.min;if(v.hi>imm.max)v.hi=imm.max;
+            if (v.lo < imm.min) v.lo = imm.min;
+            if (v.hi > imm.max) v.hi = imm.max;
         }
     }
     rv_identity(c,&v);return v;
@@ -140,9 +146,12 @@ static RvValue rv_binary(RvContext *c,int op,RvValue a,RvValue b,Type t)
     }else if(op=='*'){
         int64_t p0=(int64_t)a.lo*b.lo,p1=(int64_t)a.lo*b.hi,p2=(int64_t)a.hi*b.lo,p3=(int64_t)a.hi*b.hi;
         lo=hi=p0;
-        if(p1<lo)lo=p1;if(p1>hi)hi=p1;
-        if(p2<lo)lo=p2;if(p2>hi)hi=p2;
-        if(p3<lo)lo=p3;if(p3>hi)hi=p3;
+        if (p1 < lo) lo = p1;
+        if (p1 > hi) hi = p1;
+        if (p2 < lo) lo = p2;
+        if (p2 > hi) hi = p2;
+        if (p3 < lo) lo = p3;
+        if (p3 > hi) hi = p3;
         if(lo>=v.lo&&hi<=v.hi){v.lo=(int32_t)lo;v.hi=(int32_t)hi;}
     }else if(op=='/'&&b.lo==b.hi&&b.lo>0){
         lo=a.lo/b.lo;hi=a.hi/b.lo;
@@ -221,7 +230,10 @@ static RvValue rv_expr(RvContext *c,RvFlow *f,Expr *e,int lvalue)
         for(i=0;i<e->arg_count;++i)rv_expr(c,f,e->args[i],0);
         if(e->kind==EX_CALL){VrEffects effects={0};effects.unknown=1;rv_forget(c,f,&effects);}
     }
-    if(!lvalue)rv_note(c,e,v);return v;
+    if (!lvalue) {
+        rv_note(c, e, v);
+    }
+    return v;
 }
 static RvValue *rv_lvalue(RvContext *c,RvFlow *f,Expr *e)
 {
@@ -253,7 +265,12 @@ static int rv_counted(RvContext *c,RvFlow *f,Statement *s,int *trips)
     vr_effect_statements(&effects,s->body);if(vr_invalid(test->right,&effects))return 0;
     a=rv_expr(c,f,test->left,0);b=rv_expr(c,f,test->right,0);if(!a.valid||!b.valid||a.lo!=a.hi||b.lo!=b.hi||a.lo<0)return 0;
     end=(int64_t)b.lo+(test->op==TOK_LE);n=end-a.lo;
-    if(n<0)n=0;if(n>RV_TRIPS||end>rv_type(index->type).hi||b.lo<0)return 0;
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > RV_TRIPS || end > rv_type(index->type).hi || b.lo < 0) {
+        return 0;
+    }
     *trips=(int)n;return 1;
 }
 static void rv_loop(RvContext *c,RvFlow *f,Statement *s,RvLoop *outer)
@@ -265,7 +282,10 @@ static void rv_loop(RvContext *c,RvFlow *f,Statement *s,RvLoop *outer)
         for(i=0;i<trips&&f->alive&&!c->failed;++i){
             rv_full(c,f,s->expression);loop.continuing->alive=0;rv_statements(c,f,s->body,&loop);rv_merge(c,f,loop.continuing);rv_full(c,f,s->step);
         }
-        if(f->alive)rv_full(c,f,s->expression);rv_merge(c,f,loop.breaking);
+        if (f->alive) {
+            rv_full(c, f, s->expression);
+        }
+        rv_merge(c, f, loop.breaking);
     }else{
         vr_effect_statements(&effects,s->body);vr_effect_expr(&effects,s->step);vr_effect_expr(&effects,s->expression);rv_forget(c,f,&effects);
         if(s->kind!=ST_DO){rv_full(c,f,s->expression);rv_refine(c,f,s->expression,1);}

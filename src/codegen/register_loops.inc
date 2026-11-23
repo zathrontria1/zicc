@@ -59,7 +59,9 @@ static int loop_pointer(RegisterLoop *loop,Symbol *s)
 static int loop_index(RegisterLoop *loop,Symbol *s)
 {
     if(!loop->indexed)return -1;
-    if(loop->indices[0]==s)return 0;if(loop->indices[1]==s)return 1;return -1;
+    if (loop->indices[0] == s) return 0;
+    if (loop->indices[1] == s) return 1;
+    return -1;
 }
 static Symbol *loop_address(Expr *e,int *pre,int *post);
 static int loop_cursor(RegisterLoop *loop,Expr *address,int *pre,int *post)
@@ -204,7 +206,10 @@ static int loop_read_byte(RegisterLoop *loop,Expr *e,int *extension)
     if(e->kind==EX_CAST&&!e->type.pointers&&reg_width(e->type)==2&&
        (e->type.base==TY_INT||e->type.base==TY_CHAR)){
         reg=loop_read_byte(loop,e->left,extension);
-        if(e->type.base==TY_CHAR)*extension=!e->type.is_unsigned;return reg;
+        if (e->type.base == TY_CHAR) {
+            *extension = !e->type.is_unsigned;
+        }
+        return reg;
     }
     if(e->kind!=EX_DEREF||width(e->type)!=1||e->left->kind!=EX_OBJECT)return -1;
     *extension=!e->type.is_unsigned;return loop_pointer(loop,e->left->symbol);
@@ -302,7 +307,10 @@ static void loop_emit_instructions(RegisterLoop *plan,int cached)
         case LOOP_STORE:code("    sta a:$0000,%s\n",index);cached=-1;break;
         case LOOP_STEP:
             code("    %s%s\n",instruction->op>0?"in":"de",index);
-            if(cached==instruction->reg)cached=-1;break;
+            if (cached == instruction->reg) {
+                cached = -1;
+            }
+            break;
         case LOOP_SAVE:case LOOP_RESTORE:code("    xba\n");cached=-1;break;
         }
     }
@@ -414,7 +422,10 @@ static int loop_bound_initializers(Function *f,Statement **statements,unsigned c
 {
     unsigned i,j;Expr *e;LoopBound bound;
     for(i=0;i<count;++i){
-        if(statements[i]->kind!=ST_EXPR)return 0;e=statements[i]->expression;
+        if (statements[i]->kind != ST_EXPR) {
+            return 0;
+        }
+        e = statements[i]->expression;
         if(e->kind!=EX_ASSIGN||e->op||e->left->kind!=EX_OBJECT||!e->left->symbol->scope||
            e->left->symbol->owner!=f->id||!loop_bound(f,e->right,symbols,bounds,*n,&bound))return 0;
         for(j=0;j<*n;++j)if(symbols[j]==e->left->symbol)break;
@@ -451,7 +462,10 @@ static int indexed_loop_leaf(Function *f)
     for(i=0;i<2;++i){
         if(loop_parameter(f,loop.pointers[i])<0)return 0;
         for(j=0;j<n;++j)if(symbols[j]==loop.indices[i])break;
-        if(j==n)return 0;ends[i]=bounds[j];
+        if (j == n) {
+            return 0;
+        }
+        ends[i] = bounds[j];
     }
     if(position+1<count){
         Statement *tail=statements[position+1];
@@ -479,7 +493,12 @@ static int indexed_loop_leaf(Function *f)
     saved=(unsigned)(f->symbol->param_count>2?2:f->symbol->param_count)*2;done=++cg.label;cg.arithmetic=1;
     code(".segment \"CODE\"\n.export _%s\n_%s:\n; native indexed loop leaf\n; register loop: indexed X/Y, A8, indices16\n    phy\n",
         f->symbol->asm_name,f->symbol->asm_name);
-    if(saved)code("    phx\n");if(saved==4)code("    pha\n");
+    if (saved) {
+        code("    phx\n");
+    }
+    if (saved == 4) {
+        code("    pha\n");
+    }
     loop_emit_bound(ends[0],saved,0);code("    pha\n");loop_emit_bound(ends[1],saved,2);code("    pha\n");
     code("    lda 3,s\n");
     if(loop.indices[0]->type.is_unsigned){code("    cmp 1,s\n    bcc :+\n");jump(done);code(":\n");}
@@ -511,7 +530,10 @@ static int loop_initializers(Statement **statements,unsigned count,Symbol **symb
 {
     unsigned i,j;Expr *e;uint32_t value;
     for(i=0;i<count;++i){
-        if(statements[i]->kind!=ST_EXPR)return 0;e=statements[i]->expression;
+        if (statements[i]->kind != ST_EXPR) {
+            return 0;
+        }
+        e = statements[i]->expression;
         if(e->kind!=EX_ASSIGN||e->op||e->left->kind!=EX_OBJECT||!integer_constant(e->right,&value)||
            e->left->symbol->owner!=cg.function->id||!e->left->symbol->scope||
            e->left->type.pointers||e->left->type.base!=TY_INT||e->right->type.base==TY_FLOAT)return 0;
@@ -619,7 +641,10 @@ static int register_loop_leaf(Function *f)
         remaining_parameter=loop_parameter(f,loop.remaining);
         if(remaining_parameter<0){
             for(i=0;i<n;++i)if(symbols[i]==loop.remaining)break;
-            if(i==n)return 0;remaining_value=values[i];
+            if (i == n) {
+                return 0;
+            }
+            remaining_value = values[i];
         }
     }
     for(i=position+1;i<count;++i){
@@ -628,7 +653,10 @@ static int register_loop_leaf(Function *f)
         if(s->kind!=ST_EXPR||e->kind!=EX_ASSIGN||e->op||e->left->kind!=EX_DEREF||
            width(e->left->type)!=1||e->left->left->kind!=EX_OBJECT||!integer_constant(e->right,&value))return 0;
         for(j=0;j<loop.pointer_count;++j)if(loop.pointers[j]==e->left->left->symbol)break;
-        if(j==loop.pointer_count)return 0;stores[store_count++]=s;
+        if (j == loop.pointer_count) {
+            return 0;
+        }
+        stores[store_count++] = s;
     }
     if(!result&&f->symbol->type.base!=TY_VOID)return 0;
     while(result&&result->kind==EX_CAST&&reg_width(result->type)==2&&
@@ -657,7 +685,12 @@ static int register_loop_leaf(Function *f)
             code("    sta z:__arith_lhs+2\n");
         }
     }else{
-        if(saved)code("    phx\n");if(saved==4)code("    pha\n");
+        if (saved) {
+            code("    phx\n");
+        }
+        if (saved == 4) {
+            code("    pha\n");
+        }
         cg.arithmetic=1;code("    lda %u,s\n    sta z:__arith_lhs+2\n",loop_argument_offset((unsigned)remaining_parameter,saved));
         for(i=0;i<loop.pointer_count;++i){
             parameter=loop_parameter(f,loop.pointers[i]);

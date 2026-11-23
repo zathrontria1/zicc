@@ -21,7 +21,7 @@ CC65_BIN ?= $(or $(patsubst %/,%,$(dir $(shell which ca65 2>/dev/null))),/usr/bi
 EXE :=
 ZICC := build/zicc
 ROMTOOL := build/romtool
-CFLAGS ?= -std=c17 -O2
+CFLAGS ?= -std=c17 -O2 -Wall
 endif
 
 export ZICC_MAKE := $(MAKE_COMMAND)

@@ -16,7 +16,10 @@ static int known_integer(Type t)
 static KnownValue known_type(Type t)
 {
     KnownValue v={0};
-    if(!known_integer(t))return v;v.valid=1;
+    if (!known_integer(t)) {
+        return v;
+    }
+    v.valid = 1;
     if(t.is_bool){v.zero=65534;v.min=0;v.max=1;}
     else if(t.base==TY_CHAR){v.min=t.is_unsigned?0:-128;v.max=t.is_unsigned?255:127;if(t.is_unsigned)v.zero=65280;}
     else{v.min=t.is_unsigned?0:-32768;v.max=t.is_unsigned?65535:32767;}
@@ -31,8 +34,10 @@ static KnownValue known_bits(KnownValue v,Type t)
     else if(v.zero&32768){lo=(int32_t)v.one;hi=(int32_t)(32767&~v.zero);}
     else if(v.one&32768){lo=(int32_t)(int16_t)v.one;hi=(int32_t)(int16_t)(65535^v.zero);}
     else{lo=(int32_t)(int16_t)(v.one|32768);hi=(int32_t)(32767&~v.zero);}
-    if(v.min<lo)v.min=lo;if(v.max>hi)v.max=hi;
-    if(v.min<domain.min)v.min=domain.min;if(v.max>domain.max)v.max=domain.max;
+    if (v.min < lo) v.min = lo;
+    if (v.max > hi) v.max = hi;
+    if (v.min < domain.min) v.min = domain.min;
+    if (v.max > domain.max) v.max = domain.max;
     /* Invalid/intersecting unreachable facts are not used as proofs */
     if(v.min>v.max||(v.zero&v.one))return domain;
     if(v.min>=0){
@@ -80,9 +85,12 @@ static KnownValue known_binary(int op,KnownValue a,KnownValue b,Type t)
     }else if(op=='*'){
         int64_t p0=(int64_t)a.min*b.min,p1=(int64_t)a.min*b.max,p2=(int64_t)a.max*b.min,p3=(int64_t)a.max*b.max;
         lo=hi=p0;
-        if(p1<lo)lo=p1;if(p1>hi)hi=p1;
-        if(p2<lo)lo=p2;if(p2>hi)hi=p2;
-        if(p3<lo)lo=p3;if(p3>hi)hi=p3;
+        if (p1 < lo) lo = p1;
+        if (p1 > hi) hi = p1;
+        if (p2 < lo) lo = p2;
+        if (p2 > hi) hi = p2;
+        if (p3 < lo) lo = p3;
+        if (p3 > hi) hi = p3;
         if(lo>=v.min&&hi<=v.max){v.min=(int32_t)lo;v.max=(int32_t)hi;}
     }else if(op=='/'&&b.min==b.max&&b.min>0){
         v.min=a.min/b.min;v.max=a.max/b.min;
@@ -291,7 +299,11 @@ static void known_refine(KnownFlow *flow,Expr *test,int truth);
 static KnownValue known_expression(KnownFlow *flow,Expr *e,int lvalue)
 {
     KnownValue v={0},a={0},b={0},c={0};unsigned i,offset=0;Type t;
-    if(!e)return v;e->known_no_conversion=0;e->known_nonnull=0;
+    if (!e) {
+        return v;
+    }
+    e->known_no_conversion = 0;
+    e->known_nonnull = 0;
     /* Subexpressions never publish stores into the environment: all writes
      * were killed first, so unspecified operand/argument order adds no facts. */
     a=known_expression(flow,e->left,e->kind==EX_ADDRESS||e->kind==EX_ASSIGN||e->kind==EX_PRE||e->kind==EX_POST);
@@ -395,15 +407,21 @@ static KnownValue known_expression(KnownFlow *flow,Expr *e,int lvalue)
     if(!lvalue&&v.valid&&(e->kind==EX_OBJECT||e->kind==EX_DEREF||e->kind==EX_MEMBER)){
         KnownValue imm={0};
         if(immutable_element_bounds(e,1,0,0,0,&imm)){
-            if(v.min<imm.min)v.min=imm.min;if(v.max>imm.max)v.max=imm.max;
+            if (v.min < imm.min) v.min = imm.min;
+            if (v.max > imm.max) v.max = imm.max;
             v.zero|=imm.zero;v.one|=imm.one;v=known_bits(v,e->type);
         }
     }
     if(!lvalue&&v.valid&&e->range.valid){
-        if(v.min<e->range.min)v.min=e->range.min;if(v.max>e->range.max)v.max=e->range.max;
+        if (v.min < e->range.min) v.min = e->range.min;
+        if (v.max > e->range.max) v.max = e->range.max;
         v.zero|=e->range.zero;v.one|=e->range.one;v=known_bits(v,e->type);
     }
-    if(lvalue)memset(&v,0,sizeof v);e->known=v;return v;
+    if (lvalue) {
+        memset(&v, 0, sizeof v);
+    }
+    e->known = v;
+    return v;
 }
 static void known_full_expression(KnownFlow *flow,Expr *e)
 {

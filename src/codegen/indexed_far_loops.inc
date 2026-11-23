@@ -15,7 +15,10 @@ static int far_indexed_plan(RegisterLoop *loop,int *near)
         LoopInstruction *instruction=&loop->instructions[i];int reg=instruction->reg;
         if(!far_pointer(loop->pointers[reg]->type))continue;
         if(instruction->kind==LOOP_STEP){
-            if(stepped[reg]||instruction->op!=1)return 0;stepped[reg]=1;
+            if (stepped[reg] || instruction->op != 1) {
+                return 0;
+            }
+            stepped[reg] = 1;
         }else if((instruction->kind==LOOP_LOAD||instruction->kind==LOOP_STORE)&&stepped[reg])return 0;
     }
     return 1;
@@ -71,7 +74,10 @@ static int far_indexed_leaf(Function *f,RegisterLoop *loop,Statement **stores,un
         case LOOP_STORE:far_indexed_memory("sta",instruction->reg,near,slots);cached=-1;break;
         case LOOP_STEP:
             if(instruction->reg==near)code("    %s\n",instruction->op>0?"inx":"dex");
-            if(cached==instruction->reg)cached=-1;break;
+            if (cached == instruction->reg) {
+                cached = -1;
+            }
+            break;
         case LOOP_LITERAL:code("    lda #$%02X\n",instruction->value);cached=-1;break;
         case LOOP_ALU:
             if(instruction->op=='+'||instruction->op=='-')code("    %s\n",instruction->op=='+'?"clc":"sec");

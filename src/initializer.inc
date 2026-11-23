@@ -121,10 +121,16 @@ static const char *integer_binary_constant(int op,Type operands,uint64_t a,uint6
     switch(op){
     case '+':
         r=(a+b)&mask;
-        if(!u&&((a^r)&(b^r)&sign))return "signed constant expression overflows";break;
+        if (!u && ((a ^ r) & (b ^ r) & sign)) {
+            return "signed constant expression overflows";
+        }
+        break;
     case '-':
         r=(a-b)&mask;
-        if(!u&&((a^b)&(a^r)&sign))return "signed constant expression overflows";break;
+        if (!u && ((a ^ b) & (a ^ r) & sign)) {
+            return "signed constant expression overflows";
+        }
+        break;
     case '*':
         if(!u){
             negative=((a&sign)!=0)!=((b&sign)!=0);
@@ -140,7 +146,10 @@ static const char *integer_binary_constant(int op,Type operands,uint64_t a,uint6
         aa=(a&sign)?(0-a)&mask:a;bb=(b&sign)?(0-b)&mask:b;
         r=op=='/'?aa/bb:aa%bb;
         negative=op=='/'?((a&sign)!=0)!=((b&sign)!=0):(a&sign)!=0;
-        if(negative)r=(0-r)&mask;break;
+        if (negative) {
+            r = (0 - r) & mask;
+        }
+        break;
     case '&':r=a&b;break;case '|':r=a|b;break;case '^':r=a^b;break;
     case TOK_EQ:r=a==b;break;case TOK_NE:r=a!=b;break;
     case '<':r=u?a<b:(a^sign)<(b^sign);break;
@@ -581,7 +590,8 @@ static void initializer_store(Initializer *init,Type t,unsigned offset,Expr *e)
         if(!initializer_address(e,r,&value,0)){report_error(at,"pointer initializer requires a constant address");free(r);free_expression(e);return;}
         if(r->symbol||r->string){
             r->offset=offset;r->size=width(t);r->far_value=far_pointer(t);
-            if(r->symbol)r->symbol->used=1;if(r->string)r->string->used=1;
+            if (r->symbol) r->symbol->used = 1;
+            if (r->string) r->string->used = 1;
             {Relocation **tail=&init->symbol->relocations;while(*tail)tail=&(*tail)->next;*tail=r;}
             free_expression(e);return;
         }
@@ -701,7 +711,8 @@ static void parse_initializer(Initializer *init,Type *t,unsigned offset,int nest
             }
             first=NULL;
             if(!braced&&(t->array?count==t->array:!m))break;
-            if(!accept(p,','))break;if(p->token.kind=='}')break;
+            if (!accept(p, ',')) break;
+            if (p->token.kind == '}') break;
         }
         if(braced)expect(p,'}',"'}' after initializer");
         if(t->array){
@@ -732,7 +743,10 @@ static Statement *object_initializer(Parser *p,Symbol *s,int automatic)
     if(!width(s->type)||width(s->type)>limit)error_at(p->token.location,"initializer requires a complete target-sized object");
     if(!automatic&&s->type.array){
         unsigned char *image=realloc(s->initializer,width(s->type));
-        if(!image)error_at(p->token.location,"out of memory");s->initializer=image;
+        if (!image) {
+            error_at(p->token.location, "out of memory");
+        }
+        s->initializer = image;
     }
     /* Inferred automatic arrays acquire their extent after the final element */
     for(statement=init.body;statement;statement=statement->next){

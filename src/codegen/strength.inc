@@ -426,5 +426,8 @@ static int strength_update(Expr *e,int preserve)
             }
         }else strength_sync(index,e->op?NULL:e->right);
     }
-    if(preserve)code("    pla\n");return 1;
+    if (preserve) {
+        code("    pla\n");
+    }
+    return 1;
 }

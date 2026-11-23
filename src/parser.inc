@@ -88,7 +88,8 @@ static Type common_type(Type a,Type b)
     if(function_pointer(a))return a;
     if(function_pointer(b))return b;
     if(a.pointers&&b.pointers){if(far_pointer(b))a=far_type(a);a.constant|=b.constant;a.pointer_constants|=b.pointer_constants;a.is_volatile|=b.is_volatile;a.pointer_volatiles|=b.pointer_volatiles;return a;}
-    if(a.pointers)return a;if(b.pointers)return b;
+    if (a.pointers) return a;
+    if (b.pointers) return b;
     if(a.base==TY_DOUBLE||b.base==TY_DOUBLE)return type(TY_DOUBLE,0);
     if(a.base==TY_FLOAT||b.base==TY_FLOAT)return type(TY_FLOAT,0);
     if(a.base==TY_LONGLONG||b.base==TY_LONGLONG){
@@ -661,7 +662,10 @@ static Expr *unary_expression(Parser *p)
             if(!e->type.is_unsigned&&((value_width(e->type)==2&&(v < -32768||v>32767))||
                 (value_width(e->type)==4&&(v<INT32_MIN||v>INT32_MAX))))error_at(at,"signed constant expression overflows");
             e->value=(uint32_t)v;if(value_width(e->type)==2)e->value&=0xFFFF;
-            if(op=='!')e->type=type(TY_INT,0);return e;
+            if (op == '!') {
+                e->type = type(TY_INT, 0);
+            }
+            return e;
         }
         result=new_expr(EX_UNARY,at,op=='!'?type(TY_INT,0):promoted(e->type));result->op=op;result->left=e;return result;
     }
@@ -1838,7 +1842,8 @@ static void parse_top_level(Parser *p,int *has_main)
               (wram>=WRAM_SRAM_FIRST&&storage_class&&!is_extern&&!is_static)))
         error_at(p->token.location,"conflicting %s placement or storage class",wram>=WRAM_SRAM_FIRST?"SRAM":"WRAM");
     if(interrupt&&(is_typedef||is_static||dpage))error_at(p->token.location,"interrupt handler must have external function linkage");
-    if(constant)base=const_object(base);if(vol)base=volatile_object(base);
+    if (constant) base = const_object(base);
+    if (vol) base = volatile_object(base);
     while(function_attributes(p,&shared)){}
     if((base.base==TY_STRUCT||base.enum_tag)&&!is_typedef&&!is_extern&&!is_static&&!dpage&&!loram&&!wram&&!interrupt&&accept(p,';')){
         if(shared.noclone)error_at(p->token.location,"noclone requires a function");

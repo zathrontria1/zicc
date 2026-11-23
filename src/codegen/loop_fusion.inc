@@ -9,7 +9,10 @@ typedef struct { FusionAccess access[128];unsigned count;int failed;Symbol *inde
 static Statement *fusion_single(Statement *s)
 {
     while(s&&s->kind==ST_BLOCK&&!s->next&&!s->inline_callee)s=s->body;
-    while(s&&s->kind==ST_EMPTY)s=s->next;return s;
+    while (s && s->kind == ST_EMPTY) {
+        s = s->next;
+    }
+    return s;
 }
 static int fusion_shape(Statement *loop,FusionLoop *shape)
 {
@@ -113,11 +116,18 @@ static void fusion_effect_expr(FusionEffects *effects,Expr *e,int lvalue)
         fusion_access(effects,e->left,1);fusion_access(effects,e->left,0);fusion_effect_expr(effects,e->left,1);return;
     }
     if(indexed_operand(e,&operand)){
-        if(!lvalue)fusion_access(effects,e,0);fusion_effect_expr(effects,operand.index,0);return;
+        if (!lvalue) {
+            fusion_access(effects, e, 0);
+        }
+        fusion_effect_expr(effects, operand.index, 0);
+        return;
     }
     if(e->kind==EX_OBJECT){if(!lvalue&&!e->type.array&&!e->symbol->function)fusion_access(effects,e,0);return;}
     if(e->kind==EX_DEREF||e->kind==EX_MEMBER){
-        if(!lvalue)fusion_access(effects,e,0);return;
+        if (!lvalue) {
+            fusion_access(effects, e, 0);
+        }
+        return;
     }
     fusion_effect_expr(effects,e->left,lvalue);fusion_effect_expr(effects,e->right,0);fusion_effect_expr(effects,e->third,0);
     for(i=0;i<e->arg_count;++i)fusion_effect_expr(effects,e->args[i],0);

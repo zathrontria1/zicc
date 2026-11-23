@@ -48,7 +48,10 @@ static void far_loop_instructions(RegisterLoop *loop,int cached)
         case LOOP_STORE:code("    sta [$%02X]\n",DP_SCRATCH_BASE+instruction->reg*4);cached=-1;break;
         case LOOP_STEP:
             far_loop_step(loop->pointers[instruction->reg],instruction->reg,instruction->op);
-            if(cached==instruction->reg)cached=-1;break;
+            if (cached == instruction->reg) {
+                cached = -1;
+            }
+            break;
         case LOOP_LITERAL:code("    lda #$%02X\n",instruction->value);cached=-1;break;
         case LOOP_ALU:
             if(instruction->op=='+'||instruction->op=='-')code("    %s\n",instruction->op=='+'?"clc":"sec");
@@ -86,7 +89,10 @@ static int far_leaf_plan(Function *f,FarLeafPlan *plan)
         if(s->kind!=ST_EXPR||e->kind!=EX_ASSIGN||e->op||e->left->kind!=EX_DEREF||
            width(e->left->type)!=1||e->left->left->kind!=EX_OBJECT||!integer_constant(e->right,&value))return 0;
         for(j=0;j<loop.pointer_count;++j)if(loop.pointers[j]==e->left->left->symbol)break;
-        if(j==loop.pointer_count)return 0;stores[ns++]=s;
+        if (j == loop.pointer_count) {
+            return 0;
+        }
+        stores[ns++] = s;
     }
     if(!tail&&f->symbol->type.base!=TY_VOID)return 0;
     if(tail&&tail->kind==EX_OBJECT)
@@ -105,7 +111,10 @@ static int far_leaf_plan(Function *f,FarLeafPlan *plan)
     plan->predicate=predicate;plan->return_pointer=return_pointer;plan->result=result;
     for(i=0;i<ns;++i)plan->stores[i]=stores[i];
     if(loop.remaining&&loop_parameter(f,loop.remaining)<0){
-        for(i=0;i<n;++i)if(symbols[i]==loop.remaining)break;plan->remaining_value=values[i];
+        for (i = 0; i < n; ++i) {
+            if (symbols[i] == loop.remaining) break;
+        }
+        plan->remaining_value = values[i];
     }
     return 1;
 }
@@ -142,7 +151,11 @@ static int far_loop_leaf(Function *f)
     }else if(loop.remaining){code("    cpy #0\n    bne :+\n");jump(end);code(":\n");}
     else{code("    lda [$%02X]\n    bne :+\n",DP_SCRATCH_BASE+loop.sentinel*4);jump(end);code(":\n");cached=loop.sentinel;}
     far_loop_instructions(&loop,cached);
-    if(loop.remaining)code("    dey\n");jump(start);label(end);
+    if (loop.remaining) {
+        code("    dey\n");
+    }
+    jump(start);
+    label(end);
     for(i=0;i<ns;++i){
         Expr *e=stores[i]->expression;integer_constant(e->right,&value);
         for(j=0;j<loop.pointer_count;++j)if(loop.pointers[j]==e->left->left->symbol)break;

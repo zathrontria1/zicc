@@ -7,7 +7,11 @@ static int affine_dependency(AffineLoop *loop,Symbol *symbol)
     if(!symbol->type.array&&
        (symbol->owner!=cg.function->id||loop_escapes(cg.function->body,symbol)))return 0;
     for(i=0;i<loop->dependency_count;++i)if(loop->dependencies[i]==symbol)return 1;
-    if(i==32)return 0;loop->dependencies[loop->dependency_count++]=symbol;return 1;
+    if (i == 32) {
+        return 0;
+    }
+    loop->dependencies[loop->dependency_count++] = symbol;
+    return 1;
 }
 static int affine_scalar(AffineLoop *loop,Expr *e,int *coefficient)
 {

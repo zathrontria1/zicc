@@ -95,7 +95,10 @@ static int literal_strcpy(Expr *e)
     if(source->kind!=EX_STRING)return 0;
     string=source->string;
     while(n<string->size&&string->bytes[n])++n;
-    if(n==string->size)return 0;++n; /* Include only the first terminating NUL */
+    if (n == string->size) {
+        return 0;
+    }
+    ++n; /* Include only the first terminating NUL */
     plan.mode=0;plan.cycles=12*n+6;plan.bytes=8*n+4;
     copy_consider(&plan,2,7*n+(save_bank?32:25),save_bank?36:34);
     string->used=1;
@@ -120,7 +123,10 @@ static int literal_strcpy(Expr *e)
          * necessary. Interrupt entry/exit retains its own DBR contract. */
         code("    phy\n    tay\n");if(save_bank)code("    phb\n");
         code("    lda #$%04X\n    mvn #.bankbyte(str_%s_%u), #$7E\n",n-1,cg.parser->unit,string->id);
-        if(save_bank)code("    plb\n");code("    ply\n");
+        if (save_bank) {
+            code("    plb\n");
+        }
+        code("    ply\n");
         jump(end);label(fallback);
         /* MVN cannot carry its source bank. The public far-source routine
          * handles a literal straddling a bank, with no second destination
@@ -312,7 +318,10 @@ static void emit_aggregate_copy(Expr *e,int needed)
         if(mode==0){
             for(i=0;i<n;i+=2)code("    lda a:$%04X,x\n    sta a:$%04X,y\n",i,i);
         }else code("    lda #$%04X\n    mvn #$7E, #$7E\n",n-1);
-        if(needed)code("    pla\n");code("    ply\n");
+        if (needed) {
+            code("    pla\n");
+        }
+        code("    ply\n");
     }
     /* Embedded scalar/pointer fields may have changed through an alias */
     cg.divmod_available=0;

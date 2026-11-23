@@ -5,7 +5,10 @@ static void lto_parse(Parser *p,const char *path,const char *include_directory,F
 {
     const char *name=strrchr(path,'/'),*back=strrchr(path,'\\'),*end;size_t n=0;
     p->path=intern_path(p,path);p->line=p->column=1;
-    if(!name||(back&&back>name))name=back;name=name?name+1:path;
+    if (!name || (back && back > name)) {
+        name = back;
+    }
+    name = name ? name + 1 : path;
     end=strrchr(name,'.');if(!end||end==name)end=name+strlen(name);
     while(name<end&&n+1<sizeof p->unit){
         char ch=*name++;
@@ -108,7 +111,10 @@ static int lto_compatible(LtoMerge *m,Type a,Type b)
         {unsigned na=0,nb=0;for(x=a.structure->members;x;x=x->next)++na;for(y=b.structure->members;y;y=y->next)++nb;if(na!=nb)return 0;}
     }
     ra=lto_root(m,lto_structure_id(m,a.structure));rb=lto_root(m,lto_structure_id(m,b.structure));
-    if(ra!=rb)m->parent[rb]=ra;return 1;
+    if (ra != rb) {
+        m->parent[rb] = ra;
+    }
+    return 1;
 }
 static int lto_inline_only(Symbol *s)
 {
@@ -202,7 +208,10 @@ static Parser *lto_merge(Parser *options,Parser **units,unsigned count)
         for(j=0;j<u;++j)if(!strcmp(units[j]->unit,units[u]->unit))error_at((Location){units[u]->path,1,1},"source LTO requires distinct sanitized unit names");
         m->function_base[u]=p->function_count;p->function_count+=units[u]->function_count;
         for(i=0;i<units[u]->symbol_count;++i){Symbol *s=&units[u]->symbols[i];LtoExternal *entry;int provided;
-            if(s->owner||s->internal||s->enumerator)continue;m->at=(Location){units[u]->path,1,1};
+            if (s->owner || s->internal || s->enumerator) {
+                continue;
+            }
+            m->at = (Location){units[u]->path, 1, 1};
             entry=lto_external(m,s->name);provided=s->defined&&!lto_inline_only(s);
             if(!entry){if(m->external_count==1024)error_at(m->at,"source LTO external symbol budget exceeds 1024");
                 entry=&m->external[m->external_count++];strcpy(entry->name,s->name);entry->winner=s;entry->provided=provided;

@@ -52,7 +52,10 @@ static int numeric_scan(size_t first,size_t last)
             if(cg.numeric_recurrence&&n>=2&&q[-2]==','&&q[-1]=='y')return 0;
             if(!strncmp(op,"jsr ",4)||!strncmp(op,"jsl ",4)){
                 const char *name=op+4;size_t size;static const char *const known[]={"__mul8","__mul16","__mul8x16","__mul16x8","__udiv8","__udiv16","__uquot8","__uquot16","__umod8","__umod16"};unsigned i;
-                if(!strncmp(name,".loword(",8))name+=8;size=strcspn(name,") \n");
+                if (!strncmp(name, ".loword(", 8)) {
+                    name += 8;
+                }
+                size = strcspn(name, ") \n");
                 for(i=0;i<sizeof known/sizeof *known;++i)if(strlen(known[i])==size&&!strncmp(known[i],name,size))break;
                 if(i==sizeof known/sizeof *known)return 0;
             }else if(!strncmp(op,"ldx ",4)||!strncmp(op,"ldy ",4)||!strncmp(op,"tax",3)||!strncmp(op,"tay",3)||

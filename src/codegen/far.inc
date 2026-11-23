@@ -236,7 +236,11 @@ load_indexed_rom:
     s->used=1;
     if(reg_width(e->type)==4)code("    lda f:_%s+$%04X,x\n    pha\n",s->asm_name,offset+2);
     code("    lda f:_%s+$%04X,x\n",s->asm_name,offset);
-    if(reg_width(e->type)==4)code("    plx\n");narrow_char(e->type);return 1;
+    if (reg_width(e->type) == 4) {
+        code("    plx\n");
+    }
+    narrow_char(e->type);
+    return 1;
 }
 /* Constant full addresses need neither a pointer spill nor DP staging. This
  * applies to every bank, including explicit bank-zero hardware registers. */
@@ -246,7 +250,10 @@ static void constant_far_load(Type t,uint32_t address)
     if(reg_width(t)==4)code("    lda f:$%06X\n    tax\n",(address+2)&0xffffffu);
     if(width(t)==1)code("    sep #$20\n.a8\n");
     code("    lda f:$%06X\n",address);
-    if(width(t)==1)code("    rep #$20\n.a16\n");narrow_char(t);
+    if (width(t) == 1) {
+        code("    rep #$20\n.a16\n");
+    }
+    narrow_char(t);
 }
 static void constant_far_store(Type t,uint32_t address)
 {
@@ -269,7 +276,10 @@ static int constant_far(Expr *e)
     }else if(e->kind==EX_PRE||e->kind==EX_POST){
         constant_far_load(e->type,address);if(e->kind==EX_POST)push_value(e->type);
         increment_value(e->type,e->op);constant_far_store(e->type,address);
-        if(e->kind==EX_POST)pop_value(e->type);divmod_written(e->left);
+        if (e->kind == EX_POST) {
+            pop_value(e->type);
+        }
+        divmod_written(e->left);
     }else if(e->kind==EX_DEREF)constant_far_load(e->type,address);
     else return 0;
     return 1;

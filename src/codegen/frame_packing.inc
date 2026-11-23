@@ -17,7 +17,10 @@ static uint64_t frame_refs(FramePacking *p,Expr *e)
     }
     if(e->kind==EX_OBJECT)for(i=0;i<p->count;++i)if(e->symbol==p->symbols[i])refs|=UINT64_C(1)<<i;
     refs|=frame_refs(p,e->left)|frame_refs(p,e->right)|frame_refs(p,e->third);
-    for(i=0;i<e->arg_count;++i)refs|=frame_refs(p,e->args[i]);return refs;
+    for (i = 0; i < e->arg_count; ++i) {
+        refs |= frame_refs(p, e->args[i]);
+    }
+    return refs;
 }
 static void frame_interference(FramePacking *p,uint64_t live)
 {

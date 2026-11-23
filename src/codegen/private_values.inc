@@ -4,7 +4,13 @@
 static int pv_math(const LpLine *l,unsigned *writes,int *result)
 {
     size_t n;const char *p=lp_operand(l,&n);unsigned i;
-    if(!l->call)return 0;if(n>8&&!strncmp(p,".loword(",8)){p+=8;n-=9;}
+    if (!l->call) {
+        return 0;
+    }
+    if (n > 8 && !strncmp(p, ".loword(", 8)) {
+        p += 8;
+        n -= 9;
+    }
     if(!((n==7&&!strncmp(p,"__mul16",7))||(n==6&&!strncmp(p,"__mul8",6))||
          (n==9&&(!strncmp(p,"__mul8x16",9)||!strncmp(p,"__mul16x8",9)||!strncmp(p,"__uquot16",9)))||
          (n==8&&(!strncmp(p,"__udiv16",8)||!strncmp(p,"__umod16",8)||!strncmp(p,"__uquot8",8)))||

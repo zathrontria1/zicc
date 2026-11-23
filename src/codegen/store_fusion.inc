@@ -53,7 +53,10 @@ static Expr *store_index_base(Expr *e,int32_t *offset)
     e=store_word_casts(e);*offset=0;
     if(e->kind==EX_BINARY&&(e->op=='+'||e->op=='-')&&integer_constant(e->right,&n)&&reg_width(e->right->type)==2){
         *offset=e->right->type.is_unsigned?(int32_t)(n&65535):(int32_t)(int16_t)n;
-        if(e->op=='-')*offset=-*offset;return e->left;
+        if (e->op == '-') {
+            *offset = -*offset;
+        }
+        return e->left;
     }return e;
 }
 static int store_ram(Symbol *s)

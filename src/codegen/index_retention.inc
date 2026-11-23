@@ -75,7 +75,10 @@ static int retained_op(const char *p,size_t n,const char *op)
 }
 static int retained_reject(const char *p,size_t n)
 {
-    if(getenv("ZICC_RETAINED_TRACE"))fprintf(stderr,"retained selection rejected: %.*s\n",(int)n,p);return 0;
+    if (getenv("ZICC_RETAINED_TRACE")) {
+        fprintf(stderr, "retained selection rejected: %.*s\n", (int)n, p);
+    }
+    return 0;
 }
 static int retained_scan(size_t first,size_t last,int y,int counter_only)
 {
@@ -84,7 +87,10 @@ static int retained_scan(size_t first,size_t last,int y,int counter_only)
     const char *p=cg.assembly+first,*end=cg.assembly+last;unsigned scratch=0,owned=0,bytes=0,y_uses=0;
     while(p<end){
         const char *q=memchr(p,'\n',(size_t)(end-p));size_t n;const char *op;
-        if(!q)q=end;n=(size_t)(q-p);
+        if (!q) {
+            q = end;
+        }
+        n = (size_t)(q - p);
         if(n==29&&!strncmp(p,"; retained byte indices begin",29)){if(bytes||counter_only)return retained_reject(p,n);bytes=1;}
         else if(n==27&&!strncmp(p,"; retained byte indices end",27)){if(!bytes)return retained_reject(p,n);bytes=0;}
         else if(bytes){/* The byte-region selector owns and restores both bindings */}

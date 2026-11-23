@@ -64,9 +64,13 @@ static void assembly_labels_free(AssemblyLabels *labels)
 /* Fixed bytes pushed (positive) or pulled (negative); other effects stay local */
 static int assembly_stack_bytes(const char *op,int m8,int x8)
 {
-    if(op_is(op,"pha"))return m8?1:2;if(op_is(op,"pla"))return m8?-1:-2;
-    if(op_is(op,"phx")||op_is(op,"phy"))return x8?1:2;if(op_is(op,"plx")||op_is(op,"ply"))return x8?-1:-2;
-    if(op_is(op,"php")||op_is(op,"phb")||op_is(op,"phk"))return 1;if(op_is(op,"plp")||op_is(op,"plb"))return -1;
-    if(op_is(op,"phd")||op_is(op,"pea")||op_is(op,"pei")||op_is(op,"per"))return 2;if(op_is(op,"pld"))return -2;
+    if (op_is(op, "pha")) return m8 ? 1 : 2;
+    if (op_is(op, "pla")) return m8 ? -1 : -2;
+    if (op_is(op, "phx") || op_is(op, "phy")) return x8 ? 1 : 2;
+    if (op_is(op, "plx") || op_is(op, "ply")) return x8 ? -1 : -2;
+    if (op_is(op, "php") || op_is(op, "phb") || op_is(op, "phk")) return 1;
+    if (op_is(op, "plp") || op_is(op, "plb")) return -1;
+    if (op_is(op, "phd") || op_is(op, "pea") || op_is(op, "pei") || op_is(op, "per")) return 2;
+    if (op_is(op, "pld")) return -2;
     return 0;
 }

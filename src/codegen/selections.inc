@@ -6,10 +6,16 @@ static int selection_operand(Expr *e,int emit)
     IndexedOperand operand={0};
     if(width(e->type)!=2||!word_integer(e->type)||!indexed_pure(e))return 0;
     if(direct_operand(e,e->type,0,0)){
-        if(emit)direct_operand(e,e->type,0,1);return 1;
+        if (emit) {
+            direct_operand(e, e->type, 0, 1);
+        }
+        return 1;
     }
     if(!indexed_operand(e,&operand)||!indexed_retained(&operand,1))return 0;
-    if(emit)indexed_text(&operand);return 1;
+    if (emit) {
+        indexed_text(&operand);
+    }
+    return 1;
 }
 static int selection_minmax(Expr *e,int *minimum)
 {

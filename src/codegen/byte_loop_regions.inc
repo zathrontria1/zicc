@@ -214,15 +214,25 @@ static void byte_loop_value(ByteLoopEmit *e,Expr *value)
     if(v->kind==EX_INT){code("    lda #$%02X\n",v->value&255);return;}
     if(v->kind==EX_OBJECT&&v->symbol==e->plan->index){
         if(e->plan->primary_y)code("    tya\n");
-        else if(!e->borrowed)code("    txa\n");
-        else code("    lda %u,s\n",1+e->stacked);return;
+        else if (!e->borrowed) {
+            code("    txa\n");
+        } else {
+            code("    lda %u,s\n", 1 + e->stacked);
+        }
+        return;
     }
     if(v->kind==EX_OBJECT||v->kind==EX_DEREF||v->kind==EX_MEMBER){
         address=byte_loop_address(e,v);code("    lda ");byte_loop_operand(&address);code("\n");return;
     }
     if(v->kind==EX_UNARY&&(v->op=='~'||v->op=='-'||v->op=='+')){
         byte_loop_value(e,v->left);
-        if(v->op!='+')code("    eor #$FF\n");if(v->op=='-')code("    inc a\n");return;
+        if (v->op != '+') {
+            code("    eor #$FF\n");
+        }
+        if (v->op == '-') {
+            code("    inc a\n");
+        }
+        return;
     }
     if(v->kind==EX_BINARY&&basic_integer_op(v->op)&&v->right->kind==EX_INT){
         byte_loop_value(e,v->left);if(v->op=='+'||v->op=='-')code(v->op=='+'?"    clc\n":"    sec\n");
@@ -265,8 +275,14 @@ static void byte_loop_word(ByteLoopEmit *e,Expr *value)
     }
     code("    rep #$20\n.a16\n");
     if(v->kind==EX_OBJECT&&v->symbol==e->plan->index){
-        if(e->plan->primary_y)code("    tya\n");else if(!e->borrowed)code("    txa\n");
-        else code("    lda %u,s\n",1+e->stacked);return;
+        if (e->plan->primary_y) {
+            code("    tya\n");
+        } else if (!e->borrowed) {
+            code("    txa\n");
+        } else {
+            code("    lda %u,s\n", 1 + e->stacked);
+        }
+        return;
     }
     code("    phy\n");emit_value(value);code("    ply\n");e->x_value=NULL;
 }
@@ -298,7 +314,10 @@ static void byte_loop_test(ByteLoopEmit *e,Expr *test,unsigned no,int invert)
         if(op=='>')code("    beq cg_%s_%u\n",cg.parser->unit,no);
         else if(op==TOK_LE){equal=++cg.label;code("    beq cg_%s_%u\n",cg.parser->unit,equal);}
         code("    bvc :+\n    eor #$80\n:\n    %s cg_%s_%u\n",op=='<'||op==TOK_LE?"bpl":"bmi",cg.parser->unit,no);
-        if(equal)label(equal);return;
+        if (equal) {
+            label(equal);
+        }
+        return;
     }
     if(op==TOK_EQ||op==TOK_NE||op=='<'||op==TOK_GE)
         code("    %s cg_%s_%u\n",op==TOK_EQ?"bne":op==TOK_NE?"beq":op=='<'?"bcs":"bcc",cg.parser->unit,no);
@@ -381,7 +400,10 @@ static void byte_loop_emit(ByteLoopEmit *context,Statement *s)
         if(s->kind==ST_IF){unsigned no=++cg.label,done=++cg.label;
             byte_loop_release(context);byte_loop_test(context,s->expression,no,0);
             byte_loop_emit(context,s->body);byte_loop_release(context);
-            if(s->alternate)jump(done);label(no);
+            if (s->alternate) {
+                jump(done);
+            }
+            label(no);
             if(s->alternate){byte_loop_emit(context,s->alternate);byte_loop_release(context);label(done);}continue;
         }
         byte_loop_emit_effect(context,s->expression);
@@ -557,7 +579,10 @@ static int structured_byte_loop(Statement *s)
          condition->right->known.valid&&condition->right->known.min>=0);
     adjacent_swap=unsigned_cmp&&byte_loop_swap_plan(&plan,pair,&descending);
     code("; structured byte loop: %s, %s bound, %c=counter",plan.index->name,constant?"constant":"runtime",plan.primary_y?'Y':'X');
-    if(!plan.primary_y)code(", Y=stride %u",plan.scale);code("\n");
+    if (!plan.primary_y) {
+        code(", Y=stride %u", plan.scale);
+    }
+    code("\n");
     if(plan.expr_bound){
         emit_value(plan.bound);
         convert_registers(plan.bound->type,t);

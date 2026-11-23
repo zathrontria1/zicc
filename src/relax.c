@@ -58,10 +58,17 @@ static int number(const char *s,unsigned *value)
 {
     char *end;unsigned long n;int base=10;
     if(*s=='$'){++s;base=16;}
-    if(!*s)return 0;n=strtoul(s,&end,base);
+    if (!*s) {
+        return 0;
+    }
+    n = strtoul(s, &end, base);
     while(isspace((unsigned char)*end))++end;
     if(*end&&*end!=',')return 0;
-    if(n>0x10000000UL)return 0;*value=(unsigned)n;return 1;
+    if (n > 0x10000000UL) {
+        return 0;
+    }
+    *value = (unsigned)n;
+    return 1;
 }
 static unsigned instruction_size(const char *op,const char *operand,int a16,int i16)
 {

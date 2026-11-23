@@ -119,7 +119,11 @@ static int bank_call(Expr *e)
     unsigned i,j,mask,bytes;Expr *anchor;BankVariant *v;
     if(!cg.bank_count||!bank_signature(e,&mask,&anchor))return 0;
     for(i=0;i<cg.bank_count;++i)if(cg.banks[i]->function->symbol==e->symbol&&cg.banks[i]->mask==mask)break;
-    if(i==cg.bank_count)return 0;v=cg.banks[i];v->used=1;
+    if (i == cg.bank_count) {
+        return 0;
+    }
+    v = cg.banks[i];
+    v->used = 1;
     if(!bank_low_constant(e->args[1])){
         bank_low_argument(e->args[1],0);code("    pha\n");bank_low_argument(e->args[0],1);code("    pla\n");
     }else{bank_low_argument(e->args[0],1);bank_low_argument(e->args[1],0);}
@@ -186,7 +190,10 @@ static void bank_emit_variant(BankVariant *v)
     jump(start);label(end);
     for(i=0;i<plan->ns;++i){Expr *e=plan->stores[i]->expression;uint32_t value;unsigned reg;
         integer_constant(e->right,&value);for(reg=0;reg<2;++reg)if(loop->pointers[reg]==e->left->left->symbol)break;
-        if(i||loop->predicate_count||(value&255))code("    lda #$%02X\n",value&255);bank_memory(v,"sta",(int)reg,x);
+        if (i || loop->predicate_count || (value & 255)) {
+            code("    lda #$%02X\n", value & 255);
+        }
+        bank_memory(v, "sta", (int)reg, x);
     }
     if(plan->predicate){
         cached=reload?-1:plan->result.reg;zero_flags=0;bank_predicate(v,&plan->result,x,&cached,&zero_flags);label(flags);

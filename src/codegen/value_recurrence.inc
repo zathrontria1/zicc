@@ -155,7 +155,10 @@ static void value_recurrences(Function *f,Statement *s)
         init->expression->left=body_object(temp,rhs->location);init->expression->right=body_clone(rhs);
         while(s->initial&&s->initial->kind==ST_BLOCK&&!s->initial->next)s->initial=s->initial->body;
         {Statement **tail=&s->initial;while(*tail)tail=&(*tail)->next;*tail=init;}
-        if(first->expression)first->expression->right=body_object(temp,rhs->location);free_expression(rhs);
+        if (first->expression) {
+            first->expression->right = body_object(temp, rhs->location);
+        }
+        free_expression(rhs);
         advance=body_statement(ST_EXPR,s->location);advance->expression=new_expr(EX_PRE,s->location,temp->type);
         advance->expression->op=TOK_INC;advance->expression->left=body_object(temp,s->location);
         {Statement **tail=&s->body;while(*tail)tail=&(*tail)->next;*tail=advance;}
