@@ -83,8 +83,7 @@ evaluation keeps live addresses on the invocation stack. Interrupt scratch
 preservation includes the selected far-address staging words. Near register/row/DP
 loop optimizations retain their proven address constraints. Current far-loop
 selectors and fallback paths are described in [far loop recovery](far-loop-recovery.md)
-and [indexed far loops](indexed-far-loops.md). See also
-[measured bank costs](bank7e-comparison.md).
+and [indexed far loops](indexed-far-loops.md).
 
 Runtime hardware accesses use explicit long operands. A byte far dereference
 performs one byte access in A8, then restores A16. The console's DMA source bank
@@ -208,9 +207,7 @@ No executable stack code is required. The emitter preserves Y and interrupt
 wrappers preserve live registers/scratch so transfers can resume after an NMI.
 Discarded assignment results omit their address preservation, and eligible
 direct source-address loads avoid spilling the destination. Scalar field stores
-can defer a pure destination-base load until after evaluating the source; see
-[aggregate results and destination loads](aggregate-results.md) for the proofs,
-assembly and HiROM measurements.
+can defer a pure destination-base load until after evaluating the source.
 The cost policy below applies to the existing near/fixed-bank paths; runtime-bank
 copies currently use the general loop rather than an MVN trampoline.
 
@@ -858,8 +855,7 @@ buffers remain shared.
 `strtod` tail-jumps to the binary32 parser under the target's all-binary32
 floating rule. `printf` updates a 4 KiB WRAM tilemap containing the BG1/BG2 maps;
 the library NMI presents pending changes to VRAM. The console uses noninterlaced
-Mode 5 at 512x224 with 64x28 characters and separate font/palette assets; see
-[console layout and validation](console-hires-trial.md).
+Mode 5 at 512x224 with 64x28 characters and separate font/palette assets.
 
 Linking the console supplies the `__console_init` startup hook; supplied linker
 configurations default it to zero when absent. Both ordinary and console-named

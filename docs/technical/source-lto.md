@@ -81,6 +81,3 @@ external assembly calls and application runtime overrides. Negative tests cover
 duplicate definitions, incompatible types/placement/policies, incomplete-type
 bridges, forced recursion and interrupt calls. Selected cases also run as
 separately compiled host C references.
-
-The [before/after comparison](source-lto-comparison.md) distinguishes separate-TU
-runtime controls from whole-program LTO results.

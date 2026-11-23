@@ -109,10 +109,6 @@ helper, the banked sum-call probe and the widened-product call barrier. Frame
 instruction-shape checks use `--no-inline`; normal inlining remains enabled in
 semantic, arithmetic and sample comparisons.
 
-Before/after timing and code-size evidence is in the
-[sample comparison](inlining-comparison.md), alongside the
-[current VBCC matrix](inlining-current-comparison.md).
-
 The 3,000-iteration Dhrystone interval drops from 62,747,618 to 61,042,722
 FastROM master clocks (2.72%) and from 73,013,668 to 71,227,870 SlowROM clocks
 (2.45%). Application code grows 92 bytes, from 2,686 to 2,778. Public out-of-line

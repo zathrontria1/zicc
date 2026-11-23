@@ -121,10 +121,6 @@ reservation. The trace observes bank-zero and bank-$7E stack aliases and exclude
 ordinary globals below the active stack pointer. There is no measured baseline
 stack trace. The stack remains $0100-$04FF.
 
-The [complete post-migration comparison](runtime7f-compiler-comparison.md)
-includes original/split workloads and stock vbcc65816_r2. The earlier
-[comparison](current-compiler-comparison.md) remains the measured baseline.
-
 ## Verification and evidence
 
 - Final `make check-changed`: 27/27 suites, 761 jobs, 20 hardware-thread workers,

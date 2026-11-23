@@ -12,27 +12,20 @@ To see why zicc chose an instruction, start with the C and assembly examples in
 the [optimization guide](optimizations.md). Its [implementation reference](technical/optimization-catalog.md)
 points to the source code, tests and detailed reports for each change.
 
-Older reports refer to saved builds. The archive and its file lists are on `E:\archived-compiler`.
-
 ## Implementation milestones
 
 - Opt-in source LTO enables cross-TU inlining after independent preprocessing
-  and typed binding. See [usage and limits](technical/source-lto.md) and
-  [FastROM/SlowROM before/after results](technical/source-lto-comparison.md).
+  and typed binding. See [usage and limits](technical/source-lto.md).
 
 - Same-TU inlining supports automatic selection, inline hints, forced expansion
-  and noinline barriers. See [policies, semantics and limits](technical/inlining.md)
-  and the [before/after sample comparison](technical/inlining-comparison.md).
+  and noinline barriers. See [policies, semantics and limits](technical/inlining.md).
 - General structured code generation now covers the array/address, byte-loop
   and guarded-retry shapes in Dhrystone's Proc_8, main and Func_2. See
-  [features, ideal targets and verification](technical/structured-codegen.md)
-  and [current sample/VBCC results](technical/structured-codegen-current-comparison.md).
+  [features, ideal targets and verification](technical/structured-codegen.md).
 
 - Low-WRAM integration uses a `$0100`–`$04FF` hardware stack, near allocation
   from `$7E0500` and constrained file-scope `__loram` objects through `$7E1FFF`.
-  See [the application contract](operations.md#low-ram-placement),
-  [initial evaluation](technical/wram-layout-evaluation.md), and
-  [isolated FastROM NTSC comparison](technical/wram-performance.md).
+  See [the application contract](operations.md#low-ram-placement).
 - The integrated compiler passes master's current cached `make check`: 27/27
   suites and 757 jobs at 20 workers in 332.33 seconds, retaining all 200,873
   arithmetic cases. The cache reused 82 emulator results and ran 1,214 live.
@@ -48,11 +41,6 @@ Older reports refer to saved builds. The archive and its file lists are on `E:\a
   and 756 jobs. Their compiler SHA-256 is
   `1d2ec083f862f6a6d394fd6077ac3d454c239164b3121184119b2062e68e71ac`,
   recorded before the low-WRAM integration.
-- Trial reports below retain the compiler/runtime and measurements from their
-  named experiments. They are historical baselines, not a freshly rerun benchmark
-  catalog for the latest compiler. The
-  [sample review](technical/sample-codegen-review.md) identifies its baseline and
-  subsequent allocation work explicitly.
 
 ## Project status and history
 
@@ -90,8 +78,6 @@ Proc_8 under the ABI at that time. The two benchmark translation units were
 compiled separately. The archived aggregate-scheduling baseline reported
 743 Dhrystones per second on NTSC and 738 on PAL using nominal frame timing
 and integer truncation. SlowROM reported 638 and 632 respectively.
-[Aggregate results and destination loads](technical/aggregate-results.md)
-records the HiROM baseline and master-clock comparisons.
 
 ## Host toolchain
 
@@ -333,8 +319,7 @@ An object marked `__hiram` or `__farram` can go in either WRAM bank if it
 fits wholly within that bank. An object marked `__xbankram` may cross from
 $7E into $7F. See [application RAM placement](operations.md#expanded-application-wram).
 ROM/literal addresses are far; MMIO uses explicit bank-zero far addresses. See
-[the memory model](technical/operations.md#machine-and-storage) and
-[the sample comparison](technical/bank7e-comparison.md). Console startup enables NMI;
+[the memory model](technical/operations.md#machine-and-storage). Console startup enables NMI;
 other applications explicitly enable it after initializing handler state. Startup sets the hardware stack pointer first. It clears the direct page
 storage, the compiler's scratch space and the linked zero-initialized objects.
 The automatic ROM build supplies a routine for the extra RAM spans used by
@@ -372,9 +357,7 @@ for the clock's units, wrap and NMI ownership.
 
 See [operation and ABI documentation](technical/operations.md) for storage, expression
 lowering, stack frames, arithmetic helpers, control flow, I/O and supported C
-limits. [The comparison report](technical/comparison.md) contains every called function,
-code-region sizes, inclusive/exclusive timing, total non-asset ROM sizes, and the
-JML/JSL profiling experiment.
+limits.
 
 ### How the ROM builder uses the final RAM layout
 
@@ -464,7 +447,7 @@ The 512x224 Mode 5 display shows 64x28 characters using the original 8x8 font.
 Scrolling uses two circular maps and the BG1/BG2 vertical scroll registers;
 each dirty range is uploaded for both backgrounds. Presentation defers at
 line 228 NTSC / 278 PAL to retain the maximum 4 KiB DMA budget.
-See [the layout and validation report](technical/console-hires-trial.md). Linking the console initializes it after
+Linking the console initializes it after
 RAM/DATA setup and enables NMI, using the user handler or the default wrapper.
 Clock-only programs still enable NMI explicitly. `volatile` supports direct
 MMIO through explicit bank-zero `__far` pointers, with exact byte accesses and
@@ -476,9 +459,7 @@ syntax and its own calling convention. The
 [provenance record](../runtime/ieee32/provenance.json) identifies the original
 files and the source revision used by zicc.
 Decimal parsing and formatting use assembly entries with the existing ABI;
-the C implementations remain as references. See the
-[bank-cost integration report](technical/bank-cost-integration.md) for precision,
-HiROM and verification details.
+the C implementations remain as references.
 
 ## Verification
 
@@ -597,9 +578,8 @@ lists. The PowerShell `labels-to-sym.ps1` entry point delegates to this exporter
 
 The original `integer_operations.c` largely disappears under VBCC constant
 folding. `integer_operations_runtime.c` calls separately compiled
-`integer_kernels.c` so both compilers must execute the arithmetic. The
-[sample comparison](technical/basic-sample-comparison.md) verifies every kernel call
-and reports this separately. Integer helpers now use S-CPU byte multiplication
+`integer_kernels.c` so both compilers must execute the arithmetic.
+Integer helpers now use S-CPU byte multiplication
 and hardware division for divisor magnitudes through 255, including wide
 dividends; larger divisors use software division.
 Matching scalar `/` and `%` expressions now share a division when control flow
@@ -651,16 +631,10 @@ in incoming X/A across the sign test and conditional store, without a frame.
 See [guarded-update selection](technical/guarded-updates.md) for eligibility, fallback
 rules and the measured `adjust_quantity` assembly.
 
-The [historical sample comparison](technical/all-sample-comparison.md) records
-measurements for original and separate-file forms, including explicit stop
-points for the idle and prompt examples.
-
 
 General arithmetic-region selection, typed byte bounds, private-value cleanup
 and faster mixed-width multiplication/word division are documented in
-[arithmetic regions](technical/arithmetic-regions.md). The
-[before/after comparison](technical/arithmetic-regions-comparison.md) covers PI,
-Dhrystone and all eight benchmark samples in FastROM and SlowROM with unchanged C.
+[arithmetic regions](technical/arithmetic-regions.md).
 
 The four cumulative BouncingSprites milestones
 record scalar/conditional regions, phase recurrences, dual scaled indices, indexed
@@ -710,13 +684,6 @@ retaining logical ownership, and removes unused-result and wide-load setup.
 BouncingSprites saves 2,545.82 FastROM / 3,028.24 SlowROM master clocks per update,
 135 linked code bytes and 22 main-frame bytes across the three items.
 
-The [post-optimization sample benchmark](technical/post-optimization-comparison.md)
-rebuilds all samples, verifies two historical baselines, and includes the first
-full Whetstone runs with both math modes, ROM speeds and VBCC. It records
-per-program master clocks/code sizes and the explicit VBCC NMI adaptation.
-
-[General sprite-flicker-driven optimizations](technical/sprite-flicker-optimizations.md)
-add native power-of-two division/remainder and word shifts, structured byte
-regions, safe loop fusion, copy widening and shared discarded-update selection.
-With unchanged Dragon C, repeated FastROM measurements reduce the mixed full
-pool from 52.86% to 17.62% of a frame and all-hidden stress from 105.26% to 35.84%.
+Recent codegen optimizations add native power-of-two division/remainder and
+word shifts, structured byte regions, safe loop fusion, copy widening and
+shared discarded-update selection.

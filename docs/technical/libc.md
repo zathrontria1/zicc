@@ -101,7 +101,7 @@ the interrupted CPU state. Source-level C handlers still obey the compiler's
   including discarded bytes after truncation, participates in the count.
 - `runtime/ieee32/` supplies floating arithmetic and decimal/hexadecimal parsing
   and formatting. Assembly entries are used by normal builds; C implementations
-  remain references. See [decimal assembly ports](decimal-assembly-ports.md).
+  remain references.
 - `runtime/clock.s` supplies the frame counter and snapshot read;
   `runtime/clock_rate.s` supplies cached region detection. Separate archive members
   avoid linking a counter/NMI wrapper for a rate-only query. See

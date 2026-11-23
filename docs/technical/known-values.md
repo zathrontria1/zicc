@@ -8,10 +8,8 @@ this work.
 Implemented in the isolated homebrew-samples checkout after
 [X/Y loop index retention](loop-index-retention.md). The frozen executable and
 accepted ROMs from that milestone are this comparison's baseline. The compiler
-change is general; sample sources and assets are unchanged. All changes remain
-uncommitted at the time of measurement. Initial validation used focused checks;
-the subsequent [full verification](homebrew-optimization-verification.md) covers
-this implementation.
+change is general; sample sources and assets are unchanged. Initial validation
+used focused checks followed by a full verification run.
 
 ## Implementation
 

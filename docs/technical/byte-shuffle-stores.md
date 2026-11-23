@@ -118,10 +118,7 @@ Two new registered compiler parts pass:
   inputs, wrapping, volatile RAM and MMIO. Modes: selected, disabled, no-line-pass,
   no-retention and no-byte-shuffles. An MSVC host reference also passes.
 
-The previous milestone was committed after its full-run passes plus the isolated
-scratch-expectation follow-up described in
-[homebrew-optimization-verification.md](homebrew-optimization-verification.md).
-The full check above also passes that updated interrupt contract.
+The full check above also passes the updated interrupt scratch contract.
 
 ## Evidence and reproduction
 

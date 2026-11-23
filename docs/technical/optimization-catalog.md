@@ -121,12 +121,12 @@ potentially wrapping C loop finite.
 | --- | --- | --- |
 | Direct named-array/field ALU and memory operands | [indexed_operands.inc](../../src/codegen/indexed_operands.inc) | [direct indexing](direct-indexed-operands.md); indexed-operands part |
 | Shared element/address calculations | [shared_elements.inc](../../src/codegen/shared_elements.inc), [body_opt.inc](../../src/codegen/body_opt.inc) | [shared elements](shared-element-addresses.md), [address CSE](structured-codegen.md); shared-elements suite |
-| Named-ROM, fixed-address and far indexed transfers | [far.inc](../../src/codegen/far.inc) | [far byte loads](indexed-far-byte-loads.md), [costs](far-pointer-costs.md); far-pointer-costs/bank-pointers parts |
+| Named-ROM, fixed-address and far indexed transfers | [far.inc](../../src/codegen/far.inc) | far-pointer-costs/bank-pointers parts |
 | DP pointers and bank-zero fixed accesses | [dpage_access.inc](../../src/codegen/dpage_access.inc), [codegen.inc](../../src/codegen/codegen.inc) | [DP pointers](dpage-pointer-access.md), [machine/storage rules](operations.md#machine-and-storage); dpage-access/indexed-dpage checks |
 | Small wrapping near offsets | [codegen.inc](../../src/codegen/codegen.inc) | [structured codegen](structured-codegen.md); body-codegen part |
-| Direct scalar updates and pure-source stores | [codegen.inc](../../src/codegen/codegen.inc) | [home updates](scalar-home-updates.md), [destination scheduling](aggregate-results.md); scalar-homes suite |
+| Direct scalar updates and pure-source stores | [codegen.inc](../../src/codegen/codegen.inc) | [home updates](scalar-home-updates.md); scalar-homes suite |
 | Neighboring RAM stores and byte regions | [store_fusion.inc](../../src/codegen/store_fusion.inc), [byte_regions.inc](../../src/codegen/byte_regions.inc) | [store fusion](byte-shuffle-stores.md), byte-index regions; store-fusion/value-placement parts |
-| Aggregate transfer selection and discarded aggregate results | [aggregate_copy.inc](../../src/codegen/aggregate_copy.inc) | [aggregate results](aggregate-results.md), [copy contracts](operations.md#structure-and-union-assignment); structs/members suites |
+| Aggregate transfer selection and discarded aggregate results | [aggregate_copy.inc](../../src/codegen/aggregate_copy.inc) | [copy contracts](operations.md#structure-and-union-assignment); structs/members suites |
 | Literal strcpy | [aggregate_copy.inc](../../src/codegen/aggregate_copy.inc) | [literal copies](literal-copies.md); literal-copies part |
 | Scalar return/store leaves and stack-relative leaves | [scalar_values.inc](../../src/codegen/scalar_values.inc), [word_expr.inc](../../src/codegen/word_expr.inc), [wide.inc](../../src/codegen/wide.inc) | [computed stores](computed-stores.md), [scalar leaves](scalar-values.md); scalar-values/stack-frames parts |
 | Guarded field-update leaf | [guarded_updates.inc](../../src/codegen/guarded_updates.inc) | [guarded updates](guarded-updates.md); frames suite |

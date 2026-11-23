@@ -88,7 +88,7 @@ Raw manifests, commands, emitted assembly, ROM/debug companions, per-function pr
 python tests/check-frames.py --compiler build/zicc.exe --output build/frame-check --expect-guards
 ```
 
-The initial frame changes reduced return and recursive entry overhead. The normal [basic sample report](basic-sample-comparison.md) and [calculator report](comparison.md) now include the accumulator follow-up below.
+The initial frame changes reduced return and recursive entry overhead.
 
 ## Accumulator reuse follow-up, 2026-11-06
 

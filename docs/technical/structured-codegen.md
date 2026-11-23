@@ -151,9 +151,7 @@ The interval is return from the first clock() through entry of the second,
 covering 3,000 iterations, normal NMI activity and refresh. Initial repeated
 NTSC measurements are 81,120,260 -> 62,747,618 master clocks in FastROM and
 94,182,582 -> 73,013,668 in SlowROM. PAL correctness and final screen pixels also
-pass. The [before/after sample report](structured-codegen-comparison.md) records
-the final compiler hash, repeated measurements, application/linked code sizes
-and throughput, including VBCC r2 and the zicc NTSC screenshot.
+pass.
 
 The Dhrystone measurement harness reuses the complete Dhrystone verifier,
 adds the exact clock boundary hooks, and retains assembly, objects, sources,

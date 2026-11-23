@@ -550,7 +550,7 @@ far pointer to reach data stored in ROM or in the other RAM bank.
 - The console displays 64×28 characters at 512×224 in noninterlaced Mode 5,
   using BG1/BG2, its font/palette and tilemap VRAM, DMA channel 0, VRAM upload
   registers and the PPU H/V counter latch. Coordinate game rendering with those
-  resources; see the [console layout](technical/console-hires-trial.md).
+  resources.
 - Linking the console initializes it after WRAM/DATA setup, clears RDNMI once and
   enables NMI before `main()`. User NMI state must be valid through zero/static
   initialization because the handler can run before `main()`.

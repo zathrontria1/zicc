@@ -325,7 +325,7 @@ powers of two for both 16-bit and 32-bit integers. Signed division needs
 extra work when the input can be negative. For example, C requires
 `-7 / 4 == -1` and `-7 % 4 == -3`. The signed path handles the sign before
 returning the result, including when the divisor is negative.
-[Implementation](../src/codegen/word_shifts.inc) and [sprite workload](technical/sprite-flicker-optimizations.md).
+[Implementation](../src/codegen/word_shifts.inc).
 
 ### Looking up a bounded expression
 
@@ -605,7 +605,6 @@ and #$00FF
 
 Conditions: recognized banked object/index and exact result width; general far
 arithmetic retains 24-bit carry and near-pointer wrap is not changed.
-[Details](technical/indexed-far-byte-loads.md), [far-pointer costs](technical/far-pointer-costs.md).
 
 ### Reading consecutive ROM words into a RAM buffer
 
@@ -661,7 +660,7 @@ rep #$20
 
 Conditions: a recognized constant address and transfer width. Volatile accesses
 keep their required width and order; this does not authorize combining MMIO
-writes. [Details](technical/far-pointer-costs.md).
+writes.
 
 ### Small near-pointer offsets
 
@@ -712,7 +711,6 @@ sta a:$0006,x
 
 Conditions: pure source, eligible near destination and an X-load path that
 preserves A; calls, volatile accesses and general address calculations fall back.
-[Details](technical/aggregate-results.md).
 
 ### Updating one packed bit-field
 
@@ -783,8 +781,8 @@ ply
 
 Conditions: copy size, address/bank/span and cost proofs. Runtime guards retain
 fallbacks; padding, overlapping-copy rules, observable results and volatile byte
-order remain correct. [Details](technical/aggregate-results.md),
-[copy policy](technical/operations.md#structure-and-union-assignment).
+order remain correct.
+[Copy policy](technical/operations.md#structure-and-union-assignment).
 
 ### Passing and returning small records
 
@@ -1775,8 +1773,7 @@ jsr .loword(_callee)        ; when the selected placement permits a near call
 
 Conditions: the linker proves the layout, bank capacity and resource constraints.
 This is a build-time optimization; application semantics and public bank rules
-are preserved. [Details](technical/rom-allocation.md),
-[bank/cost integration](technical/bank-cost-integration.md).
+are preserved. [Details](technical/rom-allocation.md).
 
 ## Shortcuts found from callers and final instructions
 

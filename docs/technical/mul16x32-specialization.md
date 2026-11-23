@@ -26,8 +26,7 @@ counted-reduction selector use the same width distinction.
 ## Matched catalog measurement
 
 The baseline is the counted reduction build with an eight-byte frame counter.
-The DP-zero counter trial is archived in `E:/archived-compiler/dp0-counter-trial` and is not
-part of this change. Source, startup, FastROM settings and linker layout match;
+Source, startup, FastROM settings and linker layout match;
 each compiler has two independent agreeing Mesen runs, return zero and balanced
 stacks. Time spans main entry through its return, excluding startup/exit cleanup.
 

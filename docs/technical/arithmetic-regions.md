@@ -2,8 +2,7 @@
 
 The compiler can skip arithmetic it can prove is unnecessary. For instance, when one unsigned 16-bit number is divided by another that is at least 256, the answer fits in eight bits. The divider only needs eight steps to find it.
 
-These changes implement the opportunities identified in the
-[PI assembly analysis](pi-assembly-analysis.md). They use typed expressions,
+These changes use typed expressions,
 control flow, liveness and helper effects; no function name, array name,
 benchmark dimensions or observed PI quotient participates in selection.
 Application C sources are unchanged.
@@ -104,10 +103,6 @@ reads, packed byte stores, chained additions/carry, countdown bounds and update
 forms, disabled-selection controls and split-bank/long-return builds.
 Existing arithmetic, pointer, ABI, frame, struct, inlining and decimal suites
 supply broader dependent coverage. The complete 200,873 arithmetic cases remain.
-
-See [before/after performance and sizes](arithmetic-regions-comparison.md) for
-PI, Dhrystone and the eight existing sample workloads, including separate-TU
-runtime controls and original whole-program examples.
 
 ## Generated PI shape and remaining limits
 
