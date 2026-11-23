@@ -10,15 +10,40 @@ static Expr address,object;
 static const char *prefix="_probe:\n    phy\n    tsc\n    sec\n    sbc #$0008\n    tcs\n    tay\n";
 static void setup(void)
 {
-    unsigned i;memset(&parser,0,sizeof parser);memset(&function,0,sizeof function);memset(&cg,0,sizeof cg);
-    cg.parser=&parser;cg.function=&function;cg.lp_volatile=1;cg.lp_value_result=cg.lp_word_result=1;
-    function.id=1;function.slots=function.frame=8;parser.symbol_count=6;
-    for(i=0;i<4;++i){parser.symbols[i].owner=1;parser.symbols[i].offset=i*2+1;parser.symbols[i].type=type(TY_INT,0);}
-    parser.symbols[1].type.is_volatile=1;
-    object.kind=EX_OBJECT;object.symbol=&parser.symbols[2];object.type=object.symbol->type;
-    address.kind=EX_ADDRESS;address.left=&object;escape.kind=ST_EXPR;escape.expression=&address;function.body=&escape;
-    strcpy(parser.symbols[4].asm_name,"outside");parser.symbols[4].type=type(TY_INT,0);
-    strcpy(parser.symbols[5].asm_name,"volatile_io");parser.symbols[5].type=volatile_object(type(TY_INT,0));
+    unsigned i;
+
+    memset(&parser, 0, sizeof parser);
+    memset(&function, 0, sizeof function);
+    memset(&cg, 0, sizeof cg);
+
+    cg.parser = &parser;
+    cg.function = &function;
+    lp_bind_from_codegen(1, 0, 1, 1); // volatile, no escaping frame address, word value result
+
+    function.id = 1;
+    function.slots = function.frame = 8;
+    parser.symbol_count = 6;
+
+    for (i = 0; i < 4; ++i) {
+        parser.symbols[i].owner = 1;
+        parser.symbols[i].offset = i * 2 + 1;
+        parser.symbols[i].type = type(TY_INT, 0);
+    }
+
+    parser.symbols[1].type.is_volatile = 1;
+    object.kind = EX_OBJECT;
+    object.symbol = &parser.symbols[2];
+    object.type = object.symbol->type;
+    address.kind = EX_ADDRESS;
+    address.left = &object;
+    escape.kind = ST_EXPR;
+    escape.expression = &address;
+    function.body = &escape;
+
+    strcpy(parser.symbols[4].asm_name, "outside");
+    parser.symbols[4].type = type(TY_INT, 0);
+    strcpy(parser.symbols[5].asm_name, "volatile_io");
+    parser.symbols[5].type = volatile_object(type(TY_INT, 0));
 }
 static void parse(LpUnit *u,const char *body)
 {

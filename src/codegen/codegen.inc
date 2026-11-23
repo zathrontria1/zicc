@@ -70,7 +70,6 @@ typedef struct {
     Symbol *dead_indices[32];unsigned dead_index_count;
     Symbol *omitted_parameters[2];unsigned omitted_parameter_count,register_homes,register_spills;
     int stack_leaf;unsigned stack_bias;
-    int lp_volatile,lp_frame_address,lp_word_result,lp_value_result;
     int loop_y_borrowed;
     Symbol *scaled_ring_indices[4];
     FixedWordRows *fixed_rows;
